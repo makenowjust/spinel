@@ -8240,6 +8240,13 @@ void emit_regex_section(Compiler *c, Buf *b) {
      needed when the program actually constructs a regex. */
   if (g_uses_regex)
     buf_puts(b, "  sp_re_set_error_handler(sp_re_default_error_handler);\n");
+  /* The out-of-int64 literals, built here rather than on first use: threads
+     run in parallel with no GVL, so a lazy store into a shared slot is a data
+     race. Emitted after the globals hook above is installed, so a collection
+     during the fill marks the slots already written. */
+  if (g_bigl_n)
+    buf_printf(b, "  for (int _i = 0; _i < %d; _i++) sp_bigl[_i] = sp_bigint_new_str(sp_bigl_s[_i], 10);\n",
+               g_bigl_n);
   buf_puts(b, "}\n\n");
 }
 
@@ -11083,13 +11090,7 @@ char *codegen_program(const NodeTable *nt) {
     buf_printf(&b, "static const char *const sp_bigl_s[%d] = {", g_bigl_n);
     for (int i = 0; i < g_bigl_n; i++)
       buf_printf(&b, "%s\"%s\"", i ? ", " : "", g_bigl_val[i]);
-    buf_puts(&b, "};\n");
-    /* A FUNCTION, not an inline `x ? x : (x = ...)`: the same literal can be
-       both operands of one call, and two such expressions in one argument
-       list are unsequenced accesses to the slot (-Wunsequenced). */
-    buf_puts(&b, "static sp_Bigint *sp_bigl_get(int i) {\n"
-                 "  if (!sp_bigl[i]) sp_bigl[i] = sp_bigint_new_str(sp_bigl_s[i], 10);\n"
-                 "  return sp_bigl[i];\n}\n\n");
+    buf_puts(&b, "};\n\n");
   }
   for (int i = 0; i < c->nconsts; i++) {
     LocalVar *lv = &c->consts[i];
@@ -11175,6 +11176,8 @@ char *codegen_program(const NodeTable *nt) {
        runtime's own sp_re_mark_globals (lib/spinel_rt.h), so a program with
        none of the globals above carries no marker and no startup hook. */
     if (g_has_dyn_syms) buf_puts(&mk, "  sp_mark_dyn_syms();\n");
+    /* The NULL test is for a collection triggered by the fill itself: the
+       slots past the one being built are still empty. */
     if (g_bigl_n)
       buf_printf(&mk, "  for (int _i = 0; _i < %d; _i++) if (sp_bigl[_i]) sp_gc_mark((void *)sp_bigl[_i]);\n",
                  g_bigl_n);
