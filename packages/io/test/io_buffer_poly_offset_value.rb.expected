@@ -7,3 +7,8 @@ Integer
 -5
 ArgumentError
 6000
+4294967295
+RangeError
+RangeError
+-2147483648
+RangeError

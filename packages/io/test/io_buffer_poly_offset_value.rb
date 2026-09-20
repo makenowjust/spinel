@@ -50,3 +50,14 @@ while i < 4
   i += 1
 end
 p sum
+
+# The type's width decides what fits, not how the value is represented: a
+# 32-bit build makes every value above 2**31-1 a Bignum, and 0xCAFEBABE is
+# an ordinary U32 there too. Out of the type's range is still out of range.
+buf.set_value(:U32, 20, 4294967295)
+p buf.get_value(:U32, 20)
+buf.set_value(:U32, 20, 4294967296) rescue p $!.class
+buf.set_value(:U32, 20, 2**100) rescue p $!.class
+buf.set_value(:S32, 20, -2147483648)
+p buf.get_value(:S32, 20)
+buf.set_value(:S32, 20, 2147483648) rescue p $!.class

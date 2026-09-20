@@ -201,9 +201,17 @@ static uint64_t iob_int_operand(int ty, sp_RbVal val) {
         sp_raise_cls("RangeError", sp_sprintf("bignum too small to convert into '%s'", cname));
       return (uint64_t)0 - mag;
     }
-    /* 32-bit and s64: a Bignum is out of range by definition (|v| >= 2^63
-       for any heap Bignum the program builds; smaller ones stay sp_int) --
-       except s64 accepting the negative bound. */
+    /* 32-bit: the TYPE's width decides, not how the value is represented.
+       sp_int is intptr_t, so where a pointer is 32 bits every value above
+       2**31-1 is already a Bignum -- and 0xCAFEBABE is an ordinary U32
+       (#4647). A 64-bit build reaches none of this: a Bignum that survives
+       normalization there has |v| > INT64_MAX and is out of range anyway. */
+    if (t->width == 4 && fits) {
+      uint64_t hi = t->sign ? (uint64_t)INT32_MAX : (uint64_t)UINT32_MAX;
+      if (!neg && mag <= hi) return mag;
+      if (neg && mag <= ((uint64_t)1 << 31)) return (uint64_t)0 - mag;
+    }
+    /* s64 is out of range by definition, except the negative bound. */
     if (t->width == 8 && t->sign) {
       if (fits && !neg && mag <= (uint64_t)INT64_MAX) return mag;
       if (fits && neg && mag <= (uint64_t)1 << 63) return (uint64_t)0 - mag;
