@@ -1014,8 +1014,9 @@ void emit_expr(Compiler *c, int id, Buf *b) {
     if (bigval) {
       /* An Integer is immutable, so one slot per distinct literal serves
          every use: the string was re-parsed and a Bignum re-allocated at
-         each one, every time the line ran (#4637). */
-      buf_printf(b, "sp_bigl_get(%d)", bigl_intern(bigval));
+         each one, every time the line ran (#4637). The slot is filled in
+         sp_tu_init, so reading it here is just a load. */
+      buf_printf(b, "sp_bigl[%d]", bigl_intern(bigval));
       return;
     }
     buf_printf(b, "%lldLL", nt_int(nt, id, "value", 0)); return;

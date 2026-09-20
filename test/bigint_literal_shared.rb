@@ -17,3 +17,7 @@ p [big, big, A].uniq.size
 p(-18446744073709551615)
 p 18446744073709551615.class
 3.times { p 0xDEADBEEF_DEADBEEF }
+# Threads run in parallel with no GVL, so the slot must already hold the value
+# when they start: a lazily filled one would be two threads writing it at once.
+ts = 4.times.map { Thread.new { 0xFFFFFFFF_00000000 + 1 } }
+p ts.map { |t| t.value }.uniq
