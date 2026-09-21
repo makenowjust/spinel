@@ -265,13 +265,24 @@ static void sp_fiber_fault_handler(int sig, siginfo_t *si, void *uctx) {
   (void)uctx;
   sp_Fiber *f = sp_fiber_current;
   char *a = si ? (char *)si->si_addr : NULL;
-  /* The thread's own stack ran past its end: the fault lands in the OS guard
-     just below it. Read as an ordinary segfault this killed the process where
-     CRuby raises SystemStackError and lets a rescue continue. The raise is
-     the generated TU's (it owns the exception stack). */
-  if (sp_stack_overflow_raise_fn && a && sp_thread_stack_lo &&
-      a < sp_thread_stack_lo && a >= sp_thread_stack_lo - (ptrdiff_t)(1 << 20) &&
-      (!f || f == &sp_fiber_root || !f->stack)) {
+  /* A stack ran past its end: the fault lands in the guard just below it.
+     Read as an ordinary segfault this killed the process where CRuby raises
+     SystemStackError and lets a rescue continue. The raise is the generated
+     TU's (it owns the exception stack).
+
+     Only the thread's OWN stack raises here. A fiber -- a green thread's
+     body, a Fiber, an Enumerator -- runs on a stack this file mmapped, and
+     raising off its guard reaches a handler armed inside that body, but it
+     leaves the fiber's own bookkeeping mid-flight: a program that overflows
+     on more than one fiber then answers every rescue correctly and hangs at
+     exit with a worker the scheduler still believes is running. That wants
+     the fiber machinery told the body is finishing, not just a longjmp, and
+     it is a follow-up. The report below still names which stack ran out. */
+  int on_fiber = f && f != &sp_fiber_root && f->stack;
+  int fiber_hit = on_fiber && a && a >= f->stack && a < f->stack + sp_fiber_guard();
+  int thread_hit = !on_fiber && a && sp_thread_stack_lo &&
+                   a < sp_thread_stack_lo && a >= sp_thread_stack_lo - (ptrdiff_t)(1 << 20);
+  if (sp_stack_overflow_raise_fn && thread_hit) {
     /* unblock the signal first: this raise does not return, and the mask it
        was entered with would otherwise stay blocked in the frame we jump to
        (on Linux longjmp does not restore it) */
@@ -297,7 +308,7 @@ static void sp_fiber_fault_handler(int sig, siginfo_t *si, void *uctx) {
     sp_fiber_fault_write("stack level too deep (SystemStackError)\n");
     _exit(1);
   }
-  if (f && f != &sp_fiber_root && f->stack && a >= f->stack && a < f->stack + sp_fiber_guard()) {
+  if (fiber_hit) {
     sp_fiber_fault_write("spinel: fiber stack overflow: a green thread, Fiber or Enumerator body ran past the ");
     sp_fiber_fault_write_num(f->stack_size / 1024);
     sp_fiber_fault_write(" KB C stack the fiber runs on (a deep call chain, a large local, or an unoptimised build "

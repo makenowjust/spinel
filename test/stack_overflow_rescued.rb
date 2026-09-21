@@ -56,8 +56,10 @@ end
 def countdown(n) = n <= 0 ? 0 : 1 + countdown(n - 1)
 p countdown(10_000)
 
+# 12! and not 20!: the point is a recursion that returns a value, and 20! does
+# not fit a 32-bit sp_int, which took the `gcc -m32` lane down.
 def fac(n) = n <= 1 ? 1 : n * fac(n - 1)
-p fac(20)
+p fac(12)
 
 # ...and a deep recursion that is rescued still leaves the stack usable for the
 # next deep one, rather than each rescue costing a little of it
