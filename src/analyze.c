@@ -26385,6 +26385,23 @@ int nullable_int_value(Compiler *c, int v) {
     /* a missed element read is the sentinel in an int slot; only boxing is
        affected, typed reads keep their inline arms */
     if (elem_miss_call(c, v)) return 1;
+    /* `h.fetch(k, default)` and `h.fetch(k) { default }` answer the default on
+       a miss, so the value can be nil as the default can: `fetch(k, nil)` on an
+       Integer-valued Hash put the sentinel in a slot read as a plain Integer,
+       and it went on as -2**63 */
+    {
+      const char *fn = nt_str(nt, v, "name");
+      int fr = nt_ref(nt, v, "receiver");
+      if (fn && fr >= 0 && sp_streq(fn, "fetch")) {
+        int fa = nt_ref(nt, v, "arguments"), fan = 0;
+        const int *fav = fa >= 0 ? nt_arr(nt, fa, "arguments", &fan) : NULL;
+        if (fan == 2 && fav && nullable_int_value(c, fav[1])) return 1;
+        if (fan == 1 && nt_ref(nt, v, "block") >= 0) {
+          int ft = call_block_tail(c, v);
+          if (ft >= 0 && nullable_int_value(c, ft)) return 1;
+        }
+      }
+    }
     /* a method whose --rbs signature pins `Integer?`, or whose own return
        expression can be the sentinel: either way its nil is the sentinel and a
        caller that boxes the value has to answer nil. Resolved the way emission

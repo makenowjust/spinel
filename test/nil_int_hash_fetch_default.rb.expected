@@ -1,0 +1,10 @@
+miss: nil
+miss nil?: true
+miss * : TypeError: no implicit conversion from nil to integer
+miss first: TypeError: no implicit conversion from nil to integer
+str key miss * : TypeError: no implicit conversion from nil to integer
+block miss * : TypeError: no implicit conversion from nil to integer
+hit: 2
+hit * : "abab"
+only nil param: TypeError: no implicit conversion from nil to integer
+splat: TypeError: no implicit conversion from nil to integer
