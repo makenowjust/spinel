@@ -27709,6 +27709,25 @@ static void mark_array_or_nil_slots(Compiler *c) {
 /* Can one of the values a block site passes be an Integer's or a Float's
    nil? Asked of every site before its block is typed again below, so the
    common program -- no site passes one -- pays for this walk alone. */
+/* Under --int-overflow=promote an Integer variable that can hold nil is
+   widened to the box (an ivar, a local, a parameter, a global, a class
+   variable): such a read handed to a block parameter, which keeps its
+   Integer type, can be nil. */
+int promote_boxed_var_read(Compiler *c, int v) {
+  if (v < 0) return 0;
+  switch (nt_kind(c->nt, v)) {
+  case NK_InstanceVariableReadNode: case NK_GlobalVariableReadNode: case NK_ClassVariableReadNode:
+    return c->ntype[v] == TY_POLY;
+  case NK_LocalVariableReadNode: {
+    const char *nm = nt_str(c->nt, v, "name");
+    Scope *s = nm ? comp_scope_of(c, v) : NULL;
+    LocalVar *lv = s ? scope_local(s, nm) : NULL;
+    return (lv && lv->type == TY_POLY) || c->ntype[v] == TY_POLY;
+  }
+  default: return 0;
+  }
+}
+
 static int site_args_may_be_nil(Compiler *c, const int *av, int an) {
   const NodeTable *nt = c->nt;
   for (int k = 0; k < an; k++) {
@@ -27722,7 +27741,7 @@ static int site_args_may_be_nil(Compiler *c, const int *av, int an) {
     TyKind t = v >= 0 ? c->ntype[v] : TY_UNKNOWN;
     if ((t == TY_INT || t == TY_FLOAT) && nullable_int_value(c, v)) return 1;
     /* under promote a boxed ivar (an Integer member) can hand its nil too */
-    if (t == TY_POLY && g_promote_mode && nt_kind(nt, v) == NK_InstanceVariableReadNode && nullable_int_value(c, v)) return 1;
+    if (g_promote_mode && promote_boxed_var_read(c, v)) return 1;
   }
   return 0;
 }
