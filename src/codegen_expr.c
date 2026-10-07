@@ -4349,9 +4349,10 @@ static void emit_expr_node(Compiler *c, int id, Buf *b) {
     TyKind rt = repr_of(c, id).as_ty;
     if (rt == TY_UNKNOWN || rt == TY_VOID || rt == TY_NIL) rt = TY_POLY;
     int cr = ++g_tmp;
+    int ro = cond_res_oint(c, id, rt);
     emit_indent(g_pre, g_indent);
-    emit_ctype(c, rt, g_pre);
-    buf_printf(g_pre, " _t%d = %s;\n", cr, rt == TY_RANGE ? "(sp_Range){0}" : default_value_from_compiler(c, rt));
+    emit_res_ctype(c, rt, ro, g_pre);
+    buf_printf(g_pre, " _t%d = %s;\n", cr, rt == TY_RANGE ? "(sp_Range){0}" : res_zero(c, rt, ro));
     if (needs_root(rt)) { emit_indent(g_pre, g_indent); emit_gc_root_tmp(c, rt, cr, g_pre); buf_puts(g_pre, "\n"); }
     emit_case_match(c, id, g_pre, g_indent, 0, cr);
     buf_printf(b, "_t%d", cr);

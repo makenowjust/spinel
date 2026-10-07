@@ -4844,12 +4844,16 @@ static int emit_poly_builtin_method(Compiler *c, int id, Buf *b) {
       return 1;
     }
     if (ps_int_fn) {
-      int tv = ++g_tmp;
+      /* the accessor answers the oint (nil when the process did not exit /
+         was not signaled); unwrapped where the call answers plain */
+      int tv = ++g_tmp, io = node_is_oint(c, id);
+      buf_puts(b, io ? "" : "sp_oint_arg(");
       buf_printf(b, "({ sp_RbVal _t%d = ", tv); emit_expr(c, recv, b);
       buf_printf(b, "; _t%d.tag == SP_TAG_OBJ && _t%d.cls_id == SP_BUILTIN_PROCESS_STATUS"
                     " ? %s(((sp_ProcessStatus *)_t%d.v.p)->status)"
-                    " : (sp_int)(sp_raise_nomethod(sp_nomethod_msg(\"%s\", _t%d)), 0); })",
+                    " : (sp_raise_nomethod(sp_nomethod_msg(\"%s\", _t%d)), sp_oint_nil()); })",
                  tv, tv, ps_int_fn, tv, name, tv);
+      buf_puts(b, io ? "" : ")");
       return 1;
     }
     if (ps_pid_fn) {
@@ -8012,15 +8016,23 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
          arm (e.g. an empty `{}` that boxed as PolyPolyHash) still yields the
          default rather than a bare default_value_from_compiler(c, ) (an empty string). */
       size_t pd_from = b->len;   /* the region pd_hoist may move out of line */
+      /* an Integer / Float answer that can be nil (node_is_oint) is held as
+         the oint, as the zero-argument seed does; the arms assign that form */
+      int trn_o = oint_kind(ret) && node_is_oint(c, id);
       if (!is_setter_val) {
-        emit_ctype(c, is_scalar_ret(ret) ? ret : TY_INT, b);
+        if (trn_o) buf_puts(b, oint_ctype(ret));
+        else emit_ctype(c, is_scalar_ret(ret) ? ret : TY_INT, b);
         buf_printf(b, " _t%d = ", tr);
         if (is_fetch && argc == 2) {
           char dn[40]; snprintf(dn, sizeof dn, "_t%d", atmp[1]);
-          if (ret == TY_POLY) emit_boxed_text(c, repr_of(c, argv[1]).as_ty, dn, b);
+          TyKind dt = repr_of(c, argv[1]).as_ty;
+          if (ret == TY_POLY) emit_boxed_text(c, dt, dn, b);
+          else if (trn_o && dt == TY_NIL) buf_puts(b, oint_nil(ret));
+          else if (trn_o && dt == TY_POLY) buf_printf(b, "%s(%s)", oint_unbox(ret), dn);
+          else if (trn_o && !node_is_oint(c, argv[1])) buf_printf(b, "%s(%s)", oint_of(ret), dn);
           else buf_puts(b, dn);
         }
-        else buf_puts(b, is_scalar_ret(ret) ? default_value_from_compiler(c, ret) : "0");
+        else buf_puts(b, trn_o ? oint_nil(ret) : is_scalar_ret(ret) ? default_value_from_compiler(c, ret) : "0");
         buf_puts(b, "; ");
       }
       /* The builtin index/bit-ref arms use the index as a raw sp_int; unbox it
@@ -8099,7 +8111,9 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
         for (int e = 0; e < kwn; e++) { pid[n] = kwtmp[e]; pty[n++] = kwty[e]; }
         if (stk >= 0) { pid[n] = stk; pty[n++] = TY_POLY_ARRAY; }
         if (blk_tmp2 >= 0) { pid[n] = blk_tmp2; pty[n++] = TY_PROC; }   /* the block's proc */
+        g_pd_ret_ctype = trn_o && !is_setter_val ? oint_ctype(ret) : NULL;
         pd_done = pd_hoist(c, id, name, b, pd_from, tr, is_scalar_ret(ret) ? ret : TY_INT, pid, pty, n);
+        g_pd_ret_ctype = NULL;
         free(pid); free(pty);
       }
       if (!pd_done) buf_puts(b, " }");

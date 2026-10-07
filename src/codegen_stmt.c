@@ -4294,9 +4294,28 @@ int emit_pm_cond(Compiler *c, int pat, int t, TyKind pt, Buf *b) {
    is captured into a local buffer first so any prelude it emits (e.g. an array
    literal's construction) lands in g_pre ahead of the assignment, not spliced
    into it. */
+/* A pattern binding of one array element `gx` (an `sp_<k>Array_get(..)`
+   text) into the local `plv`: a slot that holds its nil takes the element
+   with its nil (the `_oget` form, or the oint unbox of a poly element), a
+   poly slot takes it boxed. */
+static void emit_boxed_src(Compiler *c, TyKind t, const char *src, Buf *b);
+static void emit_pm_elem_bind(Compiler *c, LocalVar *plv, const char *k, TyKind elem,
+                              const char *gx, Buf *b) {
+  const char *g = strstr(gx, "Array_get(");
+  if (plv && oint_kind(plv->type) && slot_is_oint(plv)) {
+    if (sp_streq(k, "Poly") || !g) buf_printf(b, "%s(%s)", oint_unbox(plv->type), gx);
+    else buf_printf(b, "%.*sArray_oget(%s", (int)(g - gx), gx, g + 10);
+  }
+  else if (plv && plv->type == TY_POLY && !sp_streq(k, "Poly")) emit_boxed_src(c, elem, gx, b);
+  else buf_puts(b, gx);
+}
+
+/* the case/in value being emitted answers an oint (cond_res_oint) */
+static int g_pm_res_oint = 0;
 static void emit_pm_body_value(Compiler *c, int stmts, TyKind rt, int cr,
                                Buf *b, int indent) {
   const NodeTable *nt = c->nt;
+  int res_o = g_pm_res_oint && oint_kind(rt);
   int n = 0;
   const int *bb = stmts >= 0 ? nt_arr(nt, stmts, "body", &n) : NULL;
   for (int k = 0; k < n - 1; k++) emit_stmt(c, bb[k], b, indent);
@@ -4304,7 +4323,7 @@ static void emit_pm_body_value(Compiler *c, int stmts, TyKind rt, int cr,
      it is for a poly result and for a case whose only value is nil */
   if (n <= 0) {
     emit_indent(b, indent);
-    buf_printf(b, "_t%d = %s;\n", cr, rt == TY_POLY || rt == TY_NIL ? "sp_box_nil()" : default_value_from_compiler(c, rt));
+    buf_printf(b, "_t%d = %s;\n", cr, rt == TY_POLY || rt == TY_NIL ? "sp_box_nil()" : res_zero(c, rt, res_o));
     return;
   }
   int last = bb[n - 1];
@@ -4347,12 +4366,13 @@ static void emit_pm_body_value(Compiler *c, int stmts, TyKind rt, int cr,
        its side effect, then default the result, nil boxed as above */
     emit_stmt(c, last, b, indent);
     emit_indent(b, indent);
-    buf_printf(b, "_t%d = %s;\n", cr, rt == TY_POLY || rt == TY_NIL ? "sp_box_nil()" : default_value_from_compiler(c, rt));
+    buf_printf(b, "_t%d = %s;\n", cr, rt == TY_POLY || rt == TY_NIL ? "sp_box_nil()" : res_zero(c, rt, res_o));
     return;
   }
   Buf le; memset(&le, 0, sizeof le);
   int saved_gi = g_indent; g_indent = indent;
   if (rt == TY_POLY && lt != TY_POLY) emit_boxed(c, last, &le);
+  else if (res_o) emit_oint_expr(c, last, rt, &le);
   else emit_expr(c, last, &le);
   g_indent = saved_gi;
   emit_indent(b, indent);
@@ -4669,13 +4689,28 @@ static void emit_pattern_bind(Compiler *c, int id, int subj, const char *lnm, Ty
   emit_indent(b, indent);
   buf_printf(b, "lv_%s = ", rename_local(lnm));
   LocalVar *plv = scope_local(comp_scope_of(c, id), lnm);
-  if (plv && plv->type == TY_POLY && pt != TY_POLY && pt != TY_UNKNOWN) emit_boxed_tmp(c, pt, t, b);
+  /* a local that holds its nil takes the subject with its nil: the
+     subject's own oint, or the value lifted / unboxed */
+  if (plv && oint_kind(plv->type) && slot_is_oint(plv) && pt != TY_UNKNOWN) {
+    if (t == g_pm_sentinel_t) buf_printf(b, "_o%d", t);
+    else if (pt == TY_POLY) buf_printf(b, "%s(_t%d)", oint_unbox(plv->type), t);
+    else if (pt == plv->type) buf_printf(b, "%s(_t%d)", oint_of(pt), t);
+    else buf_printf(b, "_t%d", t);
+  }
+  else if (plv && plv->type == TY_POLY && pt != TY_POLY && pt != TY_UNKNOWN) emit_boxed_tmp(c, pt, t, b);
   else if (plv && pt == TY_STRING && repr_of_slot(c, plv).handle) emit_pattern_bind_handle(c, subj, t, b);
   else buf_printf(b, "_t%d", t);
   buf_puts(b, ";\n");
 }
 
+static void emit_case_match_in(Compiler *c, int id, Buf *b, int indent, int tail, int value_cr);
 void emit_case_match(Compiler *c, int id, Buf *b, int indent, int tail, int value_cr) {
+  int sro = g_pm_res_oint;
+  g_pm_res_oint = value_cr >= 0 && cond_res_oint(c, id, repr_of(c, id).as_ty);
+  emit_case_match_in(c, id, b, indent, tail, value_cr);
+  g_pm_res_oint = sro;
+}
+static void emit_case_match_in(Compiler *c, int id, Buf *b, int indent, int tail, int value_cr) {
   const NodeTable *nt = c->nt;
   int pred = nt_ref(nt, id, "predicate");
   int cn = 0;
@@ -4843,7 +4878,10 @@ void emit_case_match(Compiler *c, int id, Buf *b, int indent, int tail, int valu
           else     snprintf(fb, sizeof fb, "((sp_%s *)_t%d)->iv_%s", sc->c_name, t, iv_c(sc->ivars[i] + 1));
           emit_indent(b, indent + 1 + (live_subject >= 0));
           buf_printf(b, "sp_PolyArray_push(_t%d, ", arm_t);
-          emit_boxed_text(c, sc->ivar_types[i], fb, b);
+          /* a member with a nil bit boxes as nil when the bit is set */
+          char opfx[300];
+          if (isv) snprintf(opfx, sizeof opfx, "(_t%d).", t); else snprintf(opfx, sizeof opfx, "((sp_%s *)_t%d)->", sc->c_name, t);
+          emit_member_boxed_text(c, sc, i, opfx, fb, b);
           buf_puts(b, ");\n");
         }
         if (live_subject >= 0) { emit_indent(b, indent + 1); buf_puts(b, "}\n"); }
@@ -5380,8 +5418,7 @@ void emit_case_match(Compiler *c, int id, Buf *b, int indent, int tail, int valu
         buf_printf(b, "lv_%s = ", rename_local(lnm));
         LocalVar *plv = scope_local(comp_scope_of(c, id), lnm);
         char gx[64]; snprintf(gx, sizeof gx, "sp_%sArray_get(_t%d, %dLL)", k, arm_t, i);
-        if (plv && plv->type == TY_POLY && !sp_streq(k, "Poly")) emit_boxed_src(c, ty_array_elem(arr_t), gx, b);
-        else buf_puts(b, gx);
+        emit_pm_elem_bind(c, plv, k, ty_array_elem(arr_t), gx, b);
         buf_puts(b, ";\n");
       }
       if (rest_nid >= 0 && nt_type(nt, rest_nid) &&
@@ -5414,8 +5451,7 @@ void emit_case_match(Compiler *c, int id, Buf *b, int indent, int tail, int valu
         buf_printf(b, "lv_%s = ", rename_local(lnm));
         LocalVar *plv = scope_local(comp_scope_of(c, id), lnm);
         char gx[80]; snprintf(gx, sizeof gx, "sp_%sArray_get(_t%d, _t%d->len - %lldLL)", k, arm_t, arm_t, (long long)(npost - j));
-        if (plv && plv->type == TY_POLY && !sp_streq(k, "Poly")) emit_boxed_src(c, ty_array_elem(arr_t), gx, b);
-        else buf_puts(b, gx);
+        emit_pm_elem_bind(c, plv, k, ty_array_elem(arr_t), gx, b);
         buf_puts(b, ";\n");
       }
       }
@@ -5450,8 +5486,7 @@ void emit_case_match(Compiler *c, int id, Buf *b, int indent, int tail, int valu
           emit_indent(b, body_indent);
           buf_printf(b, "lv_%s = ", rename_local(lnm));
           LocalVar *plv = scope_local(comp_scope_of(c, id), lnm);
-          if (plv && plv->type == TY_POLY && !sp_streq(find_k, "Poly")) emit_boxed_src(c, ty_array_elem(pt), gx, b);
-          else buf_puts(b, gx);
+          emit_pm_elem_bind(c, plv, find_k, ty_array_elem(pt), gx, b);
           buf_puts(b, ";\n");
         }
         /* a nested container window element (`[*, [a, b], *]`, `[*, {k:}, *]`)

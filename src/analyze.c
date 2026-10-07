@@ -27270,6 +27270,12 @@ void nn_inference_round(Compiler *c) {
 }
 
 extern int yield_block_tails_next;   /* analyze_util.c */
+/* a String operand that is never nil: a literal */
+static int nn_str_literal(const NodeTable *nt, int n) {
+  NodeKind k = n >= 0 ? nt_kind(nt, n) : NK_NONE;
+  return k == NK_StringNode || k == NK_InterpolatedStringNode;
+}
+
 int nullable_int_value(Compiler *c, int v) {
   const NodeTable *nt = c->nt;
   if (v < 0) return 0;
@@ -27398,9 +27404,15 @@ int nullable_int_value(Compiler *c, int v) {
       const int *cav = ca >= 0 ? nt_arr(nt, ca, "arguments", &can) : NULL;
       if (cr >= 0 && cav && can == 1) {
         TyKind lt = infer_type(c, cr), at = infer_type(c, cav[0]);
+        /* a Float side can be NaN, which compares to nothing; a String
+           side other than a literal can be the nil a String slot holds */
         int num_l = lt == TY_INT || lt == TY_FLOAT, num_r = at == TY_INT || at == TY_FLOAT;
-        if ((num_l && num_r) || (lt == TY_STRING && at == TY_STRING) || (lt == TY_SYMBOL && at == TY_SYMBOL) ||
-            (lt == TY_TIME && at == TY_TIME)) return 0;
+        int flo = lt == TY_FLOAT || at == TY_FLOAT;
+        int str_lit = nn_str_literal(nt, cr) && nn_str_literal(nt, cav[0]);
+        /* ... and a nil number on either side answers nil */
+        if (num_l && num_r && (nullable_int_value(c, cr) || nullable_int_value(c, cav[0]))) return 1;
+        if ((num_l && num_r && !flo) || (lt == TY_STRING && at == TY_STRING && str_lit) ||
+            (lt == TY_SYMBOL && at == TY_SYMBOL) || (lt == TY_TIME && at == TY_TIME)) return 0;
       }
       return 1;
     }
@@ -28492,6 +28504,8 @@ static void mark_nullable_int_locals(Compiler *c) {
       Scope *s = &c->scopes[mi];
       if (s->ret_nullable_int || (s->ret != TY_INT && s->ret != TY_FLOAT)) continue;
       int tail = scope_body_last(c, mi);
+      /* a body with rescue / else / ensure clauses: any arm's value */
+      if (tail < 0 && s->body >= 0 && nt_kind(nt, s->body) == NK_BeginNode) tail = s->body;
       if (tail >= 0 && nullable_int_value(c, tail)) { s->ret_nullable_int = 1; changed = 1; }
     }
     /* an explicit `return e` exits the method just as its tail does. Blocks
