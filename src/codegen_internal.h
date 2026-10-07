@@ -2048,6 +2048,7 @@ void emit_ivar_nil_store(Compiler *c, int id, TyKind t, Buf *b);
 /* the backstop: a nil into a plain Integer / Float slot is refused at compile time */
 __attribute__((noreturn)) void refuse_nil_store(Compiler *c, int node, TyKind t, const char *where);
 int node_may_be_nil(Compiler *c, int node);
+int call_names_only_void_methods(Compiler *c, int node);   /* codegen_stmt.c */
 /* node as a plain scalar through its oint form: `sp_oint_val(<oint>, op)`
    when the node may be nil (cmp_operand_may_be_nil), else emit_expr */
 void emit_scalar_operand_op(Compiler *c, int node, const char *op, Buf *b);

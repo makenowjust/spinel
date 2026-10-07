@@ -5120,12 +5120,15 @@ int node_is_oint(Compiler *c, int node) {
     if (r >= 0 && (nt_kind(nt, r) == NK_ConstantReadNode || nt_kind(nt, r) == NK_ConstantPathNode)) return 0;
     /* the runtime functions that answer an sp_oint (RUNTIME-API.md) */
     if ((sp_streq(nm, "bsearch") || sp_streq(nm, "bsearch_index")) && blk >= 0) return 1;
-    if (sp_streq(nm, "nonzero?") || sp_streq(nm, "infinite?") || sp_streq(nm, "getbyte")) return 1;
+    if ((sp_streq(nm, "nonzero?") && oint_kind(rt)) || (sp_streq(nm, "infinite?") && rt == TY_FLOAT)) return 1;
+    if (rt == TY_STRING && (sp_streq(nm, "getbyte") || sp_streq(nm, "index") || sp_streq(nm, "rindex") ||
+                            sp_streq(nm, "byteindex") || sp_streq(nm, "byterindex"))) return 1;
     if (sp_streq(nm, "exitstatus") || sp_streq(nm, "termsig") ||
         sp_streq(nm, "world_readable?") || sp_streq(nm, "world_writable?")) return 1;
-    if (sp_streq(nm, "index") || sp_streq(nm, "rindex") || sp_streq(nm, "delete_at") ||
-        sp_streq(nm, "byteindex") || sp_streq(nm, "byterindex") ||
-        sp_streq(nm, "pop") || sp_streq(nm, "shift") || sp_streq(nm, "delete")) return 1;
+    if (r >= 0 && ty_is_array(rt) &&
+        (sp_streq(nm, "index") || sp_streq(nm, "rindex") || sp_streq(nm, "delete_at") || sp_streq(nm, "delete") ||
+         ((sp_streq(nm, "pop") || sp_streq(nm, "shift")) && an2 == 0))) return 1;
+    if (r >= 0 && ty_is_hash(rt) && sp_streq(nm, "delete")) return 1;
     if (is_range_bound_reader(nm) && r >= 0 &&
         (rt == TY_MATCHDATA || rt == TY_RANGE || rt == TY_FLOAT_RANGE)) return 1;
     if (r >= 0 && (rt == TY_INT_ARRAY || rt == TY_FLOAT_ARRAY)) {
@@ -5351,8 +5354,10 @@ void emit_oint_expr(Compiler *c, int node, TyKind t, Buf *b) {
   if (k == NK_NilNode) { buf_puts(b, oint_nil(t)); return; }
   Repr r = repr_of(c, node);
   TyKind vt = r.as_ty;
-  /* a value with no C type of its own: evaluated for its effect, then nil */
-  if (vt == TY_NIL || vt == TY_VOID) {
+  /* a value with no C type of its own (a call on a method that answers
+     nothing included): evaluated for its effect, then nil */
+  if (vt == TY_NIL || vt == TY_VOID ||
+      (vt == TY_UNKNOWN && k == NK_CallNode && call_names_only_void_methods(c, node))) {
     buf_puts(b, "((void)("); emit_expr(c, node, b); buf_printf(b, "), %s)", oint_nil(t));
     return;
   }

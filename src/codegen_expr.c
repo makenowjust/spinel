@@ -2190,6 +2190,10 @@ static int emit_ivar_cvar_gvar_expr(Compiler *c, int id, Buf *b, const NodeTable
       }
       else if (is_static && sk == 2 && civ_is_oint(c, icid, iiv) && !want_o)
         buf_printf(b, "%s.v", ref.p ? ref.p : "");
+      /* a class-level static the slot lookup did not place (an inherited
+         class method reading its class's ivar): the static is the oint */
+      else if (is_static && sk != 2 && oint_kind(repr_of(c, id).as_ty) && !want_o)
+        buf_printf(b, "%s.v", ref.p ? ref.p : "");
       else buf_puts(b, ref.p ? ref.p : "");
     }
     free(ref.p);
@@ -2367,10 +2371,13 @@ static int emit_ivar_cvar_gvar_expr(Compiler *c, int id, Buf *b, const NodeTable
       emit_strbuf_orw_share_value(c, id, ref, v, 1, cid, nm, b);
       return 1;
     }
+    int oo = oint_kind(ot) && h.idx >= 0 && cvar_is_oint(c, cid, h.idx);
     buf_puts(b, "(");
-    emit_slot_truthy(ot, ref, b);
+    if (oint_kind(ot) && !oo) buf_puts(b, "1");   /* a plain number is never nil: `||=` never stores */
+    else emit_slot_truthy(ot, ref, b);
     buf_printf(b, " ? %s : (%s = ", ref, ref);
     if (ot == TY_POLY) emit_boxed(c, v, b);
+    else if (oo) emit_oint_expr(c, v, ot, b);
     else emit_expr(c, v, b);
     emit_cvar_set_flag_after(c, cid, nm, b);
     buf_puts(b, "))");
@@ -2387,10 +2394,13 @@ static int emit_ivar_cvar_gvar_expr(Compiler *c, int id, Buf *b, const NodeTable
       emit_strbuf_orw_share_value(c, id, ref, v, 0, h.cid, nm, b);
       return 1;
     }
+    int ao = oint_kind(at) && h.idx >= 0 && cvar_is_oint(c, h.cid, h.idx);
     buf_puts(b, "(");
-    emit_slot_truthy(at, ref, b);
+    if (oint_kind(at) && !ao) buf_puts(b, "1");   /* a plain number is never nil: `&&=` always stores */
+    else emit_slot_truthy(at, ref, b);
     buf_printf(b, " ? (%s = ", ref);
     if (at == TY_POLY) emit_boxed(c, v, b);
+    else if (ao) emit_oint_expr(c, v, at, b);
     else emit_expr(c, v, b);
     buf_printf(b, ") : %s)", ref);
     return 1;
@@ -3111,18 +3121,15 @@ static int emit_array_hash_literal_expr(Compiler *c, int id, Buf *b, const NodeT
             }
           }
           else if (it == TY_INT_ARRAY) {
-            Buf nf; memset(&nf, 0, sizeof nf); emit_may_nil_text(c, inner, it, "_sa", &nf);
-            buf_printf(g_pre, "{ sp_IntArray *_sa = %s; int _snf = %s; if (_sa) for (sp_int _si = 0; _si < _sa->len; _si++) sp_PolyArray_push(_t%d, %s(_snf, _sa->data[_sa->start+_si])); }\n",
-                       ep, nf.p, t, typed_elem_box_fn(it));
-            free(nf.p);
+            /* an element that is nil (the array's nil bit) streams as nil */
+            buf_printf(g_pre, "{ sp_IntArray *_sa = %s; if (_sa) for (sp_int _si = 0; _si < _sa->len; _si++) sp_PolyArray_push(_t%d, sp_box_oint(sp_IntArray_oget(_sa, _si))); }\n",
+                       ep, t);
           }
           else if (it == TY_STR_ARRAY)
             buf_printf(g_pre, "{ sp_StrArray *_sa = %s; if (_sa) for (sp_int _si = 0; _si < _sa->len; _si++) sp_PolyArray_push(_t%d, sp_box_str(_sa->data[_si])); }\n", ep, t);
           else if (it == TY_FLOAT_ARRAY) {
-            Buf nf; memset(&nf, 0, sizeof nf); emit_may_nil_text(c, inner, it, "_sa", &nf);
-            buf_printf(g_pre, "{ sp_FloatArray *_sa = %s; int _snf = %s; if (_sa) for (sp_int _si = 0; _si < _sa->len; _si++) sp_PolyArray_push(_t%d, %s(_snf, _sa->data[_si])); }\n",
-                       ep, nf.p, t, typed_elem_box_fn(it));
-            free(nf.p);
+            buf_printf(g_pre, "{ sp_FloatArray *_sa = %s; if (_sa) for (sp_int _si = 0; _si < _sa->len; _si++) sp_PolyArray_push(_t%d, sp_box_ofloat(sp_FloatArray_oget(_sa, _si))); }\n",
+                       ep, t);
           }
           else if (it == TY_POLY_ARRAY)
             buf_printf(g_pre, "{ sp_PolyArray *_sa = %s; if (_sa) for (sp_int _si = 0; _si < _sa->len; _si++) sp_PolyArray_push(_t%d, _sa->data[_si]); }\n", ep, t);
@@ -4650,7 +4657,7 @@ static void emit_expr_node(Compiler *c, int id, Buf *b) {
       buf_printf(b, "((void)sp_raise_nomethod(sp_nomethod_msg(\"%s\", sp_box_nil())), %s)",
                  blockless_block_param_call_name(c, id),
                  (_bt == TY_POLY || _bt == TY_UNKNOWN || _bt == TY_NIL || _bt == TY_VOID)
-                   ? "sp_box_nil()" : default_value_from_compiler(c, _bt));
+                   ? "sp_box_nil()" : oint_kind(_bt) && node_is_oint(c, id) ? oint_nil(_bt) : default_value_from_compiler(c, _bt));
     }
     return;
   }

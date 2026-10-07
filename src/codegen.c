@@ -7705,10 +7705,8 @@ else if (orecv >= 0 && onm) {
     LocalVar *lv = scope_local(bs, p);
     TyKind pt = lv ? lv->type : TY_INT;
     /* a missing or nil argument binds nil: an Integer or Float parameter
-       holds that nil beside its value (slot_is_oint). The slot's kind is
-       decided here, ahead of the declaration, where the binding below used
-       to mark it after the fact. */
-    if (lv && oint_kind(pt) && k < 16) lv->nullable_int = 1;
+       holds that nil beside its value (slot_is_oint; the analysis marks it,
+       mark_nullable_int_locals) */
     buf_puts(pb, "    ");
     if (lv) emit_slot_ctype(c, lv, pb); else emit_ctype(c, pt, pb);
     buf_printf(pb, " lv_%s = ", p);
@@ -10083,7 +10081,7 @@ static void emit_kconv_bridge(Compiler *c, Buf *b) {
       int callee = conv_bridge_callee(c, i, kconv_names[w], TY_UNKNOWN, 1, &tmi);
       if (callee != i) continue;   /* an ancestor's own row declares it */
       buf_puts(b, g_debug ? "" : "static ");
-      emit_ctype(c, (TyKind)c->scopes[tmi].ret, b);
+      emit_method_ret_ctype(c, &c->scopes[tmi], b);   /* as the definition (an oint answer included) */
       buf_printf(b, " sp_%s_%s(sp_%s %sself%s);\n", c->classes[callee].c_name,
                  mc(c->scopes[tmi].name), c->classes[callee].c_name,
                  comp_ty_value_obj(c, ty_object(callee)) ? "" : "*", bridge_blk_param(c, tmi));

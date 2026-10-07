@@ -7615,7 +7615,7 @@ static int emit_hash_tail_conversion(Compiler *c, int node, Buf *b) {
    C void function (a value the program never gets back)? A call whose
    type is merely unknown -- a builtin's, a reopened class's -- answers a
    value and is not this. */
-static int call_names_only_void_methods(Compiler *c, int node) {
+int call_names_only_void_methods(Compiler *c, int node) {
   const char *nm = nt_str(c->nt, node, "name");
   if (!nm || sp_streq(nm, "initialize")) return 0;
   int any = 0;
@@ -9941,7 +9941,17 @@ static int emit_multi_write_scalar(Compiler *c, int id, Buf *b, int indent, cons
         TyKind ivt = ix >= 0 ? c->classes[iv_home_cid].ivar_types[ix] : TY_POLY;
         emit_indent(b, indent);
         buf_printf(b, "%s = ", iv_lhs);
-        if (i == 0) { if (ivt == TY_POLY && st != TY_POLY) emit_boxed(c, value, b); else emit_expr(c, value, b); }
+        if (i == 0) {
+          if (ivt == TY_POLY && st != TY_POLY) emit_boxed(c, value, b);
+          else if (oint_kind(ivt) && ix >= 0 && ivar_has_nilbit(c, iv_home_cid, ix)) {
+            const char *ivp = strstr(iv_lhs, "iv_");
+            char opfx[256]; snprintf(opfx, sizeof opfx, "%.*s", ivp ? (int)(ivp - iv_lhs) : 0, iv_lhs);
+            emit_ivar_value_nilbit(c, iv_home_cid, ix, opfx, value, b);
+          }
+          else if (oint_kind(ivt) && ix >= 0 && civ_is_oint(c, iv_home_cid, ix) && !strstr(iv_lhs, "->") && !strchr(iv_lhs, '.'))
+            emit_oint_expr(c, value, ivt, b);
+          else emit_expr(c, value, b);
+        }
         else if (ivt == TY_POLY) buf_puts(b, "sp_box_nil()");
         else if (oint_kind(ivt) && ix >= 0 && ivar_has_nilbit(c, iv_home_cid, ix)) {
           /* a field with a nil bit: the bit set, the value left */
@@ -9969,7 +9979,11 @@ static int emit_multi_write_scalar(Compiler *c, int id, Buf *b, int indent, cons
       emit_local_ref(c, lefts[i], lvn, b); buf_puts(b, " = ");
       LocalVar *llv = lvn ? scope_local(comp_scope_of(c, id), lvn) : NULL;
       int lpoly = llv && llv->type == TY_POLY;
-      if (i == 0) { if (lpoly && st != TY_POLY) emit_boxed(c, value, b); else emit_expr(c, value, b); }
+      if (i == 0) {
+        if (lpoly && st != TY_POLY) emit_boxed(c, value, b);
+        else if (llv && slot_is_oint(llv)) emit_oint_expr(c, value, llv->type, b);   /* the slot's oint */
+        else emit_expr(c, value, b);
+      }
       else if (lpoly) {
         /* under-filled target under a scalar RHS is Ruby nil, not the
            typed zero (`a, b, c = 1` -> [1, nil, nil]). */
@@ -10039,7 +10053,9 @@ static int emit_multi_write_scalar(Compiler *c, int id, Buf *b, int indent, cons
       emit_indent(b, indent);
       emit_local_ref(c, rights[j], rvn, b); buf_puts(b, " = ");
       if (j == 0 && ln == 0) {
-        if (rpoly && st != TY_POLY) emit_boxed(c, value, b); else emit_expr(c, value, b);
+        if (rpoly && st != TY_POLY) emit_boxed(c, value, b);
+        else if (rlv && slot_is_oint(rlv)) emit_oint_expr(c, value, rlv->type, b);
+        else emit_expr(c, value, b);
       }
       else if (rpoly) buf_puts(b, "sp_box_nil()");
       else { TyKind tt = rlv ? rlv->type : repr_of(c, rights[j]).as_ty; buf_puts(b, nil_for_local(c, rights[j], rlv, tt, "a multiple assignment target")); }
@@ -11481,7 +11497,11 @@ else {
     }
   }
   emit_indent(b, indent);
-  emit_expr(c, id, b);
+  /* a value nobody reads is never unwrapped: `a[-100]` alone must not raise
+     the TypeError sp_oint_arg carries for a plain read */
+  { TyKind dt = comp_ntype(c, id);
+    if (oint_kind(dt) && node_is_oint(c, id)) { buf_puts(b, "(void)("); emit_oint_expr(c, id, dt, b); buf_puts(b, ")"); }
+    else emit_expr(c, id, b); }
   buf_puts(b, ";\n");
   return 1;
   return 0;
@@ -13227,7 +13247,11 @@ void emit_stmt_inner(Compiler *c, int id, Buf *b, int indent) {
         const char *apf9 = at9 != TY_POLY_ARRAY ? array_to_poly_fn(at9) : NULL;
         if (g_ie_res_poly) emit_boxed(c, nv[0], b);
         else if (g_ie_next_oint) emit_oint_expr(c, nv[0], g_ie_next_ty, b);
-        else if (g_ie_next_ty == TY_INT || g_ie_next_ty == TY_FLOAT) emit_expr_slot(c, nv[0], g_ie_next_ty, b);
+        else if (g_ie_next_ty == TY_INT || g_ie_next_ty == TY_FLOAT) {
+          /* a plain slot never holds a nil: the backstop */
+          if (node_may_be_nil(c, nv[0])) refuse_nil_store(c, nv[0], g_ie_next_ty, "a `next` value into a plain slot");
+          emit_expr(c, nv[0], b);
+        }
         else if (apf9) { buf_printf(b, "%s(", apf9); emit_expr(c, nv[0], b); buf_puts(b, ")"); }
         else emit_expr(c, nv[0], b);
         buf_puts(b, ";\n");
@@ -13541,14 +13565,18 @@ void emit_stmt_tail_inner(Compiler *c, int id, Buf *b, int indent) {
     if (is_scalar_ret(rt)) {
       int t = ++g_tmp;
       char rv[32]; snprintf(rv, sizeof rv, "_t%d", t);
-      emit_indent(b, indent); emit_ctype(c, rt, b);
+      /* an Integer / Float begin some arm of which answers nil: the temp is
+         the oint (the arms store that form, g_result_oint) */
+      int bo = cond_res_oint(c, id, rt);
+      emit_indent(b, indent); emit_res_ctype(c, rt, bo, b);
       /* emit_ctype declares a BY-VALUE object class as a bare struct, and
          default_value cannot know that: it takes a TyKind, and the value-ness
          lives on the class. It answers NULL, which is not a struct, so a
          method returning such a class with an ensure in its body did not
          build (#4270). The ensure's own deferred-return slot makes the same
          distinction (#4268); this is that question for the begin's result. */
-      if (comp_ty_value_obj(c, rt))
+      if (bo) buf_printf(b, " _t%d = %s;", t, oint_nil(rt));
+      else if (comp_ty_value_obj(c, rt))
         buf_printf(b, " _t%d = (sp_%s){0};", t, c->classes[ty_object_class(rt)].c_name);
       else
         buf_printf(b, " _t%d = %s;", t, rt == TY_RANGE ? "(sp_Range){0}" : default_value_from_compiler(c, rt));
@@ -13568,7 +13596,13 @@ void emit_stmt_tail_inner(Compiler *c, int id, Buf *b, int indent) {
       /* the begin's scalar result temp feeds a poly tail slot (return type or an
          outer poly result var widened under promote): box it to match. */
       int target_poly = g_result_var ? g_result_poly : (g_ret_type == TY_POLY);
-      if (target_poly && rt != TY_POLY) { emit_boxed_tmp(c, rt, t, b); buf_puts(b, ";\n"); }
+      int slot_o = g_result_var ? g_result_oint : g_ret_oint;
+      if (target_poly && rt != TY_POLY && bo) buf_printf(b, "%s(_t%d);\n", oint_box(rt), t);
+      else if (target_poly && rt != TY_POLY) { emit_boxed_tmp(c, rt, t, b); buf_puts(b, ";\n"); }
+      /* the oint temp into a plain slot is its value (TypeError for nil);
+         a plain temp into an oint slot is wrapped */
+      else if (bo && !slot_o) buf_printf(b, "%s(_t%d);\n", oint_arg(rt), t);
+      else if (!bo && slot_o && oint_kind(rt)) buf_printf(b, "%s(_t%d);\n", oint_of(rt), t);
       /* The mirror: a POLY begin value (its arms are a union -- a String and
          nil) tailing into a CONCRETE return slot. The slot is what the --rbs
          seed says, and `String?` is a NULL `const char *` here, so narrow the
@@ -13666,12 +13700,19 @@ void emit_stmt_tail_inner(Compiler *c, int id, Buf *b, int indent) {
                    "(_sp_ret_strbuf = (void *)%s, %s ? sp_str_concat(sp_String_cstr(%s), (&(\"\\xff\")[1])) : NULL)",
                    h8, h8, h8);
         }
+        /* a class-level / toplevel static is an oint: boxed as one, read as
+           its value for a plain slot, handed over whole for an oint slot */
+        int civ8 = (cmeth9 || tl9 >= 0) && oint_kind(it9) && civ_is_oint(c, icls9, iidx9);
+        int slot_o8 = g_result_var ? g_result_oint : g_ret_oint;
         if (want_poly8 && it9 != TY_POLY) {
           Buf bx8; memset(&bx8, 0, sizeof bx8);
-          emit_boxed_text(c, it9, islot9, &bx8);
+          if (civ8) buf_printf(&bx8, "%s(%s)", oint_box(it9), islot9);
+          else emit_boxed_text(c, it9, islot9, &bx8);
           buf_printf(b, "%s;\n", bx8.p ? bx8.p : "sp_box_nil()");
           free(bx8.p);
         }
+        else if (civ8 && !slot_o8) buf_printf(b, "%s.v;\n", islot9);
+        else if (!civ8 && oint_kind(it9) && slot_o8) buf_printf(b, "%s(%s);\n", oint_of(it9), islot9);
         else buf_printf(b, "%s;\n", islot9);
         return;
       }

@@ -28178,6 +28178,20 @@ static void mark_nullable_int_locals(Compiler *c) {
         lv->nullable_int = 1; changed = 1;
       }
     }
+    /* A proc's Integer / Float parameter: a call with fewer arguments, or a
+       nil one, binds nil, so the slot holds its nil beside the value (the
+       proc function binds `(argc > k) ? ... : nil`). */
+    for (int id = 0; id < nt->count; id++) {
+      if (!is_proc_create(c, id)) continue;
+      Scope *ps = comp_scope_of(c, id);
+      for (int k = 0; k < 16; k++) {
+        const char *pn = proc_param_name(c, id, k);
+        if (!pn) break;
+        LocalVar *plv = ps ? scope_local(ps, pn) : NULL;
+        if (!plv || (plv->type != TY_INT && plv->type != TY_FLOAT) || plv->nullable_int) continue;
+        plv->nullable_int = 1; changed = 1;
+      }
+    }
     /* A global written from such a value carries it to every reader, just as
        a local does: `$g = a[i]` boxed the sentinel as a number (a Float's
        printed NaN) wherever $g was read. */
@@ -28389,6 +28403,28 @@ static void mark_nullable_int_locals(Compiler *c) {
       if (iv < 0 || ci->ivar_nullable_int[iv]) continue;
       if (ci->ivar_types[iv] != TY_INT && ci->ivar_types[iv] != TY_FLOAT) continue;
       if (nullable_int_value(c, av[0])) { ci->ivar_nullable_int[iv] = 1; changed = 1; }
+    }
+    /* `o.instance_variable_set(:@x, v)` with a nil, or a nullable number,
+       stores it in the ivar as a plain write would. */
+    NT_FOREACH_KIND(nt, NK_CallNode, id) {
+      const char *sn = nt_str(nt, id, "name");
+      int srecv = nt_ref(nt, id, "receiver");
+      if (!sn || !sp_streq(sn, "instance_variable_set") || srecv < 0) continue;
+      int sa = nt_ref(nt, id, "arguments"); int san = 0;
+      const int *sav = sa >= 0 ? nt_arr(nt, sa, "arguments", &san) : NULL;
+      if (san != 2 || nt_kind(nt, sav[0]) != NK_SymbolNode) continue;
+      TyKind srt = infer_type(c, srecv);
+      int scid = ty_is_object(srt) ? ty_object_class(srt) : -1;
+      if (scid < 0 && nt_kind(nt, srecv) == NK_SelfNode) { Scope *ss = comp_scope_of(c, id); scid = ss ? ss->class_id : -1; }
+      if (scid < 0 || scid >= c->nclasses) continue;
+      const char *ivn = nt_str(nt, sav[0], "unescaped");
+      if (!ivn) ivn = nt_str(nt, sav[0], "value");
+      if (!ivn || ivn[0] != '@') continue;
+      ClassInfo *sci = NULL; int siv = -1;
+      for (int k = scid; k >= 0 && siv < 0; k = c->classes[k].parent) { sci = &c->classes[k]; siv = comp_ivar_index(sci, ivn); }
+      if (siv < 0 || sci->ivar_nullable_int[siv]) continue;
+      if (sci->ivar_types[siv] != TY_INT && sci->ivar_types[siv] != TY_FLOAT) continue;
+      if (nt_kind(nt, sav[1]) == NK_NilNode || nullable_int_value(c, sav[1])) { sci->ivar_nullable_int[siv] = 1; changed = 1; }
     }
     /* A Struct's generated constructor sets its members: from a nil
        argument, or to nil when the construction does not supply one

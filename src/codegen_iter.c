@@ -5743,8 +5743,9 @@ static int iter_enum_poly_walk_arms(Compiler *c, int id, Buf *b, int indent, con
             const char *pnj = block_param_name(c, block, pj);
             if (!pnj) continue;
             emit_indent(b, indent + 1);
-            buf_printf(b, "lv_%s = sp_%sArray_get(_t%d, %d);\n",
-                       rename_local(pnj), inner_kk, tsub, pj);
+            int oj = (sp_streq(inner_kk, "Int") || sp_streq(inner_kk, "Float")) && block_param_slot_is_oint(c, block, pj);
+            buf_printf(b, "lv_%s = %ssp_%sArray_get(_t%d, %d)%s;\n",
+                       rename_local(pnj), oj ? (sp_streq(inner_kk, "Int") ? "sp_oint_of(" : "sp_ofloat_of(") : "", inner_kk, tsub, pj, oj ? ")" : "");
           }
           did_destruct = 1;
         }
@@ -5843,8 +5844,9 @@ static int iter_enum_poly_walk_arms(Compiler *c, int id, Buf *b, int indent, con
             const char *pname2 = block_param_name(c, block, pj);
             if (!pname2) continue;
             emit_indent(b, indent + 1);
-            buf_printf(b, "lv_%s = sp_%sArray_get(_t%d, %d);\n",
-                       rename_local(pname2), inner_k, tsub, pj);
+            int oj = (sp_streq(inner_k, "Int") || sp_streq(inner_k, "Float")) && block_param_slot_is_oint(c, block, pj);
+            buf_printf(b, "lv_%s = %ssp_%sArray_get(_t%d, %d)%s;\n",
+                       rename_local(pname2), oj ? (sp_streq(inner_k, "Int") ? "sp_oint_of(" : "sp_ofloat_of(") : "", inner_k, tsub, pj, oj ? ")" : "");
           }
           goto each_body;
         }
