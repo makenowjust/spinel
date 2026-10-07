@@ -1597,7 +1597,7 @@ void emit_tail_lead(Buf *b) {
 }
 /* The C representation of Ruby `nil` for a concretely-typed slot (vs
    default_value's zero-value): a fresh block-local starts nil, and several
-   types carry an in-band nil sentinel (NULL string, SP_INT_NIL, NaN float,
+   types carry an in-band nil sentinel (NULL string, the oint's flag for a number,
    (sp_sym)-1). Types with no sentinel fall back to the zero value. */
 const char *nil_value(TyKind t) {
   /* a builtin kind's nil is its ty_traits row's (types.c): a String, an
@@ -3024,6 +3024,7 @@ void emit_coerce(Compiler *c, int node, TyKind slot, int how, const char *what, 
      nil literal's sentinel, an Integer widened into a Bignum, a boxed value
      unboxed, and the conversions emit_coerce_text makes or refuses. */
   TyKind from = TY_UNKNOWN;
+  if (oint_kind(slot) && node_may_be_nil(c, node)) refuse_nil_store(c, node, slot, what);
   int plan = repr_coerce_plan(c, node, slot, how, &from);
   switch (plan) {
   case CF_FIT:
@@ -3050,7 +3051,10 @@ void emit_coerce(Compiler *c, int node, TyKind slot, int how, const char *what, 
     break;
   case CF_NIL_SENT:
     /* nil literal into a sentinel slot: the slot's nil itself */
-    if (from == TY_NIL && nt_kind(c->nt, node) == NK_NilNode) { buf_puts(b, raise_tail_value_c(c, slot)); RCC(CF_NIL_SENT); return; }
+    if (from == TY_NIL && nt_kind(c->nt, node) == NK_NilNode) {
+      if (oint_kind(slot)) refuse_nil_store(c, node, slot, what);
+      buf_puts(b, raise_tail_value_c(c, slot)); RCC(CF_NIL_SENT); return;
+    }
     break;
   case CF_INT2BIG:
     /* An Integer into a Bignum slot is the same Ruby value in the wide
@@ -4870,6 +4874,11 @@ const char *oint_unbox(TyKind t) { return t == TY_FLOAT ? "sp_unbox_ofloat" : "s
    nil). A parameter is bound at entry, so the last two do not apply. */
 int slot_is_oint(const LocalVar *lv) {
   if (!lv || !oint_kind(lv->type)) return 0;
+  /* the receiver parameter of a builtin written in Ruby (`__int_digits(self,
+     ...)`, enumerable.rb's inline frames): a nil receiver is a NoMethodError
+     naming the method, raised where the call unwraps it (sp_oint_val), so
+     the slot itself is plain */
+  if (lv->is_param && lv->name && sp_streq(lv->name, "__self")) return 0;
   if (lv->nullable_int || lv->box_nullable || lv->nil_passed) return 1;
   return (lv->or_written || lv->maybe_unset) && !lv->is_param && !lv->is_block_param;
 }
@@ -4945,9 +4954,12 @@ int ivar_node_slot(Compiler *c, int node, int *cid, int *iv) {
   Scope *cs = comp_scope_of(c, node);
   const char *nm = nt_str(c->nt, node, "name");
   if (!nm) return 0;
-  /* inside an instance_eval / instance_exec splice: the receiver's class */
-  if (cs && cs->class_id < 0 && !cs->is_cmethod && g_ie_class_id >= 0) {
-    for (int k = g_ie_class_id; k >= 0; k = c->classes[k].parent) {
+  /* inside an instance_eval / instance_exec splice: the receiver's class
+     (the analysis's map for the node, else the splice being emitted) */
+  int iec = ie_class_of(c, node);
+  if (iec < 0 && cs && cs->class_id < 0 && !cs->is_cmethod) iec = g_ie_class_id;
+  if (iec >= 0) {
+    for (int k = iec; k >= 0; k = c->classes[k].parent) {
       int i = comp_ivar_index(&c->classes[k], nm);
       if (i >= 0) { *cid = k; *iv = i; return 1; }
     }
@@ -5060,8 +5072,10 @@ int node_is_oint(Compiler *c, int node) {
        (a String or Bigint compare it proves total stays plain) */
     if (sp_streq(nm, "<=>") && an2 == 1) return nullable_int_value(c, node);
     /* a receiver that stayed poly: the dispatch answers an oint when a
-       target can answer nil (the analysis's dispatch set) */
-    if (rt == TY_POLY || (r < 0 && !ty_is_object(rt))) {
+       target can answer nil (the analysis's dispatch set) -- except on the
+       safe-navigation re-entry (g_sn_skip), where the analysis mark belongs
+       to the `&.` as a whole and the inner emitter's own form decides */
+    if ((rt == TY_POLY || (r < 0 && !ty_is_object(rt))) && g_sn_skip != node) {
       if (nullable_int_value(c, node)) return 1;
     }
     /* `Integer(x, exception: false)` / `Float(x, exception: false)`: nil on
@@ -5071,10 +5085,8 @@ int node_is_oint(Compiler *c, int node) {
       const int *a2a = a2v >= 0 ? nt_arr(nt, a2v, "arguments", &a2n) : NULL;
       if (a2a && a2n >= 2 && nt_kind(nt, a2a[a2n - 1]) == NK_KeywordHashNode) return 1;
     }
-    /* `IO::Buffer.size_of`: nil for an unknown type name; the other class
-       methods (File.delete) are no container's */
-    if (r >= 0 && (nt_kind(nt, r) == NK_ConstantReadNode || nt_kind(nt, r) == NK_ConstantPathNode))
-      return sp_streq(nm, "size_of");
+    /* a class's own methods (File.delete, IO::Buffer.size_of) are no container's */
+    if (r >= 0 && (nt_kind(nt, r) == NK_ConstantReadNode || nt_kind(nt, r) == NK_ConstantPathNode)) return 0;
     /* the runtime functions that answer an sp_oint (RUNTIME-API.md) */
     if ((sp_streq(nm, "bsearch") || sp_streq(nm, "bsearch_index")) && blk >= 0) return 1;
     if (sp_streq(nm, "nonzero?") || sp_streq(nm, "infinite?") || sp_streq(nm, "getbyte")) return 1;
@@ -5196,7 +5208,33 @@ void emit_ivar_nil_store(Compiler *c, int id, TyKind t, Buf *b) {
     buf_printf(b, "({ %s; (%s)0; })", bs, c_type_name(t));
   }
   else if (k == 2 && civ_is_oint(c, cid, iv)) buf_puts(b, oint_nil(t));
-  else emit_slot_nil_read(c, t, b);
+  else refuse_nil_store(c, id, t, "an instance variable write");
+}
+
+/* nil out of band, the backstop: a nil, or a value whose nil is still
+   beside it, must never land in a plain sp_int / sp_float slot. Where the
+   analysis left such a slot unflagged the emission refuses here, at compile
+   time, rather than store the 0 a plain read would take for a number. */
+__attribute__((noreturn)) void refuse_nil_store(Compiler *c, int node, TyKind t, const char *where) {
+  char msg[400];
+  snprintf(msg, sizeof msg, "nil written into a non-nullable %s slot: %s",
+           t == TY_FLOAT ? "Float" : "Integer", where ? where : "a store");
+  unsupported_feature(c, node, msg);
+}
+/* The node's value can be nil: a nil literal, a nil-typed value, or an
+   Integer / Float producer whose nil is still beside the value (node_is_oint,
+   unless the node is bound to a hoisted plain temp). */
+int node_may_be_nil(Compiler *c, int node) {
+  if (node < 0) return 0;
+  if (nt_kind(c->nt, node) == NK_NilNode) return 1;
+  TyKind t = comp_ntype(c, node);
+  if (t == TY_NIL) return 1;
+  if (!oint_kind(t)) return 0;
+  for (int i = g_n_argov - 1; i >= 0; i--) if (g_argov_node[i] == node) return 0;
+  /* an oint producer the analysis proved never nil (`[a].first`: the
+     runtime function's form, not a nil) is unwrapped at the store, which
+     keeps the proof honest at run time (sp_oint_arg) */
+  return node_is_oint(c, node) && nullable_int_value(c, node);
 }
 
 /* A conditional's result slot (an if / case / begin / `||` in value

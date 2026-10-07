@@ -219,7 +219,7 @@ int emit_boxed_text_form(Compiler *c, TyKind t) {
      cast turned a pointer straight into a struct (#3186, #3619).
    - Class is a by-value struct, read by sp_unbox_class (#2797).
    - Integer goes through sp_poly_as_int_or_nil: a boxed nil becomes the
-     slot's SP_INT_NIL, never the 0 lying under the nil tag. Integer nil
+     slot's oint nil, never the 0 lying under the nil tag. Integer nil
      always uses the sentinel, whichever path unboxes it.
    - Float likewise goes through sp_poly_as_float_or_nil: a boxed nil becomes
      the sp_float_nil() NaN, never the 0.0 under the tag. A real NaN keeps
@@ -738,7 +738,7 @@ static void emit_int_expr_ex(Compiler *c, int node, int strict, Buf *b) {
   if (emit_nilbool_conv_raise_w(c, node, TY_INT, strict == 0, strict == 2, b)) return;
   if (emit_obj_conv(c, node, "to_int", TY_INT, "Integer", b)) return;
   /* A strict Integer slot fed from a nullable int (a `String#index` miss, an
-     ivar written nil, an `Integer?` seed) receives SP_INT_NIL as a plain
+     ivar written nil, an `Integer?` seed) received the nil as a plain
      sp_int: the arm folded it as a number instead of refusing it the way the
      compile-time `s[nil]` is refused above. Test for it here, at the one
      funnel every strict slot passes through, rather than in each arm -- the
@@ -8676,7 +8676,7 @@ void emit_class_scan(Compiler *c, ClassInfo *ci, Buf *b) {
 }
 
 /* An int ivar's nil default differs from its zero bit-pattern: its nil is
-   SP_INT_NIL, not 0. The compiler already reads an unwritten int ivar as that
+   its bit, not 0. The compiler already reads an unwritten int ivar as that
    sentinel (truthiness, `@x ||= v`, `.nil?`), so the constructor must seed it
    explicitly -- a memset/{0} slot reads back as a real 0 and makes `@x ||= 5`
    keep 0. Returns NULL for types whose zero-init already reads as nil
@@ -8696,7 +8696,7 @@ static const char *ivar_scalar_nil_init(TyKind t) {
 
 /* Seed every ivar whose zero bit-pattern is not nil. A poly ivar's zero
    pattern has tag 0, not SP_TAG_NIL, so it must be set to sp_box_nil(); an int
-   ivar's nil is SP_INT_NIL, not 0. `lv` is the receiver-and-accessor prefix
+   ivar's nil is its bit, not 0. `lv` is the receiver-and-accessor prefix
    ("self.", "self->", "_t3.", "_t3->"); each assignment is bracketed by `lead`
    (indentation) and `term` (`;\n` for a statement, `;` inside a compound expr).
    A string ivar's NULL zero-pattern already reads as nil, so it is skipped. */
@@ -9076,7 +9076,7 @@ void emit_class_new(Compiler *c, ClassInfo *ci, Buf *b) {
   buf_printf(b, "  SP_GC_ROOT(self);\n");
   buf_printf(b, "  self->cls_id = %d;\n", ctor_cls_id(c, cid));
   /* memset zero-inits fields, but a poly ivar's zero pattern is not nil and an
-     int ivar's nil is SP_INT_NIL, so seed them before initialize runs
+     int ivar's nil is its bit, so seed them before initialize runs
      (read-only ivars stay nil; written ones are overwritten). */
   emit_ivar_nil_inits(c, b, ci, "self->", "  ", ";\n");
   } /* close else (non-exception subclass allocation) */
@@ -9288,7 +9288,7 @@ static int class_marshalable(Compiler *c, int i) {
   return 1;
 }
 /* Box ivar expression `expr` (typed t) into an sp_RbVal, mapping an unset ivar
-   (SP_INT_NIL / NULL pointer) to nil. */
+   (its nil bit / NULL pointer) to nil. */
 /* `nilt`: the C test that ivar is nil (its nil bit, ivar_nilbit_test), or
    NULL for an Integer / Float ivar with no bit */
 static void emit_marshal_box_ivar_n(Compiler *c, TyKind t, const char *expr, const char *nilt, Buf *b);
@@ -16067,7 +16067,9 @@ char *codegen_program(const NodeTable *nt) {
         for (int m = 0; m < s->nparams; m++) {
           if (m) buf_puts(&b, ", ");
           TyKind pm = scope_param_type(s, m);
-          emit_ctype(c, pm, &b);
+          LocalVar *pl = scope_local(s, s->pnames[m]);
+          /* as emit_ctor_params declares it (an oint slot included) */
+          if (pl && pl->type != TY_UNKNOWN) emit_slot_ctype(c, pl, &b); else emit_ctype(c, pm, &b);
         }
         if (s->nparams == 0) buf_puts(&b, "void");
       }
@@ -16095,7 +16097,9 @@ char *codegen_program(const NodeTable *nt) {
         for (int m = 0; m < s->nparams; m++) {
           if (m) buf_puts(&b, ", ");
           TyKind pm = scope_param_type(s, m);
-          emit_ctype(c, pm, &b);
+          LocalVar *pl = scope_local(s, s->pnames[m]);
+          /* as emit_ctor_params declares it (an oint slot included) */
+          if (pl && pl->type != TY_UNKNOWN) emit_slot_ctype(c, pl, &b); else emit_ctype(c, pm, &b);
         }
         if (p_has_blk) { if (s->nparams > 0) buf_puts(&b, ", "); buf_puts(&b, "sp_Proc *"); }
         buf_puts(&b, ");\n");

@@ -6896,11 +6896,27 @@ static void emit_arg_or_default_fill(Compiler *c, Scope *m, int idx, int provide
            takes the argument's oint form (nil, boxed, plain, a raise token);
            a nil into a plain slot raises the operand TypeError (a plain emit
            rendered nil as 0 and the callee saw an integer, #2438) */
-        if (oint_kind(pt) && slot_is_oint(p))
+        if (oint_kind(pt) && idx == 0 && m->pnames[0] && sp_streq(m->pnames[0], "__self")) {
+          /* the receiver of a builtin written in Ruby (`v.digits` is
+             `__int_digits(v, 10)`): a nil receiver is CRuby's NoMethodError
+             naming the method, raised here where the oint is unwrapped */
+          if (node_may_be_nil(c, provided)) {
+            const char *rn = m->name ? m->name : "?";
+            if (!strncmp(rn, "__int_", 6) || !strncmp(rn, "__flt_", 6) || !strncmp(rn, "__cmp_", 6)) rn += 6;
+            /* a specialization's `__N` suffix is no part of the Ruby name */
+            size_t rl = strlen(rn);
+            while (rl > 0 && rn[rl - 1] >= '0' && rn[rl - 1] <= '9') rl--;
+            if (rl >= 2 && rl < strlen(rn) && rn[rl - 1] == '_' && rn[rl - 2] == '_') rl -= 2; else rl = strlen(rn);
+            buf_printf(out, "%s(", oint_val(pt)); emit_oint_expr(c, provided, pt, out); buf_printf(out, ", \"%.*s\")", (int)rl, rn);
+          }
+          else emit_expr(c, provided, out);
+        }
+        else if (oint_kind(pt) && slot_is_oint(p))
           emit_oint_expr(c, provided, pt, out);
-        else if (at == TY_NIL && oint_kind(pt)) {
-          buf_puts(out, "((void)("); emit_expr(c, provided, out);
-          buf_printf(out, "), %s(%s))", oint_arg(pt), oint_nil(pt));
+        else if (oint_kind(pt) && node_may_be_nil(c, provided)) {
+          char pw[300];
+          snprintf(pw, sizeof pw, "parameter %s of %s", m->pnames[idx] ? m->pnames[idx] : "?", m->name ? m->name : "?");
+          refuse_nil_store(c, provided, pt, pw);
         }
         else if (at == TY_NIL && pt == TY_STRING) { buf_puts(out, "((void)("); emit_expr(c, provided, out); buf_puts(out, "), NULL)"); }
         else if (at == TY_POLY && pt == TY_STRING) { buf_puts(out, "sp_poly_to_s_or_nil("); emit_expr(c, provided, out); buf_puts(out, ")"); }
@@ -7072,6 +7088,9 @@ else if (dty && sp_streq(dty, "NilNode")) {
         if (hn) buf_printf(out, "sp_%sHash_new()", hn);
         else emit_expr(c, dv, out);
       }
+      /* an Integer / Float parameter holding its nil beside the value takes
+         the default in its oint form (a nil default, a nullable one) */
+      else if (oint_kind(pt) && slot_is_oint(p)) emit_oint_expr(c, dv, pt, out);
       else emit_coerce(c, dv, pt, CO_HOLD, "a parameter default", out);
     }
   }
@@ -10305,7 +10324,8 @@ void emit_args_filled_argv(Compiler *c, int callee_idx, const int *argv, int arg
         buf_printf(g_pre, "%s *_cell_%s = %s;\n", borrowed_string_type(plv), uniq, vb.p ? vb.p : "NULL");
       }
       else {
-        emit_ctype(c, pt, g_pre);
+        /* the parameter's own slot type (an oint slot included) */
+        if (plv && oint_kind(pt) && slot_is_oint(plv)) buf_puts(g_pre, oint_ctype(pt)); else emit_ctype(c, pt, g_pre);
         buf_printf(g_pre, " lv_%s = %s;\n", uniq, vb.p ? vb.p : default_value_from_compiler(c, pt));
         if (needs_root(pt)) {
           emit_indent(g_pre, g_indent);
@@ -11328,7 +11348,7 @@ else {
         /* alias the temp (already rooted) under the rename's spelling, and
            register the rename AFTER it so only a LATER default reads it */
         emit_indent(g_pre, g_indent);
-        emit_ctype(c, att, g_pre);
+        if (p && oint_kind(att) && slot_is_oint(p)) buf_puts(g_pre, oint_ctype(att)); else emit_ctype(c, att, g_pre);
         buf_printf(g_pre, " lv__pd%d_%d = _t%d; (void)lv__pd%d_%d;\n", pd_uid, k, atmp[k], pd_uid, k);
         char pdn[48]; snprintf(pdn, sizeof pdn, "_pd%d_%d", pd_uid, k);
         emit_pd_cell_alias(c, p, pdn);

@@ -1157,6 +1157,12 @@ static const char *nil_sentinel(TyKind t) {
     default:        return default_value(t);
   }
 }
+/* the nil a local slot takes: its oint for an Integer / Float slot that
+   holds one, refused for a plain one (the backstop) */
+static const char *nil_for_local(Compiler *c, int node, const LocalVar *lv, TyKind t, const char *where) {
+  if (oint_kind(t) && !slot_is_oint(lv)) refuse_nil_store(c, node, t, where);
+  return nil_sentinel(t);
+}
 static int emit_proc_cell_lvalue(Compiler *c, int scope_node, const char *nm, Buf *b) {
   LocalVar *lv = nm ? scope_local(comp_scope_of(c, scope_node), nm) : NULL;
   if (!lv || lv->type != TY_PROC) return 0;
@@ -1720,7 +1726,7 @@ void emit_assign(Compiler *c, int id, Buf *b, int indent) {
     /* an Integer / Float slot's nil is its sentinel (the nil join of
        ty_unify), not the truthy 0 default_value gives every other place */
     if (lv->type == TY_RANGE) buf_puts(b, "(sp_Range){0}");
-    else if (lv->type == TY_INT || lv->type == TY_FLOAT) buf_puts(b, nil_sentinel(lv->type));
+    else if (lv->type == TY_INT || lv->type == TY_FLOAT) buf_puts(b, nil_for_local(c, v, lv, lv->type, "a local variable write"));
     else buf_puts(b, default_value_from_compiler(c, lv->type));
   }
   else if (repr_of_slot(c, lv).kind == RK_STRBUF) {
@@ -1855,9 +1861,8 @@ void emit_assign(Compiler *c, int id, Buf *b, int indent) {
      read as 0 / 0.0 there, a truthy number (the nil join of an Integer or
      Float local, see ty_unify). Any other nil-typed value is evaluated for
      its effects and the sentinel stored. */
-  else if (lv && (lv->type == TY_INT || lv->type == TY_FLOAT) && comp_ntype(c, v) == TY_NIL) {
-    buf_puts(b, "({ (void)("); emit_expr(c, v, b); buf_printf(b, "); %s; })", nil_sentinel(lv->type));
-  }
+  else if (lv && (lv->type == TY_INT || lv->type == TY_FLOAT) && node_may_be_nil(c, v))
+    refuse_nil_store(c, v, lv->type, "a local variable write");   /* the slot holding its nil took the arm above */
   else if (lv && lv->type != TY_POLY && lv->type != TY_UNKNOWN &&
            comp_ntype(c, v) == TY_UNKNOWN) {
     /* a typed local assigned an unresolved call (the gate's raise-all token):
@@ -2652,7 +2657,7 @@ void emit_cond(Compiler *c, int id, Buf *b) {
   if (t == TY_POLY) { buf_puts(b, "sp_poly_truthy("); emit_expr(c, id, b); buf_puts(b, ")"); return; }
   if (t == TY_NIL)  { buf_puts(b, "(("); emit_expr(c, id, b); buf_puts(b, "), 0)"); return; }
   /* Ruby truthiness: only nil and false are falsy. A nullable scalar reads
-     falsy at its sentinel (NULL string / SP_INT_NIL / NaN float); a pointer
+     falsy at its sentinel (NULL string / the oint's flag); a pointer
      value is falsy when NULL. Every other concrete value is truthy. */
   /* a value-type object is never a NULL pointer -- it is always truthy */
   if (comp_ty_value_obj(c, t)) { buf_puts(b, "(("); emit_expr(c, id, b); buf_puts(b, "), 1)"); return; }
@@ -7736,7 +7741,7 @@ static void emit_tail_value(Compiler *c, int node, Buf *b) {
   /* A bare `nil` returned through an int or float slot. emit_expr renders
      NilNode as the numeric default 0, which in those two slots is a real
      value -- the caller reads 0 / 0.0 where the method said nil. Both have a
-     sentinel (SP_INT_NIL, the float NaN), and every consumer already tests
+     nil form (the oint's flag), and every consumer already tests
      for it: the same method returning nil through a String or bool slot is
      correct today because NULL and the poly box carry nil natively. So spell
      the sentinel here rather than let the numeric default stand (#3458). */
@@ -9347,7 +9352,10 @@ static void masgn_conv_o(Compiler *c, TyKind st, TyKind vt, const char *val, Buf
   (void)c;
 }
 static void masgn_conv(Compiler *c, int id, TyKind st, TyKind vt, const char *val, Buf *b) {
-  if (!val) { buf_puts(b, nil_sentinel(st == TY_UNKNOWN ? TY_POLY : st)); return; }
+  if (!val) {
+    if (oint_kind(st)) refuse_nil_store(c, id, st, "a multiple assignment target");
+    buf_puts(b, nil_sentinel(st == TY_UNKNOWN ? TY_POLY : st)); return;
+  }
   if (st == TY_POLY && vt != TY_POLY) emit_boxed_src(c, vt, val, b);
   /* a boxed nil lands the slot's nil, not the type's zero, as a plain write
      unboxes it (#3458) */
@@ -9878,6 +9886,14 @@ static int emit_multi_write_scalar(Compiler *c, int id, Buf *b, int indent, cons
         buf_printf(b, "%s = ", iv_lhs);
         if (i == 0) { if (ivt == TY_POLY && st != TY_POLY) emit_boxed(c, value, b); else emit_expr(c, value, b); }
         else if (ivt == TY_POLY) buf_puts(b, "sp_box_nil()");
+        else if (oint_kind(ivt) && ix >= 0 && ivar_has_nilbit(c, iv_home_cid, ix)) {
+          /* a field with a nil bit: the bit set, the value left */
+          const char *ivp = strstr(iv_lhs, "iv_");
+          char opfx[256]; snprintf(opfx, sizeof opfx, "%.*s", ivp ? (int)(ivp - iv_lhs) : 0, iv_lhs);
+          emit_ivar_text_nilbit(c, iv_home_cid, ix, opfx, oint_nil(ivt), b);
+        }
+        else if (oint_kind(ivt) && !(ix >= 0 && civ_is_oint(c, iv_home_cid, ix) && !strstr(iv_lhs, "->") && !strchr(iv_lhs, '.')))
+          refuse_nil_store(c, lefts[i], ivt, "a multiple assignment into an instance variable");
         else buf_puts(b, nil_sentinel(ivt));
         buf_puts(b, ";\n");
         continue;
@@ -9906,7 +9922,7 @@ static int emit_multi_write_scalar(Compiler *c, int id, Buf *b, int indent, cons
         /* the target NODE's type can read TY_UNKNOWN here; use the local's
            DECLARED type so the nil sentinel matches its C slot. */
         TyKind tt = llv ? llv->type : repr_of(c, lefts[i]).as_ty;
-        buf_puts(b, nil_sentinel(tt));
+        buf_puts(b, nil_for_local(c, lefts[i], llv, tt, "a multiple assignment target"));
       }
       buf_puts(b, ";\n");
     }
@@ -9969,7 +9985,7 @@ static int emit_multi_write_scalar(Compiler *c, int id, Buf *b, int indent, cons
         if (rpoly && st != TY_POLY) emit_boxed(c, value, b); else emit_expr(c, value, b);
       }
       else if (rpoly) buf_puts(b, "sp_box_nil()");
-      else { TyKind tt = rlv ? rlv->type : repr_of(c, rights[j]).as_ty; buf_puts(b, nil_sentinel(tt)); }
+      else { TyKind tt = rlv ? rlv->type : repr_of(c, rights[j]).as_ty; buf_puts(b, nil_for_local(c, rights[j], rlv, tt, "a multiple assignment target")); }
       buf_puts(b, ";\n");
     }
     return 1;
@@ -10630,7 +10646,7 @@ static int emit_multi_write_stmt(Compiler *c, int id, Buf *b, int indent, const 
         /* An under-filled massign target is Ruby `nil`, not the type's zero
            value; emit the slot's nil sentinel (mirroring the typed-array
            under-fill arm above) so `a, b, c = 1` yields [1, nil, nil]. */
-        const char *nilv = nil_sentinel(ltt);
+        const char *nilv = nil_for_local(c, lefts[i], llv, ltt, "a multiple assignment target");
         /* a captured TY_PROC cell needs the raw int-laundered lvalue rather
            than emit_local_ref's non-assignable cast form (see emit_assign). */
         if (emit_proc_cell_lvalue(c, id, lvn, b)) {
@@ -11481,6 +11497,7 @@ static int emit_ivar_cvar_write_stmt(Compiler *c, int id, Buf *b, int indent, co
       emit_ivar_value_nilbit(c, wcid, wiv, wpfx, v, b);
     }
     else if (wk == 2 && civ_is_oint(c, wcid, wiv)) emit_oint_expr(c, v, ivt, b);
+    else if (oint_kind(ivt) && node_may_be_nil(c, v)) refuse_nil_store(c, v, ivt, "an instance variable write");
     /* `@t = Array.new(n) { <int array> }` into a narrowed pointer-array ivar:
        the generator emits from the NODE's type, which the narrowing (a slot
        decision) does not change. Lend it the slot's type, exactly as the local
@@ -11627,6 +11644,7 @@ static int emit_ivar_cvar_write_stmt(Compiler *c, int id, Buf *b, int indent, co
     }
     /* an Integer or Float class variable some write leaves nil in: its oint */
     else if (cvar_is_oint(c, sc, h.idx)) emit_oint_expr(c, v, ct, b);
+    else if (oint_kind(ct) && node_may_be_nil(c, v)) refuse_nil_store(c, v, ct, "a class variable write");
     else if (emit_empty_container_for_slot(c, v, ct, b)) { /* emitted at the slot's type */ }
     else if (ct == TY_POLY) emit_boxed(c, v, b);
     else if (emit_array_into_poly_slot(c, ct, v, b)) { }
@@ -12322,7 +12340,10 @@ static int emit_attr_global_const_write_stmt(Compiler *c, int id, Buf *b, int in
          was nil -- `Process.kill("KILL", -$pgid)` with $pgid nil signalled the
          caller's own process group (#4248). nil_sentinel is the same rule the
          ivar and local arms use. */
-      buf_puts(b, lv->type == TY_RANGE ? "(sp_Range){0}" : nil_sentinel(lv->type));
+      { if (oint_kind(lv->type) && !gvar_is_oint(c, lv)) refuse_nil_store(c, v, lv->type, "a global variable write");
+        buf_puts(b, lv->type == TY_RANGE ? "(sp_Range){0}" : nil_sentinel(lv->type)); }
+    else if (oint_kind(lv->type) && !gvar_is_oint(c, lv) && node_may_be_nil(c, v))
+      refuse_nil_store(c, v, lv->type, "a global variable write");
     else if (v_empty_arr && lv->type == TY_POLY_ARRAY) {
       if (v_lit_frozen) { int _ft = ++g_tmp;
         buf_printf(b, "({ sp_PolyArray *_t%d = sp_PolyArray_new(); _t%d->frozen = 1; _t%d; })", _ft, _ft, _ft); }
@@ -12518,7 +12539,7 @@ static int emit_attr_global_const_write_stmt(Compiler *c, int id, Buf *b, int in
     if (!lv) return 1;
     int v = nt_ref(nt, id, "value");
     /* The slot's own truthiness, not C's: an int-typed global holds nil as
-       SP_INT_NIL, which is a non-zero bit pattern, so a plain `if (!gv_x)`
+       its oint's flag, so a plain `if (!gv_x)`
        read a never-assigned global as truthy and `$x ||= v` stopped firing
        once the slot started at the sentinel (#4248). This is also closer to
        Ruby than the zero test it replaces -- `$x = 0; $x ||= 5` leaves 0,
@@ -13852,6 +13873,8 @@ void emit_stmt_tail_inner(Compiler *c, int id, Buf *b, int indent) {
      on a typed receiver. Mirrors the local-write carve-out above. */
   if (!want_poly && sp_streq(ty, "NilNode") &&
       (tail_slot_ty == TY_INT || tail_slot_ty == TY_FLOAT)) {
+    if (!(g_result_var ? g_result_oint : g_ret_oint))
+      refuse_nil_store(c, id, tail_slot_ty, "the value of a method answering a number");
     buf_puts(b, nil_sentinel(tail_slot_ty));
     buf_puts(b, ";\n");
     return;
@@ -14599,7 +14622,7 @@ static int str_mutate_reassign_arms(Compiler *c, Buf *b, int indent, const NodeT
       buf_printf(b, "{ sp_Range _t%d = sp_range_ix(", ti); emit_expr(c, argv[0], b); buf_puts(b, ")");
       buf_printf(b, "; sp_int _len%d = (sp_int)sp_str_length(", ti); emit_expr(c, recv, b); buf_puts(b, ");");
       /* a beginless bound is 0 and an endless one is the last index, rather
-         than the SP_INT_NIL sentinel a negative-index fixup would fold into a
+         than the open-bound marker a negative-index fixup would fold into a
          wild offset (`s[..1] = x` raised RangeError) */
       buf_printf(b, " sp_int _a%d = _t%d.first == SP_RANGE_NO_BEGIN ? 0 :"
                     " (_t%d.first < 0 ? _t%d.first + _len%d : _t%d.first);", ti, ti, ti, ti, ti, ti);

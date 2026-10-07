@@ -865,8 +865,8 @@ static void emit_index_get(Compiler *c, int recv, int key, Buf *b) {
 }
 
 /* `h[k] ||= v` stores when the slot is nil or false, `&&=` when it is not, and
-   that test has to be spelled per slot type. An sp_int's nil is SP_INT_NIL,
-   not 0, so a plain `!x` both skipped the store on an ABSENT key (the sentinel
+   that test has to be spelled per slot type. An Integer slot's nil rides beside
+   the value (sp_oint), so a plain `!x` both skipped the store on an ABSENT key (the sentinel
    is nonzero) and overwrote a legitimately stored 0 (which is truthy in Ruby).
    The typed-array branches spell it correctly; the hash branch did not, and it
    is the expression form that is reached when the result is used (#3421). */
@@ -1322,7 +1322,7 @@ int emit_call_or_write_via_methods(Compiler *c, int id, int is_or, Buf *b) {
     /* nil-preserving: the reader can answer nil, and this arm is exactly the
        one taken when it did (`&&=` on a nil attribute). Plain unboxing lands
        on the payload under the tag -- 0 for an int slot, where nil is
-       SP_INT_NIL -- so `b.v &&= 7` answered 0 where CRuby answers nil. */
+       the oint's flag -- so `b.v &&= 7` answered 0 where CRuby answers nil. */
     else emit_unbox_nilable_text(c, want, sv, b);
   }
   buf_puts(b, " : ({ ");
@@ -1909,6 +1909,7 @@ static int emit_local_ivar_write_expr(Compiler *c, int id, Buf *b, const NodeTab
       emit_ivar_value_nilbit(c, wcid2, wiv2, wpfx2, v, b);
     }
     else if (wk2 == 2 && civ_is_oint(c, wcid2, wiv2)) emit_oint_expr(c, v, ivt2, b);
+    else if (oint_kind(ivt2) && node_may_be_nil(c, v)) refuse_nil_store(c, v, ivt2, "an instance variable write");
     else if (v_empty_array2 && ty_is_ptr_array(ivt2)) buf_puts(b, "sp_PtrArray_new()");
     else if (v_empty_array2 && ivt2 == TY_POLY_ARRAY) buf_puts(b, "sp_PolyArray_new()");
     else if (v_empty_array2 && array_kind(ivt2)) buf_printf(b, "sp_%sArray_new()", array_kind(ivt2));
@@ -2251,6 +2252,7 @@ static int emit_ivar_cvar_gvar_expr(Compiler *c, int id, Buf *b, const NodeTable
       buf_printf(b, node_is_oint(c, id) ? ", %s)" : ", %s.v)", sref);
       return 1;
     }
+    if (oint_kind(ct) && node_may_be_nil(c, v)) refuse_nil_store(c, v, ct, "a class variable write");
     if (emit_empty_container_for_slot(c, v, ct, b)) { /* emitted at the slot's type */ }
     else if (ct == TY_POLY) emit_boxed(c, v, b);
     else if (emit_array_into_poly_slot(c, ct, v, b)) { }
@@ -3212,11 +3214,11 @@ else {
         /* nor does a nullable Integer or Float holding its sentinel */
         else if (((it == TY_INT && sp_streq(k, "Int")) || (it == TY_FLOAT && sp_streq(k, "Float"))) &&
                  call_returns_nullable_int(c, inner)) {
-          Buf nz; memset(&nz, 0, sizeof nz);
-          emit_slot_truthy(it, "_sv", &nz);
-          buf_printf(g_pre, "{ %s _sv = %s; if %s sp_%sArray_push(_t%d, _sv); }\n",
-                     it == TY_INT ? "sp_int" : "sp_float", ep, nz.p, k, t);
-          free(nz.p);
+          Buf ov; memset(&ov, 0, sizeof ov);
+          emit_oint_expr(c, inner, it, &ov);
+          buf_printf(g_pre, "{ %s _sv = %s; if (!_sv.nil) sp_%sArray_push(_t%d, _sv.v); }\n",
+                     oint_ctype(it), ov.p ? ov.p : "", k, t);
+          free(ov.p);
         }
         else {
           /* Mismatched or unknown element type: emit_expr fallback */
@@ -3228,15 +3230,12 @@ else {
         Buf el; memset(&el, 0, sizeof el);
         /* element preludes flow to g_pre first; an untyped element (a raise
            token, a void call) is coerced to the element type */
-        if (comp_ntype(c, els[j]) == TY_UNKNOWN) emit_unresolved_coerced(c, els[j], ty_array_elem(at), &el);
+        /* an element that can be nil stores with it (the array's own nil) */
+        const char *esfx = nil_store_sfx(c, k, els[j]);
+        if (esfx[0] && (sp_streq(k, "Int") || sp_streq(k, "Float"))) emit_elem_store_value(c, k, els[j], &el);
+        else if (comp_ntype(c, els[j]) == TY_UNKNOWN) emit_unresolved_coerced(c, els[j], ty_array_elem(at), &el);
         else emit_coerce(c, els[j], ty_array_elem(at), CO_HOLD, "an Array literal's element", &el);
         emit_indent(g_pre, g_indent);
-        /* an element that can be nil stores with it */
-        const char *esfx = nil_store_sfx(c, k, els[j]);
-        if (esfx[0] && (sp_streq(k, "Int") || sp_streq(k, "Float"))) {
-          free(el.p); memset(&el, 0, sizeof el);
-          emit_elem_store_value(c, k, els[j], &el);
-        }
         buf_printf(g_pre, "sp_%sArray_push%s(_t%d, ", k, esfx, t);
         buf_puts(g_pre, el.p ? el.p : "");
         buf_puts(g_pre, ");\n");

@@ -555,7 +555,7 @@ void emit_bigint_operand(Compiler *c, int node, Buf *b) {
   TyKind t = comp_ntype(c, node);
   if (t == TY_BIGINT) { emit_expr(c, node, b); return; }
   if (t == TY_POLY) { buf_puts(b, "sp_poly_as_bigint("); emit_expr(c, node, b); buf_puts(b, ")"); return; }
-  /* A nilable int carries nil as SP_INT_NIL, and sp_bigint_new_int made a
+  /* A nilable int carries nil beside its value (sp_oint), and sp_bigint_new_int made a
      Bignum of INT64_MIN out of it: `return (if false then 1 end)` from a
      method whose value is a Bignum answered -9223372036854775808 rather
      than nil, silently (#4800). The guard is only for a value that CAN be
@@ -6510,6 +6510,9 @@ static int pd_lookup_or_add(const char *key, int *is_new) {
   return pd_tab[j].fn;
 }
 
+/* the hoisted function's result type when the dispatch's slot is an sp_oint /
+   sp_ofloat (nil out of band): set by the dispatcher around its pd_hoist */
+static const char *g_pd_ret_ctype = NULL;
 static int pd_hoist(Compiler *c, int id, const char *name, Buf *b, size_t from, int tr, TyKind rct,
                     const int *pid, const TyKind *pty, int np) {
   if (pd_disabled() || !b->p || b->len <= from) return 0;
@@ -6625,7 +6628,7 @@ static int pd_hoist(Compiler *c, int id, const char *name, Buf *b, size_t from, 
     buf_putn(&body, r + i, 1); i++;
   }
   Buf sig; memset(&sig, 0, sizeof sig);
-  emit_ctype(c, rct, &sig);
+  if (g_pd_ret_ctype) buf_puts(&sig, g_pd_ret_ctype); else emit_ctype(c, rct, &sig);
   buf_puts(&sig, " sp_pd_%d(");
   for (int a = 0; a < np; a++) {
     if (a) buf_puts(&sig, ", ");
@@ -7197,7 +7200,8 @@ void emit_poly_arm_args(Compiler *c, Scope *m, Scope *ms, const ArgLayout *L,
         buf_printf(cb, "_cell__pd%d_%d", pd_uid, a);
       }
       else {
-        emit_ctype(c, pt, pre);
+        /* the parameter's own slot type (an oint slot included) */
+        if (pv && pv->type != TY_UNKNOWN) emit_slot_ctype(c, pv, pre); else emit_ctype(c, pt, pre);
         buf_printf(pre, " lv__pd%d_%d = %s; ", pd_uid, a, pa.p ? pa.p : default_value_from_compiler(c, pt));
         if (needs_root(pt))
           buf_printf(pre, pt == TY_POLY ? "SP_GC_ROOT_RBVAL(lv__pd%d_%d); " : "SP_GC_ROOT(lv__pd%d_%d); ", pd_uid, a);
@@ -7650,8 +7654,14 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
       if (root_recv) buf_printf(b, "SP_GC_ROOT_RBVAL(_t%d); ", tv);
       emit_poly_vis_precheck(c, id, tv, b);
       size_t pd_from = b->len;   /* the region pd_hoist may move out of line */
-      emit_ctype(c, is_scalar_ret(ret) ? ret : TY_INT, b);
-      buf_printf(b, " _t%d = %s; ", tr, is_scalar_ret(ret) ? default_value_from_compiler(c, ret) : "0");
+      /* the result slot: an Integer / Float dispatch whose answer can be nil
+         (node_is_oint) holds it as the oint, and every arm assigns that form */
+      int tr_o = oint_kind(ret) && node_is_oint(c, id);
+      if (tr_o) buf_printf(b, "%s _t%d = %s; ", oint_ctype(ret), tr, oint_nil(ret));
+      else {
+        emit_ctype(c, is_scalar_ret(ret) ? ret : TY_INT, b);
+        buf_printf(b, " _t%d = %s; ", tr, is_scalar_ret(ret) ? default_value_from_compiler(c, ret) : "0");
+      }
       int pa_frame0 = g_plan_check ? pa_begin(id) : -1;
       emit_poly_prearms0(c, id, name, &ps, ret, tv, tr, b);
       int blk_tmp0 = emit_poly_prearms0_blk(c, id, name, &ps, ret, tv, tr, b);
@@ -7683,8 +7693,10 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
       if (g_plan_check) pa_end(c, pa_frame0, cplan_poly(c, id));
       { int pid0[2] = { tv, blk_tmp0 };
         TyKind pty0[2] = { TY_POLY, TY_PROC };   /* the block's proc, when one was built */
-        if (pd_hoist(c, id, name, b, pd_from, tr, is_scalar_ret(ret) ? ret : TY_INT, pid0, pty0, blk_tmp0 >= 0 ? 2 : 1))
-          buf_printf(b, " _t%d; })", tr);
+        g_pd_ret_ctype = tr_o ? oint_ctype(ret) : NULL;
+        int hoisted0 = pd_hoist(c, id, name, b, pd_from, tr, is_scalar_ret(ret) ? ret : TY_INT, pid0, pty0, blk_tmp0 >= 0 ? 2 : 1);
+        g_pd_ret_ctype = NULL;
+        if (hoisted0) buf_printf(b, " _t%d; })", tr);
         else buf_printf(b, " } _t%d; })", tr); }
       return 1;
     }
@@ -8460,7 +8472,8 @@ void ctor_arm_arg(Compiler *c, Scope *is, int j, const char *val, int pd_uid,
     return;
   }
   TyKind pt = pv && pv->type != TY_UNKNOWN ? pv->type : TY_POLY;
-  emit_ctype(c, pt, pdpre);
+  /* the parameter's own slot type (an oint slot included) */
+  if (pv && pv->type != TY_UNKNOWN) emit_slot_ctype(c, pv, pdpre); else emit_ctype(c, pt, pdpre);
   buf_printf(pdpre, " lv__pd%d_%d = %s; ", pd_uid, j, val);
   if (needs_root(pt))
     buf_printf(pdpre, pt == TY_POLY ? "SP_GC_ROOT_RBVAL(lv__pd%d_%d); " : "SP_GC_ROOT(lv__pd%d_%d); ",
@@ -13678,7 +13691,7 @@ static int emit_array_arith_call(Compiler *c, int id, Buf *b) {
       }
       /* A Float operand that can be its nil sentinel (a NaN payload the
          hardware carries through the operator, so `nil + 1.0` read back as
-         nil) is tested first, as every int helper tests SP_INT_NIL; only
+         nil) is tested first, as every int helper tests the oint's flag; only
          where the #3505 marking says the slot can hold it. */
       /* An element of a Float array the loop holds the header of reads
          nil-free in range and raises on a nil outside it (emit_nilfree_operand),

@@ -28095,9 +28095,12 @@ static void mark_nullable_int_locals(Compiler *c) {
       if (!sc2->pdefault) continue;
       for (int pk2 = 0; pk2 < sc2->nparams; pk2++) {
         int dv2 = sc2->pdefault[pk2];
-        if (dv2 < 0 || nt_kind(nt, dv2) != NK_NilNode) continue;
+        if (dv2 < 0) continue;
         LocalVar *p2 = sc2->pnames[pk2] ? scope_local(sc2, sc2->pnames[pk2]) : NULL;
         if (!p2 || (p2->type != TY_INT && p2->type != TY_FLOAT) || p2->nullable_int) continue;
+        /* ... and so does any default that can be nil (`b = xs.first`, an
+           ivar initialize never assigns): the slot holds its nil beside the value */
+        if (nt_kind(nt, dv2) != NK_NilNode && !nullable_int_value(c, dv2)) continue;
         p2->nullable_int = 1; changed = 1;
       }
     }
@@ -28246,6 +28249,8 @@ static void mark_nullable_int_locals(Compiler *c) {
       if (v < 0) continue;
       Scope *s = comp_scope_of(c, id);
       int cid = s ? s->class_id : -1;
+      /* inside `r.instance_eval { @x = nil }` the ivar is the receiver's */
+      if (ie_class_of(c, id) >= 0) cid = ie_class_of(c, id);
       if (cid < 0) cid = comp_class_index(c, "Toplevel");
       if (cid < 0 || cid >= c->nclasses) continue;
       ClassInfo *ci = &c->classes[cid];
