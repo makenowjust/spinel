@@ -14038,6 +14038,7 @@ static int emit_array_arith_call(Compiler *c, int id, Buf *b) {
           /* nil coerced into the LEFT operand's class: an Integer receiver
              says "into Integer" for a nil Float as for a nil Integer */
           if (rgt9 == TY_FLOAT && lft9 == TY_INT) buf_printf(&av, "sp_ofloat_opnd_in(%s, \"Integer\")", ov.p ? ov.p : "");
+          else if (rgt9 == TY_INT && lft9 == TY_FLOAT) buf_printf(&av, "sp_oint_opnd_in(%s, \"Float\")", ov.p ? ov.p : "");
           else buf_printf(&av, "%s(%s)", rgt9 == TY_INT ? "sp_oint_opnd" : "sp_ofloat_opnd", ov.p ? ov.p : "");
           free(ov.p);
         }
