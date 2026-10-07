@@ -5189,6 +5189,23 @@ int node_is_oint(Compiler *c, int node) {
       int same = (num_l && num_r) || (rt == TY_STRING && at == TY_STRING) || (rt == TY_SYMBOL && at == TY_SYMBOL);
       return same ? nullable_int_value(c, node) : 1;
     }
+    /* `o.instance_variable_get(:@x)` on a typed object: the field's read,
+       with its nil where the field carries a nil bit (as an attr reader) */
+    if (sp_streq(nm, "instance_variable_get") && an2 == 1 && r >= 0 && ty_is_object(rt)) {
+      int a1 = nt_ref(nt, node, "arguments"), a1n = 0;
+      const int *a1a = a1 >= 0 ? nt_arr(nt, a1, "arguments", &a1n) : NULL;
+      if (a1a && a1n == 1) {
+        NodeKind ak = nt_kind(nt, a1a[0]);
+        const char *sn = ak == NK_SymbolNode ? nt_str(nt, a1a[0], "value")
+                       : ak == NK_StringNode ? nt_str(nt, a1a[0], "content") : NULL;
+        if (sn) {
+          char ivb[300]; snprintf(ivb, sizeof ivb, "%s%s", sn[0] == '@' ? "" : "@", sn);
+          int cid = ty_object_class(rt);
+          int iv = comp_ivar_index(&c->classes[cid], ivb);
+          if (iv >= 0) return ivar_has_nilbit(c, cid, iv);
+        }
+      }
+    }
     /* `o.instance_variable_set(:@x, v)` answers v: its form */
     if (sp_streq(nm, "instance_variable_set") && an2 == 2 && r >= 0) {
       int a1 = nt_ref(nt, node, "arguments"), a1n = 0;
@@ -5211,7 +5228,8 @@ int node_is_oint(Compiler *c, int node) {
     }
     /* a class's own methods (File.delete, IO::Buffer.size_of) are no container's */
     if (r >= 0 && (nt_kind(nt, r) == NK_ConstantReadNode || nt_kind(nt, r) == NK_ConstantPathNode) &&
-        !oint_kind(rt) && rt != TY_COMPLEX && rt != TY_RATIONAL && rt != TY_BIGINT)   /* a number constant (Float::INFINITY) is a value */
+        !oint_kind(rt) && rt != TY_COMPLEX && rt != TY_RATIONAL && rt != TY_BIGINT &&
+        !ty_is_array(rt) && !ty_is_hash(rt) && rt != TY_RANGE && rt != TY_STRING)   /* a constant holding a number or a container (Float::INFINITY, FREE = []) is a value */
       return 0;
     /* the runtime functions that answer an sp_oint (RUNTIME-API.md) */
     if ((sp_streq(nm, "bsearch") || sp_streq(nm, "bsearch_index")) && blk >= 0) return 1;

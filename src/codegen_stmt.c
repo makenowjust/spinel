@@ -9416,7 +9416,25 @@ static void masgn_guard_line(Buf *fb, Buf *b, int indent) {
 /* `val`, a C value of type `vt`, as a slot of type `st` holds it; a NULL
    `val` is Ruby nil. */
 /* the same into an Integer / Float slot that holds its nil: its oint */
+/* The literal multi-assign's element temps whose value can be nil: `_tN`
+   holds the value and `_tNo` the oint beside it (emit_multi_write_stmt);
+   masgn_conv_o takes the oint for such a temp. */
+static int g_masgn_otmps[64], g_masgn_notmps;
+static int masgn_oint_temp(const char *val) {
+  int n = -1, len = 0;
+  if (!val || sscanf(val, "_t%d%n", &n, &len) != 1 || val[len] != '\0') return -1;
+  for (int i = 0; i < g_masgn_notmps; i++) if (g_masgn_otmps[i] == n) return n;
+  return -1;
+}
 static void masgn_conv_o(Compiler *c, TyKind st, TyKind vt, const char *val, Buf *b) {
+  int on = masgn_oint_temp(val);
+  if (on >= 0 && oint_kind(st)) {
+    if (vt == st || vt == TY_INT || vt == TY_FLOAT) {
+      if (vt == st) buf_printf(b, "_t%do", on);
+      else buf_printf(b, "(_t%do.nil ? %s : %s((%s)_t%do.v))", on, oint_nil(st), oint_of(st), c_type_name(st), on);
+      return;
+    }
+  }
   if (!val) buf_puts(b, oint_nil(st));
   else if (vt == TY_POLY || vt == TY_UNKNOWN) buf_printf(b, "%s(%s)", oint_unbox(st), val);
   else if (vt == TY_NIL || vt == TY_VOID) buf_printf(b, "((void)(%s), %s)", val, oint_nil(st));
@@ -10468,6 +10486,7 @@ static int emit_multi_write_scalar(Compiler *c, int id, Buf *b, int indent, cons
 
 /* A MultiWriteNode statement (a, b = ...) (emit_stmt_inner's arms, in their order) */
 static int emit_multi_write_stmt(Compiler *c, int id, Buf *b, int indent, const NodeTable *nt, const char *ty) {
+  g_masgn_notmps = 0;   /* the oint temps are this assignment's (temp numbers restart per function) */
   if (!(sp_streq(ty, "MultiWriteNode"))) return 0;
   int ln = 0;
   const int *lefts = nt_arr(nt, id, "lefts", &ln);
@@ -10721,6 +10740,15 @@ static int emit_multi_write_stmt(Compiler *c, int id, Buf *b, int indent, const 
     else if (poly_empty_hash)
       buf_puts(b, "sp_box_obj(sp_PolyPolyHash_new(), SP_BUILTIN_POLY_POLY_HASH)");
     else if (boxed_el) emit_coerce(c, els[i], TY_POLY, CO_HOLD, "a multiple assignment's value", b);
+    /* a number that can be nil: its oint `_tNo` beside the value, which the
+       targets that hold a nil take (masgn_conv_o) and the others read */
+    else if (oint_kind(elt) && node_has_oint_form(c, els[i]) && g_masgn_notmps < 64) {
+      Buf vb; memset(&vb, 0, sizeof vb); emit_oint_expr(c, els[i], elt, &vb);
+      /* the declaration above reads `<ctype> _tN = `: finish it from the oint */
+      buf_printf(b, "0; %s _t%do = %s; _t%d = _t%do.v", oint_ctype(elt), tmps[i], vb.p ? vb.p : oint_nil(elt), tmps[i], tmps[i]);
+      free(vb.p);
+      g_masgn_otmps[g_masgn_notmps++] = tmps[i];
+    }
     else {
       Buf vb; memset(&vb, 0, sizeof vb); emit_expr(c, els[i], &vb);
       buf_puts(b, vb.p ? vb.p : ""); free(vb.p);
