@@ -1521,8 +1521,10 @@ void emit_poly_prearms0(Compiler *c, int id, const char *name, const PolySpecial
   int is_io_rewind = ps->io_rewind;
   /* When the dispatch result feeds a poly context, tr is sp_RbVal, so the
      length-like answer is boxed */
-  const char *bopen = (ret == TY_POLY) ? "sp_box_int(" : "";
-  const char *bclose = (ret == TY_POLY) ? ")" : "";
+  /* ...and an oint result slot (plan_slot_oint) takes it lifted */
+  int lso = ret == TY_INT && plan_slot_oint(c, id, ret);
+  const char *bopen = (ret == TY_POLY) ? "sp_box_int(" : lso ? "sp_oint_of(" : "";
+  const char *bclose = (ret == TY_POLY || lso) ? ")" : "";
   const char *ebopen = (ret == TY_POLY) ? "sp_box_bool(" : "";
   const char *ebclose = (ret == TY_POLY) ? ")" : "";
   /* string/symbol-tagged poly values answer length/size directly */
@@ -1909,8 +1911,10 @@ void emit_poly_cases0(Compiler *c, int id, int recv, const char *name, const Pol
                       TyKind ret, int tv, int tr, Buf *b) {
   const NodeTable *nt = c->nt;
   int argc = 0, is_empty = ps->empty;
-  const char *bopen = (ret == TY_POLY) ? "sp_box_int(" : "";
-  const char *bclose = (ret == TY_POLY) ? ")" : "";
+  /* ...and an oint result slot (plan_slot_oint) takes it lifted */
+  int lso = ret == TY_INT && plan_slot_oint(c, id, ret);
+  const char *bopen = (ret == TY_POLY) ? "sp_box_int(" : lso ? "sp_oint_of(" : "";
+  const char *bclose = (ret == TY_POLY || lso) ? ")" : "";
   const char *ebopen = (ret == TY_POLY) ? "sp_box_bool(" : "";
   const char *ebclose = (ret == TY_POLY) ? ")" : "";
   /* built-in array receivers reaching a length-like poly dispatch */
@@ -2312,7 +2316,7 @@ int emit_poly_defaults0(Compiler *c, int id, int recv, const char *name, const P
       snprintf(qv, sizeof qv, qf, tv, tv);
       buf_printf(b, " case SP_BUILTIN_QUEUE: _t%d = ", tr);
       if (ret == TY_POLY) buf_puts(b, qv);
-      else emit_unbox_text(c, ret, qv, b);
+      else plan_put_boxed(c, plan_slot_oint(c, id, ret), is_scalar_ret(ret) ? ret : TY_INT, qv, b);
       buf_puts(b, "; break;");
     }
   }
