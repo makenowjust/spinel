@@ -1300,7 +1300,8 @@ int emit_call_or_write_via_methods(Compiler *c, int id, int is_or, Buf *b) {
      `||=` assigns when the reader is falsy, `&&=` when it is truthy. */
   buf_puts(b, "(");
   if (ro) emit_slot_nil_test(c, rdt, tv, is_or ? 0 : 1, b);
-  else if (oint_kind(rdt)) buf_puts(b, is_or ? "0" : "1");   /* a plain number is never nil */
+  /* a plain number is never nil: `||=` keeps the reader's value, `&&=` assigns */
+  else if (oint_kind(rdt)) buf_puts(b, is_or ? "1" : "0");
   else emit_slot_nil_test(c, rdt, tv, is_or ? 0 : 1, b);
   buf_puts(b, ") ? ");
   /* the expression's own form: the reader's oint where the node answers one
