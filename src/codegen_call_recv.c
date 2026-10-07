@@ -9327,7 +9327,15 @@ static int emit_struct_recv_call(Compiler *c, int id, Buf *b, const NodeTable *n
                  tk, comp_sym_intern(c, sc->ivars[i] + 1), tk, (long long)i,
                  tk, sc->ivars[i] + 1, tw, iv_c(sc->ivars[i] + 1));
       char vtxt[32]; snprintf(vtxt, sizeof vtxt, "_t%d", tv);
+      int scid = ty_object_class(rt);
       if (sc->ivar_types[i] == TY_POLY) buf_puts(b, vtxt);
+      /* a member with a nil bit takes the nil into its bit */
+      else if (oint_kind(sc->ivar_types[i]) && ivar_has_nilbit(c, scid, i)) {
+        char ot[64], pfx[48];
+        snprintf(ot, sizeof ot, "%s(_t%d)", oint_unbox(sc->ivar_types[i]), tv);
+        snprintf(pfx, sizeof pfx, "_t%d->", tw);
+        emit_ivar_text_nilbit(c, scid, i, pfx, ot, b);
+      }
       else emit_unbox_text(c, sc->ivar_types[i], vtxt, b);
       buf_puts(b, ";}\nelse");
     }

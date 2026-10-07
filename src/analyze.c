@@ -29212,6 +29212,42 @@ static void mark_nullable_int_locals(Compiler *c) {
       if (ci->ivar_types[iv] != TY_INT && ci->ivar_types[iv] != TY_FLOAT) continue;
       if (nullable_int_value(c, av[0])) { ci->ivar_nullable_int[iv] = 1; changed = 1; }
     }
+    /* `s[:x] = v` / `s["x"] = v` / `s[0] = v` on a Struct (or a boxed value
+       that can be one): the member takes v, nil included */
+    NT_FOREACH_KIND(nt, NK_CallNode, id) {
+      const char *sn = nt_str(nt, id, "name");
+      int srecv = nt_ref(nt, id, "receiver");
+      if (!sn || !sp_streq(sn, "[]=") || srecv < 0) continue;
+      int sa = nt_ref(nt, id, "arguments"); int san = 0;
+      const int *sav = sa >= 0 ? nt_arr(nt, sa, "arguments", &san) : NULL;
+      if (san != 2) continue;
+      if (nt_kind(nt, sav[1]) != NK_NilNode && !nullable_int_value(c, sav[1])) continue;
+      NodeKind kk = nt_kind(nt, sav[0]);
+      if (kk != NK_SymbolNode && kk != NK_StringNode && kk != NK_IntegerNode) continue;
+      TyKind srt = infer_type(c, srecv);
+      int only = ty_is_object(srt) ? ty_object_class(srt) : -1;
+      if (only < 0 && srt != TY_POLY) continue;
+      for (int k = 0; k < c->nclasses; k++) {
+        if (only >= 0 && k != only) continue;
+        ClassInfo *sci = &c->classes[k];
+        if (!sci->is_struct || sci->nmembers <= 0) continue;
+        int m = -1;
+        if (kk == NK_IntegerNode) {
+          long long ix = nt_int(nt, sav[0], "value", 0);
+          if (ix < 0) ix += sci->nmembers;
+          if (ix >= 0 && ix < sci->nmembers) m = (int)ix;
+        }
+        else {
+          const char *mn = kk == NK_SymbolNode ? nt_str(nt, sav[0], "value") : nt_str(nt, sav[0], "content");
+          char ivb[300]; snprintf(ivb, sizeof ivb, "@%s", mn ? mn : "");
+          int iv = mn ? comp_ivar_index(sci, ivb) : -1;
+          if (iv >= 0 && iv < sci->nmembers) m = iv;
+        }
+        if (m < 0 || sci->ivar_nullable_int[m]) continue;
+        if (sci->ivar_types[m] != TY_INT && sci->ivar_types[m] != TY_FLOAT) continue;
+        sci->ivar_nullable_int[m] = 1; changed = 1;
+      }
+    }
     /* `o.instance_variable_set(:@x, v)` with a nil, or a nullable number,
        stores it in the ivar as a plain write would. */
     NT_FOREACH_KIND(nt, NK_CallNode, id) {
