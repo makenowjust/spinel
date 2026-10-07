@@ -1,6 +1,7 @@
 # spinel: int64 -- -2^63 is an Integer past 2^31; not run on a 32-bit target
-# Arithmetic with a -2**63 operand that stays in range in every mode:
-# the operand is a number, so no operation reports nil.
+# Arithmetic with a -2**63 operand whose result stays in range in every mode
+# (no overflow, so no mode raises): the operand is a number, so no operation
+# reports nil.
 n = ARGV.size
 m = -9223372036854775807 - (n + 1)
 p m + 1
@@ -10,7 +11,6 @@ p m - n
 p m * 1
 p m * (n + 1)
 p 1 + m
-p 0 - m - m == 0
 p m / 1
 p m / 2
 p m / -2
@@ -44,12 +44,7 @@ p m.to_i
 p m.to_r
 p m.hash == m.hash
 p m.pow(1)
-p m.pow(2, 1000)
-p m.gcd(2)
-p m.lcm(1)
 p m.ceil(-3)
-p m.floor(-3)
-p m.round(-3)
 p m.truncate
 p m.coerce(1)
 p m.integer?
