@@ -3965,8 +3965,10 @@ static Buf *g_pm_hash_sink = NULL;
    `when Integer` (or Float, Numeric, Comparable) always did, and a beginless
    range covered the sentinel as INT64_MIN. Both `when` emitters box the
    subject once, as nil where it is one, and test the box the way they test
-   any poly subject; the integer-literal switch runs before the box, since no
-   label is the sentinel. The pattern emitter keeps the typed subject, which
+   any poly subject -- except an Integer whose labels are all Integers, nil
+   or ranges of Integer literals: the integer-literal switch reads its value
+   (a nil one switches on a value no label has), and the chain tests the
+   typed value beside its flag (case_oint_label). The pattern emitter keeps the typed subject, which
    its bindings read, and asks the sentinel in the arms that test a class, nil
    or a range (g_pm_sentinel_t). */
 static int case_subject_boxes_sentinel(Compiler *c, int pred, TyKind pt) {
@@ -3979,6 +3981,57 @@ static int g_case_scrut_oint = -1;
 static void case_nil_test(int t, int want_nil, Buf *b) {
   if (g_case_scrut_oint == t) buf_printf(b, "(%s_o%d.nil)", want_nil ? "" : "!", t);
   else buf_puts(b, want_nil ? "0" : "1");
+}
+/* The least non-negative value no `when` label has: what a subject that
+   matches no label (a nil one) switches on, so it reaches the else arm.
+   There always is one, and no arithmetic on a label overflows into it (the
+   labels may take in INT64_MIN and INT64_MAX). */
+static long long case_switch_miss(const NodeTable *nt, const int *whens, int nw) {
+  long long miss = 0;
+  for (int again = 1; again; ) {
+    again = 0;
+    for (int w = 0; w < nw && !again; w++) {
+      int wc = 0; const int *conds = nt_arr(nt, whens[w], "conditions", &wc);
+      for (int j = 0; j < wc; j++)
+        if ((long long)nt_int(nt, conds[j], "value", 0) == miss) { miss++; again = 1; break; }
+    }
+  }
+  return miss;
+}
+/* An Integer label in range of the C type: no bignum (a literal past it,
+   INT64_MIN's spelling included, carries a placeholder `value`) */
+static int case_int_label(const NodeTable *nt, int n) {
+  return n >= 0 && nt_kind(nt, n) == NK_IntegerNode && !nt_str(nt, n, "bigval");
+}
+/* Does every `when` label of an Integer subject that can be nil decide it
+   from its flag and its value -- an Integer, nil, or a range of Integer
+   literals (either end may be left open) -- so the chain keeps the typed
+   subject (case_oint_label) instead of boxing it for sp_poly_eq? */
+static int case_oint_labels_typed(Compiler *c, const int *whens, int nw) {
+  const NodeTable *nt = c->nt;
+  for (int w = 0; w < nw; w++) {
+    int wc = 0; const int *conds = nt_arr(nt, whens[w], "conditions", &wc);
+    if (wc == 0) return 0;
+    for (int j = 0; j < wc; j++) {
+      int n = conds[j];
+      NodeKind k = nt_kind(nt, n);
+      if (k == NK_NilNode || case_int_label(nt, n)) continue;
+      if (k != NK_RangeNode || comp_ntype(c, n) != TY_RANGE) return 0;
+      int lo = nt_ref(nt, n, "left"), hi = nt_ref(nt, n, "right");
+      if ((lo >= 0 && !case_int_label(nt, lo)) || (hi >= 0 && !case_int_label(nt, hi))) return 0;
+    }
+  }
+  return 1;
+}
+static int emit_when_typed_test(Compiler *c, int cond, int t, TyKind pt, Buf *b);
+/* One such label against the typed subject `_tN` beside its flag `_oN` */
+static void case_oint_label(Compiler *c, int cond, int t, Buf *b) {
+  const NodeTable *nt = c->nt;
+  if (nt_kind(nt, cond) == NK_NilNode) { case_nil_test(t, 1, b); return; }
+  buf_printf(b, "(!_o%d.nil && ", t);
+  if (case_int_label(nt, cond)) buf_printf(b, "_t%d == %lldLL", t, (long long)nt_int(nt, cond, "value", 0));
+  else (void)emit_when_typed_test(c, cond, t, TY_INT, b);
+  buf_puts(b, ")");
 }
 /* the scrutinee's binding: `sp_oint _oN = <oint>; sp_int _tN = _oN.v;` for
    one that can be nil, the plain value otherwise */
@@ -6499,7 +6552,7 @@ void emit_case(Compiler *c, int id, Buf *b, int indent) {
      (jump table) instead of an O(n) sp_poly_eq / int-compare if-chain. This is
      the optcarrot CPU opcode dispatch (~256 whens); the poly if-chain made
      sp_poly_eq ~50% of runtime. */
-  if (pred >= 0 && (pt == TY_POLY || pt == TY_INT) && nw > 0 && g_case_scrut_oint != t) {
+  if (pred >= 0 && (pt == TY_POLY || pt == TY_INT) && nw > 0 && (g_case_scrut_oint != t || pt == TY_INT)) {
     int all_int = 1;
     for (int w = 0; w < nw && all_int; w++) {
       int wc = 0; const int *conds = nt_arr(nt, whens[w], "conditions", &wc);
@@ -6527,15 +6580,7 @@ void emit_case(Compiler *c, int id, Buf *b, int indent) {
            the least non-negative one missing from the labels, which there
            always is and which no arithmetic on a label can overflow into
            (the labels may take in INT64_MIN and INT64_MAX). */
-        long long miss = 0;
-        for (int again = 1; again; ) {
-          again = 0;
-          for (int w = 0; w < nw && !again; w++) {
-            int wc = 0; const int *conds = nt_arr(nt, whens[w], "conditions", &wc);
-            for (int j = 0; j < wc; j++)
-              if ((long long)nt_int(nt, conds[j], "value", 0) == miss) { miss++; again = 1; break; }
-          }
-        }
+        long long miss = case_switch_miss(nt, whens, nw);
         buf_printf(b, "switch (_t%d.tag == SP_TAG_INT ? _t%d.v.i : sp_poly_case_int_key(_t%d, (const sp_int[]){", t, t, t);
         int nl = 0;
         for (int w = 0; w < nw; w++) {
@@ -6547,6 +6592,9 @@ void emit_case(Compiler *c, int id, Buf *b, int indent) {
         }
         buf_printf(b, "}, %d, %lldLL)) {\n", nl, miss);
       }
+      /* an Integer that can be nil: its nil matches no label */
+      else if (g_case_scrut_oint == t)
+        buf_printf(b, "switch (_o%d.nil ? %lldLL : _t%d) {\n", t, case_switch_miss(nt, whens, nw), t);
       else buf_printf(b, "switch (_t%d) {\n", t);
       for (int w = 0; w < nw; w++) {
         int wc = 0; const int *conds = nt_arr(nt, whens[w], "conditions", &wc);
@@ -6573,7 +6621,10 @@ void emit_case(Compiler *c, int id, Buf *b, int indent) {
   /* the lambda and proc arms bind the subject to a parameter of its own
      type, so they keep reading the typed temp */
   int typed_t = t; TyKind typed_pt = pt;
-  if (case_subject_boxes_sentinel(c, pred, pt)) {
+  /* an Integer that can be nil whose labels its flag and value decide
+     keeps the typed subject (case_oint_label) */
+  int oint_typed = g_case_scrut_oint == t && pt == TY_INT && case_oint_labels_typed(c, whens, nw);
+  if (case_subject_boxes_sentinel(c, pred, pt) && !oint_typed) {
     int bt = ++g_tmp;
     emit_indent(b, indent);
     buf_printf(b, "sp_RbVal _t%d = %s(_o%d);\n", bt, oint_box(pt), t);
@@ -6588,6 +6639,7 @@ void emit_case(Compiler *c, int id, Buf *b, int indent) {
     buf_puts(b, w == 0 ? "if (" : "else if (");
     for (int j = 0; j < wc; j++) {
       if (j) buf_puts(b, " || ");
+      if (oint_typed) { case_oint_label(c, conds[j], t, b); continue; }
       if (pred >= 0) {
         /* `when *arr` -- array membership test */
         if (nt_type(nt, conds[j]) && sp_streq(nt_type(nt, conds[j]), "SplatNode")) {
@@ -6965,7 +7017,7 @@ static void emit_case_expr_in(Compiler *c, int id, Buf *b) {
      -- the slab-AST `case @nd_type[id] when <int>` interpreter-dispatch shape
      (#282). INT only: the poly path keeps sp_poly_eq (`===`), since
      sp_poly_to_i on a non-numeric subject would mis-match `case 0`. */
-  if (pred >= 0 && pt == TY_INT && nw > 0 && g_case_scrut_oint != t) {
+  if (pred >= 0 && pt == TY_INT && nw > 0) {
     int all_int = 1, ndup = 0;
     long long vals[512];
     for (int w = 0; w < nw && all_int; w++) {
@@ -6983,7 +7035,9 @@ static void emit_case_expr_in(Compiler *c, int id, Buf *b) {
       }
     }
     if (all_int) {
-      buf_printf(b, "switch (_t%d) { ", t);
+      /* an Integer that can be nil: its nil matches no label */
+      if (g_case_scrut_oint == t) buf_printf(b, "switch (_o%d.nil ? %lldLL : _t%d) { ", t, case_switch_miss(nt, whens, nw), t);
+      else buf_printf(b, "switch (_t%d) { ", t);
       for (int w = 0; w < nw; w++) {
         int wc = 0; const int *conds = nt_arr(nt, whens[w], "conditions", &wc);
         for (int j = 0; j < wc; j++)
@@ -7003,7 +7057,8 @@ static void emit_case_expr_in(Compiler *c, int id, Buf *b) {
   }
   /* the statement chain's box (see case_subject_boxes_sentinel) */
   int typed_t = t; TyKind typed_pt = pt;
-  if (case_subject_boxes_sentinel(c, pred, pt)) {
+  int oint_typed = g_case_scrut_oint == t && pt == TY_INT && case_oint_labels_typed(c, whens, nw);
+  if (case_subject_boxes_sentinel(c, pred, pt) && !oint_typed) {
     int bt = ++g_tmp;
     buf_printf(b, "sp_RbVal _t%d = %s(_o%d); ", bt, oint_box(pt), t);
     t = bt; pt = TY_POLY;
@@ -7016,6 +7071,7 @@ static void emit_case_expr_in(Compiler *c, int id, Buf *b) {
     buf_puts(b, w == 0 ? "if (" : "else if (");
     for (int j = 0; j < wc; j++) {
       if (j) buf_puts(b, " || ");
+      if (oint_typed) { case_oint_label(c, conds[j], t, b); continue; }
       if (pred >= 0) {
         /* when ClassName / Mod::Klass: Module#=== via is_a? semantics */
         const char *cty2 = nt_type(nt, conds[j]);
