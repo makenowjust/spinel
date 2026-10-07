@@ -28283,6 +28283,35 @@ static void widen_nullable_keyed_hash_literals(Compiler *c) {
   wnh_n = 0;
 }
 
+/* A block or lambda reads its enclosing scope's variable through one cell
+   (or a copy of it): the slot is one, so whether it holds a nil is one
+   property -- the enclosing local's and the body's same-named local agree
+   (the cell's C type is the owner's, the reads in the body ask theirs). */
+static void sync_captured_nullable(Compiler *c) {
+  const NodeTable *nt = c->nt;
+  for (int round = 0; round < 8; round++) {
+    int changed = 0;
+    static const NodeKind pk[] = { NK_LambdaNode, NK_BlockNode };
+    for (int q = 0; q < 2; q++) {
+      NT_FOREACH_KIND(nt, pk[q], id) {
+        int body = nt_ref(nt, id, "body");
+        if (body < 0) continue;
+        Scope *bs = comp_scope_of(c, body), *encl = comp_scope_of(c, id);
+        if (!bs || !encl || bs == encl) continue;
+        for (int i = 0; i < bs->nlocals; i++) {
+          LocalVar *in = &bs->locals[i];
+          if (!in->name || in->is_param || in->is_block_param) continue;
+          LocalVar *out = scope_local(encl, in->name);
+          if (!out || out == in || out->type != in->type) continue;
+          if (in->type != TY_INT && in->type != TY_FLOAT) continue;
+          if (in->nullable_int != out->nullable_int) { in->nullable_int = out->nullable_int = 1; changed = 1; }
+        }
+      }
+    }
+    if (!changed) break;
+  }
+}
+
 static void mark_nullable_int_locals(Compiler *c) {
   const NodeTable *nt = c->nt;
   /* A scalar local a read can reach before any write starts as its nil and
@@ -36762,6 +36791,7 @@ static void an_phase_reconcile_check(Compiler *c) {
   /* An --rbs seed the settled types statically contradict is a compile error,
      not something to emit a reinterpretation for. */
   mark_nullable_int_locals(c);
+  sync_captured_nullable(c);
   widen_nullable_keyed_hash_literals(c);
   mark_array_or_nil_slots(c);
   /* A local's array KIND has to agree with what its writes actually build. A

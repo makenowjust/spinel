@@ -13941,11 +13941,17 @@ void emit_stmt_tail_inner(Compiler *c, int id, Buf *b, int indent) {
         emit_indent(b, indent); buf_printf(b, "%s = ", g_result_var);
         if (g_result_poly && ct != TY_POLY) {
           Buf bx; memset(&bx, 0, sizeof bx);
-          emit_boxed_text(c, ct, rb.p ? rb.p : "0", &bx);
+          /* an oint cell boxes as that oint */
+          if (lv && oint_kind(ct) && slot_is_oint(lv)) buf_printf(&bx, "%s(%s)", oint_box(ct), rb.p ? rb.p : "");
+          else emit_boxed_text(c, ct, rb.p ? rb.p : "0", &bx);
           buf_printf(b, "%s;\n", bx.p ? bx.p : "sp_box_nil()"); free(bx.p);
         }
         else {
-          buf_printf(b, "%s;\n", rb.p ? rb.p : "0");
+          /* the cell's form against the result's */
+          int co = lv && oint_kind(ct) && slot_is_oint(lv);
+          if (co && !g_result_oint) buf_printf(b, "%s.v;\n", rb.p ? rb.p : "0");
+          else if (!co && oint_kind(ct) && g_result_oint) buf_printf(b, "%s(%s);\n", oint_of(ct), rb.p ? rb.p : "0");
+          else buf_printf(b, "%s;\n", rb.p ? rb.p : "0");
         }
         free(rb.p);
         return;

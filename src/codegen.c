@@ -6785,7 +6785,8 @@ static void emit_cell_alloc(Compiler *c, LocalVar *lv, const char *nm, Buf *b) {
   else if (lv->type != TY_FLOAT && cell_is_typed_ptr(c, lv)) buf_puts(b, cell_scan_fn(lv->type));
   else buf_puts(b, "NULL");
   buf_printf(b, "); SP_GC_ROOT(_cell_%s); *_cell_%s = ", nm, nm);
-  if (lv->type == TY_FLOAT) buf_puts(b, "0.0");
+  if (oint_kind(lv->type) && slot_is_oint(lv)) buf_puts(b, oint_nil(lv->type));   /* a cell of the oint */
+  else if (lv->type == TY_FLOAT) buf_puts(b, "0.0");
   else if (lv->type == TY_POLY) buf_puts(b, "sp_box_nil()");
   else if (vs) buf_puts(b, cell_value_struct_empty(lv->type));
   else if (lv->type != TY_PROC && cell_is_typed_ptr(c, lv)) buf_puts(b, "NULL");
