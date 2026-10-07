@@ -28323,7 +28323,11 @@ static void mark_nullable_int_locals(Compiler *c) {
     ClassInfo *ci = &c->classes[k];
     if (ci->is_struct) continue;
     for (int iv = 0; iv < ci->nivars; iv++)
-      if (ci->ivar_types[iv] == TY_FLOAT && !ivar_assigned_in_initialize(c, k, ci->ivars[iv]))
+      /* an Integer one too: nil out of band, its read is nil until the
+         first write (the nil bit), and "assigned in initialize" means on
+         every path (a top-level statement of initialize) */
+      if ((ci->ivar_types[iv] == TY_FLOAT || ci->ivar_types[iv] == TY_INT) &&
+          !ivar_assigned_in_initialize(c, k, ci->ivars[iv]))
         ci->ivar_nullable_int[iv] = 1;
   }
   /* Method returns propagate through this fixpoint too (a pass-through method

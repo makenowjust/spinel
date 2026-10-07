@@ -1933,6 +1933,11 @@ static int ivs_writes_toplevel(Compiler *c, int body, const char *ivn, int cid, 
    String (which answers one or raises). */
 static int ivs_never_nil(Compiler *c, int v) {
   const NodeTable *nt = c->nt;
+  /* nil out of band: an Integer or Float value the analysis does not mark
+     nullable is never nil (a plain slot cannot hold one) */
+  if (v >= 0 && nt_kind(nt, v) != NK_NilNode && oint_kind(comp_ntype(c, v)) && !nullable_int_value(c, v) &&
+      !node_has_oint_form(c, v))
+    return 1;
   switch (nt_kind(nt, v)) {
     case NK_StringNode: case NK_InterpolatedStringNode: case NK_XStringNode: case NK_IntegerNode:
     case NK_FloatNode: case NK_RationalNode: case NK_ImaginaryNode: case NK_SymbolNode:
