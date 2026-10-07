@@ -6410,6 +6410,9 @@ static int emit_poly_builtin_default_at(Compiler *c, int id, int recv, const cha
   if (bt == TY_UNKNOWN) bt = an_builtin_answer(c, id);
   if (bt == TY_UNKNOWN) return 0;
   if (ret != TY_POLY && bt != ret) return 0;
+  /* the result slot's form, as the dispatch seeded it: an Integer / Float
+     answer that can be nil is held as the oint */
+  int slot_o = oint_kind(ret) && node_is_oint(c, id);
   int slot = view_bind(recv, "_t%d", tv);
   for (int a = 0; a < argc; a++) {
     if (!subtree_has_side_effect(c, argv[a])) continue;
@@ -6435,7 +6438,7 @@ static int emit_poly_builtin_default_at(Compiler *c, int id, int recv, const cha
      asks must not record its unpinned (poly) answer over the pin, or the
      emitter answers boxed and the arm boxes it again */
   int sv_pin = an_pin_node(id);
-  if (setjmp(g_unsup_recover) == 0) emit_expr(c, id, nb);
+  if (setjmp(g_unsup_recover) == 0) { if (slot_o) emit_oint_expr(c, id, ret, nb); else emit_expr(c, id, nb); }
   else ok = 0;
   an_pin_node(sv_pin);
   emit_state_release(sv_state, !ok);
