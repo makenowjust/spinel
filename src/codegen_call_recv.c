@@ -95,6 +95,8 @@ static void emit_int_array_delete(Compiler *c, const char *arr, int arg, int nil
 #include "analyze.h"
 /* codegen_fold.c: a step tail in its oint form, when it can be nil */
 int emit_iter_step_tail_o(Compiler *c, const IterStep *st, TyKind t, Buf *vb);
+/* codegen_fold.c: the call whose oint answer an arm keeps (bsearch) */
+extern int g_face_oint_id, g_face_oint_got;   /* got: the kept oint's kind */
 
 static void emit_str_encode_call(Compiler *c, const char *recv_txt, const int *argv, int argc, Buf *b);
 
@@ -12038,7 +12040,25 @@ static TyKind emit_face_arm(Compiler *c, int id, unsigned kind, unsigned flags, 
     if (bop_answers_self(as, name, argc, has_blk) == BOPF_SELF) nat = as;
   }
   Buf cb; memset(&cb, 0, sizeof cb);
+  /* An Integer or Float answer that can be nil (bsearch finding nothing)
+     comes back as its oint: a poly slot boxes the nil, a plain one unwraps
+     it where it is read */
+  int sfo = g_face_oint_id, sfg = g_face_oint_got;
+  int keep_o = (nat == TY_INT || nat == TY_FLOAT) && !node_is_oint(c, id);
+  if (keep_o) { g_face_oint_id = id; g_face_oint_got = 0; }
   emit_call(c, id, &cb);
+  TyKind got_o = keep_o ? (TyKind)g_face_oint_got : TY_UNKNOWN;
+  g_face_oint_id = sfo; g_face_oint_got = sfg;
+  if (got_o) {
+    Buf ob; memset(&ob, 0, sizeof ob);
+    TyKind slot = repr_of(c, id).as_ty;
+    if (slot == TY_POLY || slot == TY_UNKNOWN) {
+      buf_printf(&ob, "%s(%s)", got_o == TY_FLOAT ? "sp_box_ofloat" : "sp_box_oint", cb.p ? cb.p : "");
+      nat = TY_POLY;
+    }
+    else { buf_printf(&ob, "%s(%s)", oint_arg(got_o), cb.p ? cb.p : ""); nat = got_o; }
+    free(cb.p); cb = ob;
+  }
   view_pop(c, fv);
   view_pop(c, v);
   view_unbind(g_n_argov - 1);

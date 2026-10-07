@@ -771,6 +771,7 @@ static inline sp_int    sp_oint_opnd(sp_oint o)                    { if (SP_UNLI
 static inline sp_float  sp_ofloat_opnd(sp_ofloat o)                { if (SP_UNLIKELY(o.nil)) sp_raise_nil_opnd("Float"); return o.v; }
 /* ...whose LEFT operand is of class lcls (`1 + f`: "nil can't be coerced into Integer") */
 static inline sp_float  sp_ofloat_opnd_in(sp_ofloat o, const char *lcls) { if (SP_UNLIKELY(o.nil)) sp_raise_nil_opnd(lcls); return o.v; }
+static inline sp_int    sp_oint_opnd_in(sp_oint o, const char *lcls)     { if (SP_UNLIKELY(o.nil)) sp_raise_nil_opnd(lcls); return o.v; }   /* `1.0 * b`: "into Float" */
 /* the RIGHT operand of a comparison (`1 < x`, `x.clamp(0, y)`): Comparable's
    ArgumentError, naming the LEFT operand's class */
 static inline sp_int    sp_oint_cmp_opnd(sp_oint o, const char *op, const char *lcls)     { if (SP_UNLIKELY(o.nil)) sp_raise_nil_cmp(0, op, lcls); return o.v; }

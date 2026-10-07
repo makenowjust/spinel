@@ -163,8 +163,9 @@ void sp_IntArray_splice(sp_IntArray*a,sp_int start,sp_int len,const sp_int*src,s
 }
 /* the splice of a whole typed array, whose nil elements come along */
 void sp_IntArray_splice_o(sp_IntArray*a,sp_int start,sp_int len,sp_IntArray*src){
-  SP_GC_ROOT(a);SP_GC_ROOT(src);
+  /* a source with no bits is the plain splice, which roots what it needs */
   if(!src||!src->nilbits){sp_IntArray_splice(a,start,len,src?src->data+src->start:NULL,src?src->len:0);return;}
+  SP_GC_ROOT(a);SP_GC_ROOT(src);
   sp_oint*p=ia_pack(src);sp_int n=src->len;
   sp_int*vals=(sp_int*)sp_pl_alloc(sizeof(sp_int)*(size_t)(n>0?n:1));if(!vals)sp_oom_die();
   for(sp_int i=0;i<n;i++)vals[i]=p[i].v;
@@ -198,8 +199,9 @@ void sp_FloatArray_splice(sp_FloatArray*a,sp_int start,sp_int len,const sp_float
   sp_pl_free(sb);sp_pl_free(tb);
 }
 void sp_FloatArray_splice_o(sp_FloatArray*a,sp_int start,sp_int len,sp_FloatArray*src){
-  SP_GC_ROOT(a);SP_GC_ROOT(src);
+  /* a source with no bits is the plain splice, which roots what it needs */
   if(!src||!src->nilbits){sp_FloatArray_splice(a,start,len,src?src->data:NULL,src?src->len:0);return;}
+  SP_GC_ROOT(a);SP_GC_ROOT(src);
   sp_ofloat*p=fa_pack(src);sp_int n=src->len;
   sp_float*vals=(sp_float*)sp_pl_alloc(sizeof(sp_float)*(size_t)(n>0?n:1));if(!vals)sp_oom_die();
   for(sp_int i=0;i<n;i++)vals[i]=p[i].v;

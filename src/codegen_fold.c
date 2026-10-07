@@ -6,8 +6,15 @@
 /* An sp_oint / sp_ofloat expression where the dispatcher wants the node
    plain is unwrapped here (TypeError for nil); an oint consumer takes it
    as it is. */
-static void oint_open(Compiler *c, int id, TyKind t, Buf *b) { if (!node_is_oint(c, id)) buf_printf(b, "%s(", oint_arg(t)); }
-static void oint_close(Compiler *c, int id, Buf *b) { if (!node_is_oint(c, id)) buf_puts(b, ")"); }
+/* The call a boxed receiver's arm re-enters (emit_face_arm) takes the
+   answer as it is too: the arm boxes a nil as nil. */
+int g_face_oint_id = -1, g_face_oint_got = 0;   /* got: the oint's kind */
+static int oint_kept(Compiler *c, int id, TyKind t) {
+  if (id == g_face_oint_id) { if (t != TY_UNKNOWN) g_face_oint_got = t; return 1; }
+  return node_is_oint(c, id);
+}
+static void oint_open(Compiler *c, int id, TyKind t, Buf *b) { if (!oint_kept(c, id, t)) buf_printf(b, "%s(", oint_arg(t)); }
+static void oint_close(Compiler *c, int id, Buf *b) { if (!oint_kept(c, id, TY_UNKNOWN)) buf_puts(b, ")"); }
 static void emit_seedless_fold_answer(Compiler *c, int id, TyKind et, int tn, int tacc, Buf *b);
 /* A caller of emit_block_value_into that declared `dest` as the oint of an
    Integer / Float value (a `next nil`, a nullable tail) sets this for the
@@ -27,6 +34,8 @@ static int bv_value_may_be_nil(Compiler *c, int block, TyKind t) {
 static int g_oint_slots[32], g_oint_slot_n = 0;
 static void oint_slot_mark(int slot) { g_oint_slots[g_oint_slot_n++ % 32] = slot; }
 static int oint_slot_is(int slot) { for (int i = 0; i < 32; i++) if (g_oint_slots[i] == slot && slot) return 1; return 0; }
+int emit_iter_step_tail_o(Compiler *c, const IterStep *st, TyKind t, Buf *vb);
+TyKind iter_step_tail_ty(Compiler *c, const IterStep *st);
 /* The value a collecting fold pushes is a plain C value (a temp, or a tail
    rendered plain): where nil_store_sfx chose the _nilable store (the tail
    can be nil), that store takes the value as its oint, never nil here (a
@@ -1999,7 +2008,22 @@ int emit_sum_block_expr(Compiler *c, int id, Buf *b) {
     Buf *saved_pre = g_pre; g_pre = &inner;
     { int svlm = g_line_map; g_line_map = 0;  /* a #line directive mid stmt-expr is a stray '#' */
       IterStep st; emit_iter_step_open(c, block, 0, 0, &st);
-      emit_iter_step_tail(c, &st, &valb);
+      /* a block value that can be nil is the accumulator's operand: CRuby's
+         "nil can't be coerced into <the accumulator's class>", which is
+         Integer until a Float term arrives when the sum starts at an
+         Integer (the first term), Float after it */
+      TyKind vk = iter_step_tail_ty(c, &st);
+      Buf ob; memset(&ob, 0, sizeof ob);
+      if ((acct == TY_INT || acct == TY_FLOAT) && oint_kind(vk) && emit_iter_step_tail_o(c, &st, vk, &ob)) {
+        char lc[48];
+        if (acct == TY_INT) snprintf(lc, sizeof lc, "\"Integer\"");
+        else if (argc == 1 && repr_of(c, argv[0]).as_ty == TY_FLOAT) snprintf(lc, sizeof lc, "\"Float\"");
+        else snprintf(lc, sizeof lc, "(_t%d == 0 ? \"Integer\" : \"Float\")", ti);
+        if (vk == TY_FLOAT) buf_printf(&valb, "sp_ofloat_opnd_in(%s, %s)", ob.p, lc);
+        else buf_printf(&valb, "%ssp_oint_opnd_in(%s, %s)", acct == TY_FLOAT ? "(sp_float)" : "", ob.p, lc);
+      }
+      else emit_iter_step_tail(c, &st, &valb);
+      free(ob.p);
       g_line_map = svlm; }
     g_pre = saved_pre;
     if (inner.p) buf_puts(b, inner.p);
@@ -3762,6 +3786,15 @@ TyKind emit_iter_step_tail(Compiler *c, const IterStep *st, Buf *vb) {
   if (st->want_poly) { emit_boxed(c, bb[bn - 1], vb); return TY_POLY; }
   emit_expr(c, bb[bn - 1], vb);
   return tt;
+}
+
+/* The kind of the step's answer, as emit_iter_step_tail would give it */
+TyKind iter_step_tail_ty(Compiler *c, const IterStep *st) {
+  if (st->slot) return st->slot_ty;
+  int body = nt_ref(c->nt, st->block, "body");
+  int bn = 0; const int *bb = body >= 0 ? nt_arr(c->nt, body, "body", &bn) : NULL;
+  if (bn == 0 || st->want_poly) return TY_POLY;
+  return repr_of(c, bb[bn - 1]).as_ty;
 }
 
 /* The tail in its oint form when it can be nil (an oint slot, or a tail
