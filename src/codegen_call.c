@@ -4563,6 +4563,36 @@ int obj_cmp_by_identity(TyKind t) {
   }
 }
 
+/* Can a `next v` of this block body (not one of a nested block, lambda,
+   def or loop, which `next` leaves instead) hand the slot a nil: a bare
+   `next`, `next nil`, or a value that can be nil. */
+static int block_next_may_be_nil(Compiler *c, int id, int depth) {
+  const NodeTable *nt = c->nt;
+  if (id < 0 || depth > 200) return 0;
+  NodeKind k = nt_kind(nt, id);
+  if (k == NK_NextNode) {
+    int a = nt_ref(nt, id, "arguments"), an = 0;
+    const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &an) : NULL;
+    if (an == 0) return 1;
+    return an == 1 && node_may_be_nil(c, av[0]);
+  }
+  if (k == NK_DefNode || k == NK_ClassNode || k == NK_ModuleNode || k == NK_WhileNode ||
+      k == NK_UntilNode || k == NK_LambdaNode || k == NK_ForNode) return 0;
+  if (k == NK_CallNode && nt_ref(nt, id, "block") >= 0 && nt_kind(nt, nt_ref(nt, id, "block")) == NK_BlockNode) {
+    /* a nested block's `next` is its own; its receiver and arguments are this body's */
+    return block_next_may_be_nil(c, nt_ref(nt, id, "receiver"), depth + 1) ||
+           block_next_may_be_nil(c, nt_ref(nt, id, "arguments"), depth + 1);
+  }
+  int nr = nt_num_refs(nt, id);
+  for (int i = 0; i < nr; i++) if (block_next_may_be_nil(c, nt_ref_at(nt, id, i), depth + 1)) return 1;
+  int na = nt_num_arrs(nt, id);
+  for (int i = 0; i < na; i++) {
+    int n = 0; const int *ids = nt_arr_at(nt, id, i, &n);
+    for (int j = 0; j < n; j++) if (block_next_may_be_nil(c, ids[j], depth + 1)) return 1;
+  }
+  return 0;
+}
+
 /* Does the program define `<=>` on Object itself? Every class that has none of
    its own then answers it. */
 int object_defines_cmp(Compiler *c) {
@@ -11737,7 +11767,8 @@ static int emit_new_call_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, 
       char anbuf[32]; int anv = 0;
       /* an Integer or Float tail that can be nil is pushed with its nil: the
          slot (and the `next` slot) is its oint */
-      int tail_o = bn > 0 && bb && (sp_streq(k, "Int") || sp_streq(k, "Float")) && nil_store_sfx(c, k, bb[bn - 1])[0];
+      int tail_o = bn > 0 && bb && (sp_streq(k, "Int") || sp_streq(k, "Float")) &&
+                   (nil_store_sfx(c, k, bb[bn - 1])[0] || (an_next && block_next_may_be_nil(c, bbody, 0)));
       if (an_next) {
         anv = ++g_tmp;
         snprintf(anbuf, sizeof anbuf, "_t%d", anv);
@@ -11803,7 +11834,7 @@ static int emit_new_call_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, 
         }
         else if (sp_streq(k, "Ptr"))
           buf_printf(g_pre, "sp_PtrArray_push(_t%d, (void *)(%s));\n", tr, vb.p ? vb.p : "0");
-        else { buf_printf(g_pre, "sp_%sArray_push%s(_t%d, %s);\n", k, nil_store_sfx(c, k, bb[bn - 1]), tr, vb.p ? vb.p : ""); }
+        else { buf_printf(g_pre, "sp_%sArray_push%s(_t%d, %s);\n", k, tail_o ? "_nilable" : nil_store_sfx(c, k, bb[bn - 1]), tr, vb.p ? vb.p : ""); }
         free(vb.p);
       }
       g_indent--;
@@ -13636,8 +13667,13 @@ static int emit_array_arith_call(Compiler *c, int id, Buf *b) {
     if (eff_res == TY_INT) {
       int isdivmod = is_div_or_mod(name);
       buf_printf(b, "%s(", int_arith_fn(name));
-      emit_expr(c, recv, b); buf_puts(b, ", ");
+      /* a receiver that can be nil raises NoMethodError naming the operator;
+         a nil right operand the coercion TypeError */
+      emit_scalar_operand_op(c, recv, name, b); buf_puts(b, ", ");
       if (isdivmod) emit_int_divisor(c, argv[0], b);
+      else if (oint_kind(comp_ntype(c, argv[0])) && cmp_operand_may_be_nil(c, argv[0])) {
+        buf_puts(b, "sp_oint_opnd("); emit_oint_expr(c, argv[0], TY_INT, b); buf_puts(b, ")");
+      }
       else emit_scalar_operand(c, argv[0], "0", b);
       buf_puts(b, ")");
       return 1;
@@ -13753,6 +13789,8 @@ static int emit_array_arith_call(Compiler *c, int id, Buf *b) {
       if (rgt9 == TY_INT) buf_puts(b, "(double)(");
       else if (rgt9 == TY_BIGINT) buf_puts(b, "sp_bigint_to_double(");
       if (rnf.p) buf_puts(b, rnf.p);
+      /* a nil right operand: a comparison's ArgumentError, an arithmetic's TypeError */
+      else if (rfn && is_arith_op(name)) { buf_puts(b, "sp_ofloat_opnd("); emit_oint_expr(c, argv[0], TY_FLOAT, b); buf_puts(b, ")"); }
       else if (rfn) { buf_puts(b, "sp_ofloat_cmp_opnd("); emit_oint_expr(c, argv[0], TY_FLOAT, b); buf_printf(b, ", \"%s\", \"Float\")", name); }
       else emit_scalar_operand(c, argv[0], "0.0", b);
       if (rgt9 == TY_INT || rgt9 == TY_BIGINT) buf_puts(b, ")");
@@ -18523,7 +18561,7 @@ static int operand_fresh_str(Compiler *c, int node) {
    its left included (`new(a: r.int, b: f(NAMES.fetch(r.int)))` read the
    second int first), so they are placed before this operand's binding. A
    fresh String (operand_fresh_str) is rendered as the String. */
-static void render_operand(Compiler *c, int node, int fresh, Buf *out, Buf *pre) {
+static void render_operand(Compiler *c, int node, int fresh, int oint, Buf *out, Buf *pre) {
   memset(out, 0, sizeof *out);
   memset(pre, 0, sizeof *pre);
   Buf *sv = g_pre;
@@ -18533,6 +18571,9 @@ static void render_operand(Compiler *c, int node, int fresh, Buf *out, Buf *pre)
     emit_str_expr(c, node, out);
     view_pop(c, v);
   }
+  /* an Integer / Float producer whose nil rides beside the value keeps it
+     in the temp (view_bind_o): `a[i] = xs.max` stores the nil */
+  else if (oint) emit_oint_expr(c, node, comp_ntype(c, node), out);
   else emit_expr(c, node, out);
   g_pre = sv;
 }
@@ -18573,7 +18614,7 @@ static int emit_operands_in_order(Compiler *c, int id, Buf *b) {
      which is a worse order than the one C picked. Only a local read ahead of
      it that it can rebind runs first, with the operands before it
      (emit_operands_before_unbound). */
-  int node[8], fresh[8], nb = 0;
+  int node[8], fresh[8], oo[8], nb = 0;
   TyKind ty[8];
   int operand[9], nop = 0;
   if (recv >= 0) operand[nop++] = recv;
@@ -18643,7 +18684,9 @@ static int emit_operands_in_order(Compiler *c, int id, Buf *b) {
     TyKind t = fr ? TY_STRING : repr_of(c, operand[i]).as_ty;
     if (t == TY_UNKNOWN || t == TY_VOID || t == TY_NIL) return 0;
     if (nb >= 8) return 0;
-    node[nb] = operand[i]; ty[nb] = t; fresh[nb] = fr; nb++;
+    node[nb] = operand[i]; ty[nb] = t; fresh[nb] = fr;
+    oo[nb] = !fr && oint_kind(t) && node_is_oint(c, operand[i]);
+    nb++;
   }
   /* Operands that are all pure reads -- `m.data[i * m.cols + j]`, two readers
      and some arithmetic -- have nothing to order and nothing to protect: none
@@ -18675,7 +18718,7 @@ static int emit_operands_in_order(Compiler *c, int id, Buf *b) {
      chain (#4925). */
   int operands_last = observable < 2;
   for (; !operands_last && rendered < nb && ok; rendered++) {
-    render_operand(c, node[rendered], fresh[rendered], &opb[rendered], &opp[rendered]);
+    render_operand(c, node[rendered], fresh[rendered], oo[rendered], &opb[rendered], &opp[rendered]);
     if (text_is_raise_token(opb[rendered].p)) ok = 0;
   }
   Buf ob; memset(&ob, 0, sizeof ob);
@@ -18683,7 +18726,7 @@ static int emit_operands_in_order(Compiler *c, int id, Buf *b) {
   if (ok) {
     for (int i = 0; i < nb; i++) {
       tmp[i] = ++g_tmp;
-      view_bind(node[i], "_t%d", tmp[i]);
+      if (oo[i]) view_bind_o(node[i], "_t%d", tmp[i]); else view_bind(node[i], "_t%d", tmp[i]);
     }
     int saved_node = g_operand_order_node;
     g_operand_order_node = id;
@@ -18708,7 +18751,7 @@ static int emit_operands_in_order(Compiler *c, int id, Buf *b) {
                text_uses_tmp(g_pre->p + pre_mark, tmp[i])) ok = 0;
     }
     for (; operands_last && rendered < nb && ok; rendered++) {
-      render_operand(c, node[rendered], fresh[rendered], &opb[rendered], &opp[rendered]);
+      render_operand(c, node[rendered], fresh[rendered], oo[rendered], &opb[rendered], &opp[rendered]);
       if (text_is_raise_token(opb[rendered].p)) ok = 0;
     }
   }
@@ -18731,8 +18774,8 @@ static int emit_operands_in_order(Compiler *c, int id, Buf *b) {
   for (int i = 0; i < nb; i++) {
     if (opp[i].p) buf_puts(b, opp[i].p);
     free(opp[i].p);
-    emit_ctype(c, ty[i], b);
-    buf_printf(b, " _t%d = %s; ", tmp[i], opb[i].p ? opb[i].p : default_value_from_compiler(c, ty[i]));
+    if (oo[i]) buf_puts(b, oint_ctype(ty[i])); else emit_ctype(c, ty[i], b);
+    buf_printf(b, " _t%d = %s; ", tmp[i], opb[i].p ? opb[i].p : oo[i] ? oint_nil(ty[i]) : default_value_from_compiler(c, ty[i]));
     /* a by-value object carries its Strings in the temp itself */
     if (comp_ty_value_obj(c, ty[i])) {
       if (ty_gc_holds_refs(c, ty[i])) { emit_gc_root_tmp_refs(c, ty[i], tmp[i], b); buf_puts(b, " "); }
@@ -19088,7 +19131,7 @@ static void emit_nil_target_head(Compiler *c, int id, Buf *b, const char *lead, 
     Buf ob, op;
     /* not fresh: ty[i] declares the temp, and a fresh String (#7580) renders as the String
        where its stored type is the handle */
-    render_operand(c, node[i], 0, &ob, &op);
+    render_operand(c, node[i], 0, 0, &ob, &op);
     int t = ++g_tmp;
     if (op.p) buf_puts(b, op.p);
     buf_puts(b, lead);

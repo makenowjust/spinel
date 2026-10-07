@@ -25291,6 +25291,7 @@ static int call_block_tail(Compiler *c, int call) {
    local in it (`[r].map { |x| x.p_ }[0]`) be seen at all (#3505). */
 static int nullable_int_elem_expr(Compiler *c, int v, int depth);
 
+static int struct_member_slot(Compiler *c, int cid, const char *name, ClassInfo **out);
 /* What an object call (`k.arr`) hands out: *mi is the method the receiver's
    class chain resolves, whose tail decides, or else the answer is the ivar an
    attr_reader reads, found by its alias-resolved name in the class that
@@ -25302,15 +25303,29 @@ static int object_call_ivar(Compiler *c, int call, ClassInfo **out, int *mi) {
   const char *nm = nt_str(nt, call, "name");
   int rc = nt_ref(nt, call, "receiver");
   *mi = -1;
-  if (!nm || rc < 0 || !ty_is_object(infer_type(c, rc))) return -1;
-  int cid = ty_object_class(infer_type(c, rc)), defc = -1;
+  int cid = -1, defc = -1;
+  if (!nm) return -1;
+  if (rc >= 0 && ty_is_object(infer_type(c, rc))) cid = ty_object_class(infer_type(c, rc));
+  else if (rc < 0) {
+    /* a receiverless reader in an instance method: self's class (`bottom[x] = v`
+       inside the Struct's own method marks the member) */
+    Scope *cs = comp_scope_of(c, call);
+    if (cs && cs->class_id >= 0 && !cs->is_cmethod) cid = cs->class_id;
+  }
+  if (cid < 0) return -1;
   *mi = comp_method_in_chain(c, cid, nm, NULL);
   if (*mi > 0) {
     int tail = scope_body_last(c, *mi);
     return tail >= 0 && nt_kind(nt, tail) == NK_InstanceVariableReadNode ?
            nullable_elem_ivar(c, tail, out) : -1;
   }
-  if (!comp_reader_in_chain(c, cid, nm, &defc) || defc < 0) return -1;
+  if (!comp_reader_in_chain(c, cid, nm, &defc) || defc < 0) {
+    /* a Struct / Data member's reader */
+    ClassInfo *sci = NULL;
+    int siv = struct_member_slot(c, cid, nm, &sci);
+    if (siv >= 0 && sci) { *out = sci; return siv; }
+    return -1;
+  }
   char ivb[300];
   snprintf(ivb, sizeof ivb, "@%s", comp_resolve_alias(c, cid, nm));
   return nullable_elem_ivar_in(c, defc, ivb, out);
@@ -28174,8 +28189,10 @@ static void mark_nullable_int_locals(Compiler *c) {
       if (!lv || (lv->type != TY_INT && lv->type != TY_FLOAT) || lv->nullable_int) continue;
       /* An outright `i = nil` on a slot the other writes make an int leaves
          the sentinel in it just as a search miss does, and so does a local
-         only nil is written to, here or through `&&=` / `||=` */
-      if (nullable_int_value(c, v) || nil_only_read(c, &nilonly, v)) {
+         only nil is written to, here or through `&&=` / `||=`; a boxed value
+         (`z = f(nil)` answering poly) can be nil too, and unboxes into the
+         slot with it */
+      if (nullable_int_value(c, v) || nil_only_read(c, &nilonly, v) || infer_type(c, v) == TY_POLY) {
         lv->nullable_int = 1; changed = 1;
       }
     }
@@ -28202,7 +28219,7 @@ static void mark_nullable_int_locals(Compiler *c) {
       const char *rn = gn ? comp_resolve_gvar(c, gn + 1) : NULL;
       LocalVar *g = rn ? comp_gvar(c, rn) : NULL;
       if (v < 0 || !g || (g->type != TY_INT && g->type != TY_FLOAT) || g->nullable_int) continue;
-      if (nullable_int_value(c, v)) { g->nullable_int = 1; changed = 1; }
+      if (nullable_int_value(c, v) || infer_type(c, v) == TY_POLY) { g->nullable_int = 1; changed = 1; }
     }
     /* A PARAMETER whose DEFAULT is the nil literal carries the sentinel on
        every defaulted call even when each explicit call site passes a real
@@ -28378,7 +28395,7 @@ static void mark_nullable_int_locals(Compiler *c) {
       int iv = comp_ivar_index(ci, nt_str(nt, id, "name"));
       if (iv < 0 || ci->ivar_nullable_int[iv]) continue;
       if (ci->ivar_types[iv] != TY_INT && ci->ivar_types[iv] != TY_FLOAT) continue;
-      if (nullable_int_value(c, v)) { ci->ivar_nullable_int[iv] = 1; changed = 1; }
+      if (nullable_int_value(c, v) || infer_type(c, v) == TY_POLY) { ci->ivar_nullable_int[iv] = 1; changed = 1; }
     }
     /* ... and through a setter that is no ivar write in the program: an
        attr_writer's or a Struct member's `o.x = v` */

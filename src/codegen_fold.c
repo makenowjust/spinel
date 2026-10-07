@@ -8014,11 +8014,16 @@ static void emit_arg_temp(Compiler *c, int v) {
     char thr[24]; snprintf(thr, sizeof thr, "_t%d", th);
     emit_strbuf_node_read(c, v, thr, &hb);
   }
+  /* an Integer / Float producer whose nil rides beside the value keeps it
+     in the temp (view_bind_o below): `a[i] = xs.max` stores the nil */
+  int to = !wshare && oint_kind(at) && node_is_oint(c, v);
+  if (to) emit_oint_expr(c, v, at, &hb);
   else emit_expr(c, v, &hb);
   emit_indent(g_pre, g_indent);
   if (at == TY_POLY) buf_puts(g_pre, "sp_RbVal");
+  else if (to) buf_puts(g_pre, oint_ctype(at));
   else emit_ctype(c, at, g_pre);
-  buf_printf(g_pre, " _t%d = %s;", t, hb.p ? hb.p : default_value_from_compiler(c, at));
+  buf_printf(g_pre, " _t%d = %s;", t, hb.p ? hb.p : to ? oint_nil(at) : default_value_from_compiler(c, at));
   if (at == TY_POLY) buf_printf(g_pre, " SP_GC_ROOT_RBVAL(_t%d);", t);
   else if (needs_root(at)) buf_printf(g_pre, " SP_GC_ROOT(_t%d);", t);
   buf_puts(g_pre, "\n");
@@ -8040,7 +8045,7 @@ static void emit_arg_temp(Compiler *c, int v) {
     }
     g_ran_hnd[g_n_ran_hnd++] = (RanHandle){ g_n_argov, v, t, th };
   }
-  view_bind(v, "_t%d", t);
+  if (to) view_bind_o(v, "_t%d", t); else view_bind(v, "_t%d", t);
 }
 
 /* See codegen_internal.h. */
