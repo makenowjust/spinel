@@ -10283,6 +10283,10 @@ static int emit_multi_write_scalar(Compiler *c, int id, Buf *b, int indent, cons
           if (sp_streq(k, "Poly")) buf_printf(b, "%s(%s)", oint_unbox(ltt), gx);
           else buf_printf(b, "sp_%sArray_oget(_t%d, %dLL)", k, tarr, i);
         }
+        /* a boxed target from a number array: past the end (or a nil
+           element) is nil, boxed with it */
+        else if (ltt == TY_POLY && oint_kind(elem) && !sp_streq(k, "Poly"))
+          buf_printf(b, "%s(sp_%sArray_oget(_t%d, %dLL))", oint_box(elem), k, tarr, i);
         else if (ltt == TY_POLY && !sp_streq(k, "Poly")) emit_boxed_src(c, elem, gx, b);
         else if (sp_streq(k, "Poly") && ltt != TY_POLY && ltt != TY_UNKNOWN) {
           /* typed target from a poly tuple (known multi-value return) */

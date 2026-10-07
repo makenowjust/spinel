@@ -3807,6 +3807,17 @@ void emit_iter_param_assign(Compiler *c, int block, const char *p0_orig,
     buf_printf(b, "lv_%s = %s;\n", p0_ren, bx.p ? bx.p : src_expr);
     free(bx.p);
   }
+  /* a param that holds its nil beside the value takes the source with it:
+     an element read through `_oget`, a box through its oint unbox, a
+     plain value lifted */
+  else if (oint_kind(pt) && slot_is_oint(lv)) {
+    const char *g = strstr(src_expr, "Array_get(");
+    if (src_type == TY_NIL) buf_printf(b, "lv_%s = %s;\n", p0_ren, oint_nil(pt));
+    else if (src_type == TY_POLY) buf_printf(b, "lv_%s = %s(%s);\n", p0_ren, oint_unbox(pt), src_expr);
+    else if (g && !strncmp(src_expr, "sp_", 3) && !strstr(src_expr, "PolyArray_get("))
+      buf_printf(b, "lv_%s = %.*sArray_oget(%s;\n", p0_ren, (int)(g - src_expr), src_expr, g + 10);
+    else buf_printf(b, "lv_%s = %s(%s);\n", p0_ren, oint_of(pt), src_expr);
+  }
   else {
     buf_printf(b, "lv_%s = %s;\n", p0_ren, src_expr);
   }
@@ -5385,7 +5396,9 @@ static int iter_range_upto_arms(Compiler *c, int id, Buf *b, int indent, const N
        walked up from INTPTR_MIN, whose first value read back as nil */
     emit_indent(b, indent);
     buf_printf(b, "if (_t%d.nobeg && _t%d > 0) sp_range_nil_begin_raise();\n", t, ts);
-    if (clv && clv->type == TY_POLY) {
+    /* a param boxed, or holding its nil beside the value: a plain counter
+       drives the walk and the param is rebound from it */
+    if (clv && (clv->type == TY_POLY || (clv->type == TY_INT && slot_is_oint(clv)))) {
       int tc = ++g_tmp;
       emit_indent(b, indent);
       { char v[32], f[40], s[32], l[32];
@@ -5393,7 +5406,7 @@ static int iter_range_upto_arms(Compiler *c, int id, Buf *b, int indent, const N
         snprintf(s, sizeof s, "_t%d", ts); snprintf(l, sizeof l, "_t%d", te);
         emit_range_walk_head(b, indent, v, 1, f, s, l); }
       emit_indent(b, indent + 1);
-      buf_printf(b, "lv_%s = sp_box_int(_t%d);\n", p0, tc);
+      buf_printf(b, "lv_%s = %s(_t%d);\n", p0, clv->type == TY_POLY ? "sp_box_int" : "sp_oint_of", tc);
       emit_loop_body(c, body, b, indent + 1);
       emit_indent(b, indent); buf_puts(b, "}\n");
       return 1;
