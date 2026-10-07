@@ -9036,6 +9036,15 @@ static int emit_struct_recv_call(Compiler *c, int id, Buf *b, const NodeTable *n
       if (argc == 1) { emit_expr(c, recv, b); buf_puts(b, "; "); }
       else emit_recv_rooted(c, recv, t, "SP_GC_ROOT", b);
       if (argc == 1 && mt == TY_STRBUF) emit_strbuf_node_read(c, id, fld, b);
+      /* one key on a number member with a nil bit: read with the bit -- the
+         oint where the call's consumer takes one, else unwrapped */
+      else if (argc == 1 && oint_kind(mt) && ivar_has_nilbit(c, (int)(sc - c->classes), mi)) {
+        char objp[40]; snprintf(objp, sizeof objp, "_t%d->", t);
+        char bit[400]; ivar_nilbit_test(c, (int)(sc - c->classes), mi, objp, bit, sizeof bit);
+        if (!node_is_oint(c, id)) buf_printf(b, "%s(", oint_arg(mt));
+        buf_printf(b, "((%s){ %s, (%s) != 0 })", oint_ctype(mt), fld, bit);
+        if (!node_is_oint(c, id)) buf_puts(b, ")");
+      }
       else if (argc == 1) buf_puts(b, fld);
       else if (ty_is_hash(mt) && argc == 2) {
         const char *hn = ty_hash_cname(mt);
