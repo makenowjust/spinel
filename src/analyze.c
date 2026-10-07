@@ -25219,6 +25219,8 @@ static int nullable_int_call_name(const char *nm) {
   static const char *const N[] = {
     "index", "rindex", "byteindex", "byterindex", "delete_at", "slice!", "pop", "shift",
     "delete", "nonzero?", "infinite?", "getbyte", "bsearch", "bsearch_index", "unpack1",
+    /* Process::Status: nil when the process did not exit / was not signaled */
+    "exitstatus", "termsig", "stopsig",
     /* `a <=> b` answers nil when the two are not comparable, and the poly
        helper spells that with the sentinel like every other nullable int */
     "<=>", NULL };
