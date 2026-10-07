@@ -16580,6 +16580,20 @@ static char *iow_rhs(Compiler *c, int v, int mode, Buf *pre) {
    and that right-hand side can replace the slot's value (#4875). */
 static void iow_capture_slot(Compiler *c, TyKind t, char *slot, size_t n, Buf *b) {
   int ts = ++g_tmp;
+  /* a nil-checked read (`sp_oint_val(<oint>, "op")`) keeps the oint: the
+     NoMethodError comes at the operator, after the right-hand side ran, as
+     CRuby reads the element, runs the operand, then calls the method */
+  { int fl = !strncmp(slot, "sp_ofloat_val(", 14), il = !strncmp(slot, "sp_oint_val(", 12);
+    const char *q = (fl || il) ? strstr(slot, ", \"") : NULL;
+    if (q) { const char *q2; while ((q2 = strstr(q + 1, ", \""))) q = q2; }
+    if (q) {
+      size_t pre = fl ? 14 : 12;
+      char op[64]; snprintf(op, sizeof op, "%s", q + 2);   /* "\"op\")" */
+      buf_printf(b, "%s _t%d = %.*s; ", fl ? "sp_ofloat" : "sp_oint", ts, (int)(q - slot - pre), slot + pre);
+      snprintf(slot, n, "%s(_t%d, %s", fl ? "sp_ofloat_val" : "sp_oint_val", ts, op);
+      return;
+    }
+  }
   buf_printf(b, "%s _t%d = %s; ", c_type_name(t), ts, slot);
   if (ty_gc_rootable(c, t)) { emit_gc_root_tmp(c, t, ts, b); buf_puts(b, " "); }
   snprintf(slot, n, "_t%d", ts);
@@ -16744,6 +16758,16 @@ void emit_index_op_write(Compiler *c, int id, Buf *b, int indent) {
     Buf nfb; memset(&nfb, 0, sizeof nfb);
     char *rhs = fnil && fuse && vt == TY_FLOAT && emit_nilfree_operand(c, v, op, 0, slot, &nfb)
               ? nfb.p : iow_rhs(c, v, mode, eff ? b : NULL);
+    /* the captured slot unwraps at the operator: the right-hand side with
+       an effect runs ahead of it, into its own temp (C leaves the operand
+       order of `x + f()` open) */
+    if (eff && rhs && (!strncmp(slot, "sp_ofloat_val(", 14) || !strncmp(slot, "sp_oint_val(", 12))) {
+      int trh = ++g_tmp;
+      buf_printf(b, "__typeof__(%s) _t%d = %s; ", rhs, trh, rhs);
+      free(rhs);
+      char rbuf[24]; snprintf(rbuf, sizeof rbuf, "_t%d", trh);
+      rhs = strdup(rbuf);
+    }
     /* An Integer or Float slot in range of a mutable array is folded where it
        is: one bounds check instead of the get's and then the set's. Anything
        else -- a negative index, one past the end, a frozen array, a nil slot's
