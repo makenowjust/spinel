@@ -1,6 +1,7 @@
 #include <stdint.h>
 #include <limits.h>
 #include "analyze_internal.h"
+#include "builtin_ops.h"
 #include "repr.h"
 #include "decide.h"
 #include "call_plan.h"
@@ -28482,6 +28483,18 @@ static void mark_nullable_int_locals(Compiler *c) {
         TyKind rt = infer_type(c, recv);
         if (ty_is_object(rt))
           mi = comp_method_in_chain(c, ty_object_class(rt), nt_str(nt, id, "name"), NULL);
+        /* a builtin-typed receiver calling a method the program adds to
+           Object that no builtin row serves: codegen's Object fallback
+           reaches it, so the nil its arguments carry marks it (`12.enc(nil)`) */
+        else if (rt != TY_POLY && rt != TY_UNKNOWN && rt != TY_VOID && rt != TY_NIL &&
+                 nt_kind(nt, recv) != NK_ConstantReadNode && nt_kind(nt, recv) != NK_ConstantPathNode &&
+                 nt_str(nt, id, "name")) {
+          int oci = comp_class_index(c, "Object");
+          int omi = oci >= 0 ? comp_method_in_class(c, oci, nt_str(nt, id, "name")) : -1;
+          int ba = nt_ref(nt, id, "arguments"); int bac = 0;
+          if (ba >= 0) nt_arr(nt, ba, "arguments", &bac);
+          if (omi >= 0 && !bop_find(rt, nt_str(nt, id, "name"), bac, nt_ref(nt, id, "block") >= 0)) mi = omi;
+        }
         /* `W.new(k)` binds initialize's parameters, and `W.build(k)` a class
            method's: neither receiver is an instance, so the arm above cannot
            see them and the sentinel stopped at the constructor (#3505). A

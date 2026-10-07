@@ -1,4 +1,5 @@
 #include "analyze_internal.h"
+#include "builtin_ops.h"
 #include "repr.h"
 int callee_has_kwarg(Compiler *c, Scope *m, const char *name);
 int callee_declares_kwargs(Compiler *c, Scope *m);
@@ -8804,6 +8805,21 @@ static int infer_param_types_ex(Compiler *c, int settle) {
               up->type != TY_BOOL && up->type != TY_SYMBOL) continue;
           up->type = TY_POLY; up->poly_dispatch_widened = 1; changed = 1;
         }
+      }
+    }
+    /* A builtin-typed receiver (an Integer, a Symbol, a String, ...) calling
+       a method the program adds to Object that no builtin row serves:
+       codegen's Object fallback reaches it, so the call's arguments type its
+       parameters -- a nil among them included (`12.enc(nil)` into a plain
+       Integer parameter was refused at the store). */
+    if (name && !ty_is_object(rt) && rt != TY_POLY && rt != TY_UNKNOWN && rt != TY_VOID && rt != TY_NIL) {
+      int oci4 = comp_class_index(c, "Object");
+      int mi4 = oci4 >= 0 ? comp_method_in_class(c, oci4, name) : -1;
+      if (mi4 >= 0) {
+        int a4 = nt_ref(nt, id, "arguments"); int ac4 = 0;
+        if (a4 >= 0) nt_arr(nt, a4, "arguments", &ac4);
+        if (!bop_find(rt, name, ac4, nt_ref(nt, id, "block") >= 0))
+          changed |= bind_call_params(c, id, mi4);
       }
     }
     if (ty_is_object(rt)) {
