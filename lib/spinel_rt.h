@@ -5937,6 +5937,10 @@ static sp_ofloat sp_poly_elem_f(sp_RbVal v) {
   if (v.tag == SP_TAG_NIL) return sp_ofloat_nil();
   sp_raise_typed_elem(v, "Float");
 }
+/* ...into an Integer or Float slot that holds no nil: nil is the operand
+   TypeError there */
+static SP_UNUSED sp_int sp_poly_elem_i_v(sp_RbVal v) { return sp_oint_arg(sp_poly_elem_i(v)); }
+static SP_UNUSED sp_float sp_poly_elem_f_v(sp_RbVal v) { return sp_ofloat_arg(sp_poly_elem_f(v)); }
 static const char *sp_poly_elem_s(sp_RbVal v) {
   if (v.tag == SP_TAG_STR) return v.v.s;
   /* a shared handle's bytes live in its own buffer, which a later append

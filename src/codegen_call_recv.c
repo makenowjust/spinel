@@ -915,6 +915,10 @@ int emit_array_splat_mutator(Compiler *c, int id, Buf *b) {
   /* the values come boxed, and a nil converts to an Integer or Float
      array's nil element */
   const char *nsfx = nil_store_sfx(c, k, NIL_STORE_BOXED);
+  /* a store that takes no nil (no `_nilable`, an insert) takes the plain
+     value: nil there is the operand TypeError */
+  const char *pconv = et == TY_INT ? "sp_poly_elem_i_v" : et == TY_FLOAT ? "sp_poly_elem_f_v" : conv;
+  if (!nsfx[0]) conv = pconv;
   if (is_push || is_concat)
     buf_printf(b, " for (sp_int _t%d = 0; _t%d < _t%d->len; _t%d++)"
                   " sp_%sArray_push%s(_t%d, %s(_t%d->data[_t%d]));",
@@ -926,7 +930,7 @@ int emit_array_splat_mutator(Compiler *c, int id, Buf *b) {
   else if (is_unshift)
     buf_printf(b, " for (sp_int _t%d = 0; _t%d < _t%d->len; _t%d++)"
                   " sp_%sArray_insert(_t%d, _t%d, %s(_t%d->data[_t%d]));",
-               tj, tj, ta, tj, k, tr, tj, conv, ta, tj);
+               tj, tj, ta, tj, k, tr, tj, pconv, ta, tj);
   else {
     /* a negative index is taken afresh against the grown array, which puts
        each element after the one before it, as counting up does for a
@@ -1910,12 +1914,11 @@ else {
         buf_printf(b, " sp_int _t%d = sp_%sArray_length(_t%d);", lbase + j, k, base + j);
       for (int j = 0; j < argc; j++) {
         int ii = ++g_tmp, sn = lbase + j;
-        buf_printf(b, " { for (sp_int _t%d = 0; _t%d < _t%d; _t%d++)"
-                      " sp_%sArray_push(_t%d, sp_%sArray_get(_t%d, _t%d)); }",
-                   ii, ii, sn, ii, k, ta, k, base + j, ii);
         /* the appended elements carry their array's nils */
-        if (rt == TY_INT_ARRAY || rt == TY_FLOAT_ARRAY)
-          buf_printf(b, " sp_%sArray_nil_from(_t%d, _t%d);", k, ta, base + j);
+        int onum = rt == TY_INT_ARRAY || rt == TY_FLOAT_ARRAY;
+        buf_printf(b, " { for (sp_int _t%d = 0; _t%d < _t%d; _t%d++)"
+                      " sp_%sArray_push%s(_t%d, sp_%sArray_%s(_t%d, _t%d)); }",
+                   ii, ii, sn, ii, k, onum ? "_o" : "", ta, k, onum ? "oget" : "get", base + j, ii);
       }
       buf_printf(b, " _t%d; })", ta);
       { *out = 1; return 1; }
@@ -2870,6 +2873,8 @@ static int emit_typed_array_call(Compiler *c, int id, Buf *b, const NodeTable *n
       /* the receiver is rooted across the indices, as the result already is */
       buf_printf(b, "({ sp_%sArray *_t%d = ", an, tr); emit_recv_rooted(c, recv, tr, "SP_GC_ROOT", b);
       buf_printf(b, "sp_%sArray *_t%d = sp_%sArray_new(); SP_GC_ROOT(_t%d); ", an, to, an, to);
+      /* a `_nilable` store takes the element with its nil (oget) */
+      const char *fsfx = nil_store_sfx(c, an, NIL_STORE_BOXED);
       for (int a = 0; a < argc; a++) {
         int ti = ++g_tmp;
         buf_printf(b, "{ sp_int _t%d = ", ti); emit_int_expr(c, argv[a], b);
@@ -2878,8 +2883,8 @@ static int emit_typed_array_call(Compiler *c, int id, Buf *b, const NodeTable *n
                       " if (_ix < 0 || _ix >= _len) sp_raise_cls(\"IndexError\","
                       " sp_sprintf(\"index %%lld outside of array bounds: %%lld...%%lld\","
                       " (long long)_t%d, (long long)-_len, (long long)_len));"
-                      " sp_%sArray_push%s(_t%d, sp_%sArray_get(_t%d, _ix)); } ",
-                   an, tr, ti, ti, ti, ti, an, nil_store_sfx(c, an, NIL_STORE_BOXED), to, an, tr);
+                      " sp_%sArray_push%s(_t%d, sp_%sArray_%s(_t%d, _ix)); } ",
+                   an, tr, ti, ti, ti, ti, an, fsfx, to, an, fsfx[0] ? "oget" : "get", tr);
       }
       buf_printf(b, "_t%d; })", to);
       { *out = 1; return 1; }
@@ -4025,6 +4030,7 @@ int emit_array_call(Compiler *c, int id, Buf *b) {
         buf_puts(b, "), (void)("); emit_expr(c, avI[0], b);
         buf_printf(b, "), sp_raise_cls(\"TypeError\", \"no implicit conversion of %s into Integer\"), ", knI);
         if (rtI == TY_UNKNOWN || rtI == TY_VOID || rtI == TY_NIL) buf_puts(b, "sp_box_nil()");
+        else if (oint_kind(rtI) && node_is_oint(c, id)) buf_puts(b, oint_nil(rtI));   /* the element read's oint */
         else buf_puts(b, default_value_from_compiler(c, rtI));
         buf_puts(b, ")");
         return 1;

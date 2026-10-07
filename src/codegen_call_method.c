@@ -1145,12 +1145,12 @@ int emit_call_method_obj_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, 
             else if (oi == 1) {
               buf_printf(&g_proc_protos, "static sp_RbVal _bam_%sArray_set(void *a, sp_RbVal i, sp_RbVal v);\n", bk);
               buf_printf(&g_procs, "static sp_RbVal _bam_%sArray_set(void *a, sp_RbVal i, sp_RbVal v) {\n"
-                                   "  sp_%sArray_set((sp_%sArray *)a, sp_poly_arg_i(i), %s(v));\n  return v;\n}\n", bk, bk, bk, unbox);
+                                   "  sp_%sArray_%s((sp_%sArray *)a, sp_poly_arg_i(i), %s(v));\n  return v;\n}\n", bk, bk, ki == 0 ? "oset" : "set", bk, unbox);
             }
             else {
               buf_printf(&g_proc_protos, "static sp_RbVal _bam_%sArray_push(void *a, sp_RbVal v);\n", bk);
               buf_printf(&g_procs, "static sp_RbVal _bam_%sArray_push(void *a, sp_RbVal v) {\n"
-                                   "  sp_%sArray_push((sp_%sArray *)a, %s(v));\n  return %s(a);\n}\n", bk, bk, bk, unbox, boxarr);
+                                   "  sp_%sArray_%s((sp_%sArray *)a, %s(v));\n  return %s(a);\n}\n", bk, bk, ki == 0 ? "push_o" : "push", bk, unbox, boxarr);
             }
           }
           else if (oi == 0) {

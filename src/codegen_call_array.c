@@ -88,9 +88,10 @@ int emit_op_array_cycle_n(Compiler *c, const BopCtx *x, Buf *b) {
   buf_printf(b, "; sp_%sArray *_t%d = sp_%sArray_new(); SP_GC_ROOT(_t%d);", k, tr2, k, tr2);
   buf_printf(b, " for (sp_int _t%d = 0; _t%d < _t%d; _t%d++)", tj, tj, tn2, tj);
   buf_printf(b, " for (sp_int _t%d = 0; _t%d < _t%d->len; _t%d++)", ti2, ti2, t, ti2);
-  buf_printf(b, " sp_%sArray_push(_t%d, sp_%sArray_get(_t%d, _t%d));", k, tr2, k, t, ti2);
-  if (rt == TY_INT_ARRAY || rt == TY_FLOAT_ARRAY)   /* the receiver's nils, repeated */
-    buf_printf(b, " sp_%sArray_nil_from(_t%d, _t%d);", k, tr2, t);
+  /* an Integer or Float element is copied with its nil */
+  if (rt == TY_INT_ARRAY || rt == TY_FLOAT_ARRAY)
+    buf_printf(b, " sp_%sArray_push_o(_t%d, sp_%sArray_oget(_t%d, _t%d));", k, tr2, k, t, ti2);
+  else buf_printf(b, " sp_%sArray_push(_t%d, sp_%sArray_get(_t%d, _t%d));", k, tr2, k, t, ti2);
   buf_printf(b, " _t%d; })", tr2);
   return 1;
 }
