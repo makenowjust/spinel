@@ -9824,7 +9824,7 @@ static void emit_kwsplat_empty_check(Compiler *c, int id, int kwh, const char *l
   }
 }
 
-static int emit_struct_new_call(Compiler *c, int id, int ci, int argc, const int *argv, Buf *b);
+int emit_struct_new_call(Compiler *c, int id, int ci, int argc, const int *argv, Buf *b);
 void emit_class_value_new_kw(Compiler *c, int id, int recv, int boxed, Buf *b) {
   const NodeTable *nt = c->nt;
   int argc; const int *argv = call_args(nt, id, &argc);
@@ -10735,7 +10735,70 @@ static int struct_kwh_out_of_order(Compiler *c, const ClassInfo *cls, int kwh) {
   return 0;
 }
 
-static int emit_struct_new_call(Compiler *c, int id, int ci, int argc, const int *argv, Buf *b) {
+static int emit_struct_new_call_members(Compiler *c, int id, int ci, int argc, const int *argv, Buf *b);
+/* Struct.new / Data.new: the members, constructed by
+   emit_struct_new_call_members. A member with a nil bit (an Integer or Float
+   member some construction leaves nil) takes its argument's value, and the
+   bit is set after the construction where the argument was nil -- or where
+   the construction leaves the member out (`S.new(1)` of two). The
+   constructor keeps its plain signature. */
+int emit_struct_new_call(Compiler *c, int id, int ci, int argc, const int *argv, Buf *b) {
+  const NodeTable *nt = c->nt;
+  ClassInfo *cls = &c->classes[ci];
+  int scust = comp_method_in_chain(c, ci, "initialize", NULL);
+  if (scust >= 0 && c->scopes[scust].reachable) return emit_struct_new_call_members(c, id, ci, argc, argv, b);
+  int kwh = (argc == 1 && nt_kind(nt, argv[0]) == NK_KeywordHashNode && cls->kw_init != -1) ? argv[0] : -1;
+  int ok_plain = 1;
+  for (int a = 0; a < argc; a++)
+    if (nt_kind(nt, argv[a]) == NK_SplatNode || nt_kind(nt, argv[a]) == NK_BlockArgumentNode) ok_plain = 0;
+  int kn = 0; const int *ke = kwh >= 0 ? nt_arr(nt, kwh, "elements", &kn) : NULL;
+  for (int e = 0; e < kn; e++) if (nt_kind(nt, ke[e]) != NK_AssocNode) ok_plain = 0;
+  int otmp[64], omem[64], on = 0, unset[64], un = 0;
+  int bind0 = -1;
+  for (int m = 0; ok_plain && m < cls->nmembers && m < 64; m++) {
+    if (!oint_kind(cls->ivar_types[m]) || !ivar_has_nilbit(c, ci, m)) continue;
+    int v = -1;
+    if (kwh >= 0) {
+      for (int e = 0; e < kn; e++) {
+        int key = nt_ref(nt, ke[e], "key");
+        const char *kv = key >= 0 && nt_kind(nt, key) == NK_SymbolNode ? nt_str(nt, key, "value") : NULL;
+        if (kv && sp_streq(kv, cls->ivars[m] + 1)) v = nt_ref(nt, ke[e], "value");
+      }
+      if (v < 0 && !cls->is_data) { unset[un++] = m; continue; }
+    }
+    else if (m < argc) v = argv[m];
+    else { if (!cls->is_data) unset[un++] = m; continue; }
+    if (v < 0 || !node_has_oint_form(c, v) || subtree_has_side_effect(c, v)) continue;
+    int t = ++g_tmp;
+    emit_indent(g_pre, g_indent);
+    buf_printf(g_pre, "%s _t%d = ", oint_ctype(cls->ivar_types[m]), t);
+    emit_oint_expr(c, v, cls->ivar_types[m], g_pre);
+    buf_puts(g_pre, ";\n");
+    int sl = view_bind(v, "_t%d.v", t);
+    if (bind0 < 0) bind0 = sl;
+    otmp[on] = t; omem[on] = m; on++;
+  }
+  Buf inner; memset(&inner, 0, sizeof inner);
+  int r = emit_struct_new_call_members(c, id, ci, argc, argv, &inner);
+  if (bind0 >= 0) view_unbind(bind0);
+  if (on == 0 && un == 0) { buf_puts(b, inner.p ? inner.p : ""); free(inner.p); return r; }
+  int ts = ++g_tmp;
+  buf_printf(b, "({ sp_%s *_t%d = %s; ", cls->c_name, ts, inner.p ? inner.p : "NULL");
+  char pfx[40]; snprintf(pfx, sizeof pfx, "_t%d->", ts);
+  for (int k = 0; k < on; k++) {
+    char bs[200]; ivar_nilbit_set(c, ci, omem[k], pfx, bs, sizeof bs);
+    buf_printf(b, "if (_t%d.nil) %s; ", otmp[k], bs);
+  }
+  for (int k = 0; k < un; k++) {
+    char bs[200]; ivar_nilbit_set(c, ci, unset[k], pfx, bs, sizeof bs);
+    buf_printf(b, "%s; ", bs);
+  }
+  buf_printf(b, "_t%d; })", ts);
+  free(inner.p);
+  return r;
+}
+
+static int emit_struct_new_call_members(Compiler *c, int id, int ci, int argc, const int *argv, Buf *b) {
   const NodeTable *nt = c->nt;
     /* Struct.new members: positional args, or keyword args mapping each
        member by name; each coerced to the member ivar type. */

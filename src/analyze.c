@@ -28769,7 +28769,8 @@ static void mark_nullable_int_locals(Compiler *c) {
         Scope *ns = comp_scope_of(c, id);
         if (ns && ns->is_cmethod && ns->class_id >= 0) k = ns->class_id;
       }
-      if (k < 0 || !c->classes[k].is_struct || comp_method_in_chain(c, k, "initialize", NULL) >= 0) continue;
+      if (k < 0 || !(c->classes[k].is_struct || c->classes[k].is_data) ||
+          comp_method_in_chain(c, k, "initialize", NULL) >= 0) continue;
       ClassInfo *ci = &c->classes[k];
       int ca = nt_ref(nt, id, "arguments");
       int an = 0; const int *av = ca >= 0 ? nt_arr(nt, ca, "arguments", &an) : NULL;

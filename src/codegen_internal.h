@@ -2008,6 +2008,9 @@ void emit_int_lit(Buf *b, long long v);
 /* can a `next` of this block body (not a nested block's) hand the slot a
    nil: a bare `next`, `next nil`, a value that can be nil (codegen_call.c) */
 int block_next_may_be_nil(Compiler *c, int id, int depth);
+/* Struct.new / Data.new of class ci with call id's arguments: the members,
+   and the nil bits of members left nil (codegen_call.c) */
+int emit_struct_new_call(Compiler *c, int id, int ci, int argc, const int *argv, Buf *b);
 /* the head of a Range walk that stops at the ends of sp_int (see codegen_util.c) */
 void emit_range_walk_head(Buf *b, int indent, const char *var, int decl, const char *first,
                           const char *step, const char *last);
