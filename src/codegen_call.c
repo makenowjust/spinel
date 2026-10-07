@@ -6424,6 +6424,9 @@ static int emit_poly_builtin_default_at(Compiler *c, int id, int recv, const cha
   if (bt == TY_UNKNOWN) bt = an_builtin_answer(c, id);
   if (bt == TY_UNKNOWN) return 0;
   if (ret != TY_POLY && bt != ret) return 0;
+  /* the result slot's form, as the dispatch seeded it: an Integer / Float
+     answer that can be nil is held as the oint */
+  int slot_o = oint_kind(ret) && node_is_oint(c, id);
   int slot = view_bind(recv, "_t%d", tv);
   for (int a = 0; a < argc; a++) {
     if (!subtree_has_side_effect(c, argv[a])) continue;
@@ -6449,7 +6452,7 @@ static int emit_poly_builtin_default_at(Compiler *c, int id, int recv, const cha
      asks must not record its unpinned (poly) answer over the pin, or the
      emitter answers boxed and the arm boxes it again */
   int sv_pin = an_pin_node(id);
-  if (setjmp(g_unsup_recover) == 0) emit_expr(c, id, nb);
+  if (setjmp(g_unsup_recover) == 0) { if (slot_o) emit_oint_expr(c, id, ret, nb); else emit_expr(c, id, nb); }
   else ok = 0;
   an_pin_node(sv_pin);
   emit_state_release(sv_state, !ok);
@@ -8654,6 +8657,8 @@ void emit_ctor_arm_param(Compiler *c, Scope *is, int j, const ArgLayout *L, cons
   if (L->from[j] != ARG_NODE) { emit_arg_or_default(c, is, j, -1, out); return; }
   char at[24]; snprintf(at, sizeof at, "_t%d", atmp[L->arg[j]]);
   if (pt == TY_POLY) buf_puts(out, at);
+  /* a parameter slot that holds its nil takes the box with it */
+  else if (oint_kind(pt) && pp && slot_is_oint(pp)) buf_printf(out, "%s(%s)", oint_unbox(pt), at);
   else emit_unbox_text(c, pt, at, out);
 }
 
@@ -15767,7 +15772,8 @@ void emit_wrong_count(Compiler *c, int id, const char *exp, int eval_recv, int g
   int anode = nt_ref(nt, id, "arguments");
   int argc = 0; const int *argv = anode >= 0 ? nt_arr(nt, anode, "arguments", &argc) : NULL;
   TyKind rty = repr_of(c, id).as_ty;
-  const char *dv = default_value_from_compiler(c, rty);
+  /* the dead value in the call's form (its oint where it answers one) */
+  const char *dv = oint_kind(rty) && node_is_oint(c, id) ? oint_nil(rty) : default_value_from_compiler(c, rty);
   if (given < 0) given = argc;
   buf_puts(b, "({ ");
   if (eval_recv) { buf_puts(b, "(void)("); emit_expr(c, recv, b); buf_puts(b, "); "); }
@@ -15977,7 +15983,7 @@ int emit_native_count_mismatch(Compiler *c, int id, int cid, const char *name, i
     unsupported(c, id, msg);
   }
   TyKind rty = repr_of(c, id).as_ty;
-  const char *dv = default_value_from_compiler(c, rty);
+  const char *dv = oint_kind(rty) && node_is_oint(c, id) ? oint_nil(rty) : default_value_from_compiler(c, rty);
   buf_puts(b, "({ ");
   if (recv >= 0) { buf_puts(b, "(void)("); emit_expr(c, recv, b); buf_puts(b, "); "); }
   for (int a = 0; a < argc; a++) {
