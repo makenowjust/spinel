@@ -673,7 +673,7 @@ void emit_poly_vis_precheck(Compiler *c, int id, int tv, Buf *b);
 /* The per-class `case` arms that store `src` into each candidate class's
    `base` writer slot through the object pointer text `objp` (codegen_stmt.c). */
 void emit_boxed_writer_arms(Compiler *c, const char *base, const char *nm,
-                            const char *objp, const char *src, TyKind at, Buf *b);
+                            const char *objp, const char *src, TyKind at, int vnode, Buf *b);
 int  method_is_void(Scope *s);
 void emit_index_op_write(Compiler *c, int id, Buf *b, int indent);
 void emit_index_and_or_write(Compiler *c, int id, Buf *b, int indent, int is_or);
@@ -954,6 +954,13 @@ void emit_yblk_ref(Buf *b);
 /* Emit the lead of a tail value: `return ` or `<result> = `. */
 void emit_tail_lead(Buf *b);
 const char *rename_local(const char *nm);
+const char *rename_local_cell(const char *nm);
+int sb_shim_shadow(const char *name, const char *rn);
+typedef struct { TyKind type, shim_ty; int shim_lift; } SbShimSave;
+SbShimSave sb_shim_enter(LocalVar *lv);
+void sb_shim_leave(LocalVar *lv, SbShimSave sv);
+void sb_shim_lift(Compiler *c, int node);
+void sb_shim_drop(Compiler *c, int node);
 /* `unsupported` never returns: it longjmps to the codegen driver's per-unit
    recovery (see g_unsup_recover) when one is armed, else exits. Marked noreturn so every caller's
    "this construct is unsupported" guard correctly treats the code after it as
@@ -1215,6 +1222,7 @@ int  scope_proc_form_of(Compiler *c, int s);
 int  expr_is_held_ref(Compiler *c, int node);   /* a read of a held object: no root needed */
 int  proc_form_live(Compiler *c, int s);
 int  proc_form_source(Compiler *c, int s);
+int  ctor_site_on_cycle(Compiler *c, int id, int initm);
 int  ctor_init_proc_form(Compiler *c, int cid);
 int scope_has_callable_symbol(Compiler *c, int s);
 int scope_toplevel_included(Compiler *c, int s);
@@ -2145,4 +2153,5 @@ int method_ret_is_oint(const Scope *s);
 void emit_method_ret_ctype(Compiler *c, const Scope *s, Buf *b);
 const char *method_ret_zero(Compiler *c, const Scope *s);
 void emit_boxed_ret_call(Compiler *c, const Scope *s, const char *call, Buf *b);
+int emit_ptr_array_build(Compiler *c, int v, TyKind want, Buf *b);
 #endif

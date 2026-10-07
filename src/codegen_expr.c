@@ -1891,9 +1891,25 @@ static int emit_local_ivar_write_expr(Compiler *c, int id, Buf *b, const NodeTab
        in a thread). */
     const char *nm = nt_str(nt, id, "name");
     LocalVar *olv = nm ? scope_local(comp_scope_of(c, id), nm) : NULL;
+    /* Without --share-strings, a pure alias pair's handle local takes `+=`
+       as a statement only: the value kept under another name (`x = (s +=
+       y)`) would be a copy the alias rule never joined to s's String */
+    if (olv && olv->type == TY_STRBUF && repr_of_slot(c, olv).handle && !repr_of_slot(c, olv).share) {
+      unsupported(c, id, "operator assignment");
+      return 1;
+    }
     buf_puts(b, "({ ");
     emit_op_assign(c, id, b, 0);
-    emit_local_ref(c, id, nm, b);
+    /* a local holding a shared handle: the handle itself where one is
+       taken (repr_write_share, under the handle mark), else its read face,
+       as a read of the local gives */
+    if (olv && repr_of_slot(c, olv).handle && repr_of_slot(c, olv).kind == RK_STRBUF &&
+        !(repr_of(c, id).handle && repr_write_share(c, id))) {
+      buf_puts(b, "sp_strbuf_read_pub(");
+      emit_local_ref(c, id, nm, b);
+      buf_puts(b, ")");
+    }
+    else emit_local_ref(c, id, nm, b);
     if (olv && slot_is_oint(olv) && !node_is_oint(c, id)) buf_puts(b, ".v");   /* as the plain write's value */
     buf_puts(b, "; })");
     return 1;
@@ -2507,6 +2523,7 @@ static int emit_ivar_cvar_gvar_expr(Compiler *c, int id, Buf *b, const NodeTable
     }
     if (nm && sp_streq(nm, "$/")) { emit_str_literal(b, "\n"); return 1; }
     if (nm && sp_streq(nm, "$?")) { buf_puts(b, "sp_last_process_status()"); return 1; }
+    if (nm && sp_streq(nm, "$$")) { buf_puts(b, "((sp_int)getpid())"); return 1; }
     if (nm && (is_program_name_global(nm))) { buf_puts(b, "sp_program_name"); return 1; }
     if (nm && sp_streq(nm, "$!")) { buf_puts(b, "((sp_Exception *)sp_cur_handled())"); return 1; }
     if (nm && (sp_streq(nm, "$;") || sp_streq(nm, "$,"))) { buf_puts(b, "0"); return 1; }
@@ -3165,6 +3182,9 @@ static int emit_array_hash_literal_expr(Compiler *c, int id, Buf *b, const NodeT
        an empty literal, use g_ret_type context (e.g. tail position in a
        poly_array-returning method) before falling back to int array. */
     if (n == 0 && atr.untyped && ty_is_array(g_ret_type)) at = g_ret_type;
+    /* a table of Integer rows the analysis builds in place (a literal an
+       iterator walks row by row, block_elem_ty) */
+    if (n > 0 && ty_is_ptr_array(at) && emit_ptr_array_build(c, id, at, b)) return 1;
     const char *k = array_kind(at);
     if (n == 0 && !k && at != TY_POLY_ARRAY) { buf_puts(b, "sp_IntArray_new()"); return 1; }
     /* poly (mixed-element) array: build an sp_PolyArray of boxed elements */

@@ -141,19 +141,47 @@ int re_src_has_backref(const char *s) {
 
 static void emit_ctor_block_value(Compiler *c, int id, Buf *b);
 
+/* A `new` of class ci on a cycle of constructors (ctor_site_on_cycle):
+   `Y.new(a, b)` inside Y#initialize, or two classes' yielding initializes
+   building each other. Splicing the body at this site splices the same site
+   again, without end -- one level per inline until the rename table ran
+   out, and two such sites doubled the work at every level. The initialize
+   has the proc-form clone for it (mark_ctor_cycles), and the constructor
+   runs the body instead, at the clone's copy of the site too: a body
+   spliced into the clone would yield to the clone's block. */
+static int ctor_new_on_cycle(Compiler *c, int id, int ci, int initm) {
+  return ctor_site_on_cycle(c, id, initm) && ctor_init_proc_form(c, ci) >= 0;
+}
+
 /* `new(..., &pr)` into a yielding initialize, the proc known only at run time
    (emit_ctor_yield_inline declined it): the constructor that hands it to the
-   initialize's proc-form clone. 0 when the class has no such clone. */
+   initialize's proc-form clone. A literal block at a `new` on a cycle of
+   constructors goes the same way, as a proc. 0 when the class has no such
+   clone. */
 int emit_ctor_new_with_proc(Compiler *c, int id, int ci, Buf *b) {
   int blk = nt_ref(c->nt, id, "block");
-  if (blk < 0 || nt_kind(c->nt, blk) != NK_BlockArgumentNode) return 0;
-  if (ctor_init_proc_form(c, ci) < 0) return 0;
   int initm = comp_method_in_chain(c, ci, "initialize", NULL);
+  if (blk < 0) return 0;
+  if (nt_kind(c->nt, blk) != NK_BlockArgumentNode &&
+      !(nt_kind(c->nt, blk) == NK_BlockNode && ctor_new_on_cycle(c, id, ci, initm))) return 0;
+  if (ctor_init_proc_form(c, ci) < 0) return 0;
+  /* A literal block, here or forwarded from the site a body was spliced
+     at, is a new proc nothing else holds, and the constructor allocates
+     the object before the clone roots its block: it is held in a rooted
+     temp across the call, as hoist_ctor_block holds one. */
+  int held = g_ctor_blk_tmp < 0 && nt_kind(c->nt, resolve_forwarded_block(c, blk)) == NK_BlockNode;
+  int t = held ? ++g_tmp : -1;
+  if (held) {
+    buf_printf(b, "({ sp_Proc *_t%d = ", t);
+    emit_ctor_block_value(c, id, b);
+    buf_printf(b, "; SP_GC_ROOT(_t%d); ", t);
+  }
   buf_printf(b, "sp_%s_new_blk(", c->classes[ci].c_name);
   emit_args_filled(c, initm, nt_ref(c->nt, id, "arguments"), "", b);
   if (c->scopes[initm].nparams > 0) buf_puts(b, ", ");
-  emit_ctor_block_value(c, id, b);
-  buf_puts(b, ")");
+  if (held) buf_printf(b, "_t%d", t);
+  else emit_ctor_block_value(c, id, b);
+  buf_puts(b, held ? "); })" : ")");
   return 1;
 }
 
@@ -189,6 +217,7 @@ int emit_ctor_yield_inline(Compiler *c, int id, int ci, Buf *b) {
   else if (block >= 0 && (!nt_type(nt, block) || !sp_streq(nt_type(nt, block), "BlockNode"))) return 0;
   int mi = comp_method_in_chain(c, ci, "initialize", NULL);
   if (mi < 0 || !c->scopes[mi].yields) return 0;
+  if (ctor_new_on_cycle(c, id, ci, mi)) return 0;
   Scope *m = &c->scopes[mi];
   if (g_nren + m->nlocals >= MAX_RENAME) return 0;
   for (int i = 0; i < m->nlocals; i++) {
@@ -3714,6 +3743,18 @@ void emit_concurrency_raise(Compiler *c, const char *rtext, int argc, const int 
                fn, pfx, t, pfx, t, pfx, t, pfx, t);
     return;
   }
+  /* a boxed first argument names the class when it holds one (`klass ||
+     Default`), else it is the message, as CRuby reads it at run time */
+  if (argc >= 1 && !arg0_const && a0t == TY_POLY) {
+    int t = ++g_tmp;
+    buf_printf(b, "({ sp_RbVal _ca%d = ", t); emit_boxed(c, argv[0], b);
+    buf_printf(b, "; SP_GC_ROOT_RBVAL(_ca%d); int _cc%d = _ca%d.tag == SP_TAG_CLASS; ", t, t, t);
+    buf_printf(b, "%s(%s, _cc%d ? sp_class_to_s(sp_unbox_class(_ca%d)) : \"RuntimeError\", _cc%d ? ",
+               fn, rtext, t, t, t);
+    if (argc >= 2) emit_exc_msg_arg(c, argv[1], b); else buf_puts(b, "(&(\"\\xff\")[1])");
+    buf_printf(b, " : sp_poly_to_s(_ca%d), NULL); })", t);
+    return;
+  }
   buf_printf(b, "%s(%s, ", fn, rtext);
   if (arg0_const) {
     /* a builtin exception by its whole path (Errno::ENOENT), a class of the
@@ -3732,6 +3773,13 @@ void emit_concurrency_raise(Compiler *c, const char *rtext, int argc, const int 
       }
     }
     else if (argc >= 2) emit_expr(c, argv[1], b); else buf_puts(b, "(&(\"\\xff\")[1])");
+    buf_puts(b, ", NULL");
+  }
+  else if (argc >= 1 && a0t == TY_CLASS) {
+    /* the class as a value (a parameter, a local): its name, read when
+       the call runs, as the constant's is written above */
+    buf_puts(b, "sp_class_to_s("); emit_expr(c, argv[0], b); buf_puts(b, "), ");
+    if (argc >= 2) emit_exc_msg_arg(c, argv[1], b); else buf_puts(b, "(&(\"\\xff\")[1])");
     buf_puts(b, ", NULL");
   }
   else if (argc >= 1) {
@@ -4422,7 +4470,7 @@ static int emit_complex_rational_call(Compiler *c, int id, Buf *b) {
     }
     /* in the boxed slot promote gives the call, the exact floor, which can
        pass the word (sp_poly_div_m) */
-    if (crt == TY_INT && argc == 1 && sp_streq(name, "div") &&
+    if (crt == TY_INT && argc == 1 && is_div_name(name) &&
         comp_ntype(c, argv[0]) == TY_RATIONAL && repr_of(c, id).kind == RK_BOXED) {
       buf_puts(b, "sp_poly_div_m(sp_box_int("); emit_expr(c, recv, b);
       buf_puts(b, "), sp_box_rational("); emit_expr(c, argv[0], b); buf_puts(b, "))");
@@ -19429,6 +19477,14 @@ static void emit_nil_target_head(Compiler *c, int id, Buf *b, const char *lead, 
   int r = nt_ref(nt, id, "receiver");
   char rtext[32] = "";
   *mark = g_n_argov;
+  /* A temp is rooted when something that runs after it may allocate: an
+     argument, or a block the call runs. The test does not allocate, and a
+     runtime method roots the receiver it is handed (as the String arms'
+     own nil guard leaves an unrooted receiver alone). */
+  int later_alloc = nt_ref(nt, id, "block") >= 0;
+  int a = nt_ref(nt, id, "arguments"), an = 0;
+  const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &an) : NULL;
+  for (int i = 0; i < an && !later_alloc; i++) later_alloc = operand_may_allocate(c, av[i]);
   for (int i = 0; i < n; i++) {
     Buf ob, op;
     /* --share-strings: a receiver that is a route over a shared String
@@ -19446,8 +19502,8 @@ static void emit_nil_target_head(Compiler *c, int id, Buf *b, const char *lead, 
     buf_puts(b, lead);
     emit_ctype(c, ty[i], b);
     buf_printf(b, " _t%d = %s;", t, ob.p ? ob.p : default_value_from_compiler(c, ty[i]));
-    if (ty[i] == TY_POLY) buf_printf(b, " SP_GC_ROOT_RBVAL(_t%d);", t);
-    else if (needs_root(ty[i])) buf_printf(b, " SP_GC_ROOT(_t%d);", t);
+    if (later_alloc && ty[i] == TY_POLY) buf_printf(b, " SP_GC_ROOT_RBVAL(_t%d);", t);
+    else if (later_alloc && needs_root(ty[i])) buf_printf(b, " SP_GC_ROOT(_t%d);", t);
     buf_puts(b, *lead ? "\n" : " ");
     free(ob.p); free(op.p);
     view_bind(node[i], "_t%d", t);
@@ -19538,11 +19594,40 @@ static int emit_nil_target_cold(Compiler *c, int id, Buf *b) {
   return ok;
 }
 
+/* A String element read that can miss is tested by the String arms
+   themselves (recv_may_be_sentinel, emit_scalar_recv_arms), with the same
+   NoMethodError, when the call goes through them. The call is emitted
+   with its receiver seen as one its own guard may test (VR_NIL_TESTED 3);
+   the guard marks it taken (4) as it writes the test, and that text
+   stands for the arm. A call that took another path (an enumerator,
+   another emitter) has none: its text is dropped and the head goes ahead
+   as for any call. `stmt` emits it as a statement at `indent`. */
+static int emit_nil_target_own(Compiler *c, int id, Buf *b, int stmt, int indent) {
+  int r = nt_ref(c->nt, id, "receiver");
+  if (!c->nil_tested || comp_ntype(c, r) != TY_STRING || !recv_may_be_sentinel(c, r)) return 0;
+  size_t pre0 = g_pre ? g_pre->len : 0;
+  int sv_tmp = g_tmp;
+  int vt = view_push_repr(c, r, VR_NIL_TESTED, 3);
+  Buf cb; memset(&cb, 0, sizeof cb);
+  if (stmt) emit_stmt_inner(c, id, &cb, indent);
+  else emit_call_held(c, id, &cb);
+  int ok = c->nil_tested[r] == 4;
+  view_pop(c, vt);
+  if (ok) buf_puts(b, cb.p ? cb.p : "");
+  else {
+    if (g_pre) { g_pre->len = pre0; if (g_pre->p) g_pre->p[pre0] = 0; }
+    g_tmp = sv_tmp;
+  }
+  free(cb.p);
+  return ok;
+}
+
 /* Call id in value position, behind its nil arm. 1 when it emitted. */
 static int emit_nil_target_call(Compiler *c, int id, Buf *b) {
   if (cplan_nil(c, id) != CN_RAISE) return 0;
   if (g_plan_check) cplan_served("nil-target");
   if (emit_nil_target_cold(c, id, b)) return 1;
+  if (emit_nil_target_own(c, id, b, 0, 0)) return 1;
   Buf hb; memset(&hb, 0, sizeof hb);
   int mark;
   emit_nil_target_head(c, id, &hb, "", &mark);
@@ -19587,6 +19672,7 @@ static int emit_nil_target_call(Compiler *c, int id, Buf *b) {
 int emit_nil_target_stmt(Compiler *c, int id, Buf *b, int indent) {
   if (cplan_nil(c, id) != CN_RAISE) return 0;
   if (g_plan_check) cplan_served("nil-target");
+  if (emit_nil_target_own(c, id, b, 1, indent)) return 1;
   Buf *db = g_pre ? g_pre : b;
   Buf lb; memset(&lb, 0, sizeof lb);
   emit_indent(&lb, g_pre ? g_indent : indent);
@@ -19750,6 +19836,15 @@ static int ret_nilable_value(Compiler *c, int mi, int v, int depth) {
   return 0;
 }
 
+/* An element of an Array the program stores nil into or leaves a gap in
+   (the nil fact's NFW_ELEM_NIL): a block parameter an iteration over it
+   binds, an element read out of it, a value either flows into. No write of
+   the receiver's own slot shows that nil, so the slot tests below miss it,
+   and an Array that cannot hold one leaves its hot loops untested. */
+static int elem_nil_recv(Compiler *c, int recv) {
+  return nil_fact_why(c, recv) == NFW_ELEM_NIL;
+}
+
 int nil_recv_guard(Compiler *c, int id, int *recv_out) {
   const NodeTable *nt = c->nt;
   int recv = nt_ref(nt, id, "receiver");
@@ -19788,8 +19883,10 @@ int nil_recv_guard(Compiler *c, int id, int *recv_out) {
     if (comp_method_in_chain(c, rcid, nm, NULL) < 0 && !comp_reader_in_chain(c, rcid, nm, NULL) &&
         !nil_guard_writer(c, rcid, nm))
       return 0;
-    const CallPlan *rp = cplan_user(c, unwrap_parens(c, recv));
-    if (!rp || rp->mi < 0 || !method_ret_nilable(c, rp->mi, 0)) return 0;
+    if (!elem_nil_recv(c, unwrap_parens(c, recv))) {
+      const CallPlan *rp = cplan_user(c, unwrap_parens(c, recv));
+      if (!rp || rp->mi < 0 || !method_ret_nilable(c, rp->mi, 0)) return 0;
+    }
     *recv_out = recv;
     return 1;
   }
@@ -19798,7 +19895,8 @@ int nil_recv_guard(Compiler *c, int id, int *recv_out) {
   const char *ln = nt_str(nt, recv, "name");
   LocalVar *lv = sc && ln ? scope_local(sc, ln) : NULL;
   if (!lv || !ty_is_object(rt) || rr.kind == RK_VOBJ) return 0;
-  if (lv->is_param ? !lv->obj_nilable : !local_obj_nil_written(c, sc, ln, lv)) return 0;
+  if (!elem_nil_recv(c, recv) && (lv->is_param ? !lv->obj_nilable : !local_obj_nil_written(c, sc, ln, lv)))
+    return 0;
   int cid = ty_object_class(rt);
   if (comp_method_in_chain(c, cid, nm, NULL) < 0 && !comp_reader_in_chain(c, cid, nm, NULL) &&
       !nil_guard_writer(c, cid, nm))
@@ -24688,6 +24786,39 @@ void emit_handle_inspect(Compiler *c, int recv, TyKind rt, Buf *b) {
   buf_printf(b, "sp_sprintf(\"#<%s:0x%%016llx>\", (unsigned long long)(uintptr_t)(", hn);
   emit_expr(c, recv, b); buf_puts(b, "))");
 }
+/* deep-return pickup (#3227 P6): a marked receiverless call to a method
+   whose every return path yields a shared handle -- reset the side
+   channel, run the ordinary call (its shared-slot tail read publishes),
+   then take the handle (falling back to a fresh wrap of the returned
+   copy if a path did not publish). An attr reader has no body to publish
+   from; its implicit-self read hands out the slot itself
+   (emit_implicit_self_member). Answers 1 when it emitted the call. */
+static int emit_deep_return_pickup(Compiler *c, int id, Buf *b) {
+  if (!c->strbuf_box[id] || nt_ref(c->nt, id, "block") >= 0 ||
+      !(nt_ref(c->nt, id, "receiver") < 0 ? implicit_self_reader_cid(c, id) < 0
+                                          : comp_ntype(c, nt_ref(c->nt, id, "receiver")) == TY_CLASS))
+    return 0;
+  int tvD = ++g_tmp;
+  buf_printf(b, "({ _sp_ret_strbuf = NULL; const char *_v%d = ", tvD);
+  int vs = view_push_repr(c, id, VR_STRBUF_BOX, 0);
+  emit_call(c, id, b);
+  view_pop(c, vs);
+  buf_puts(b, "; ");
+  /* --share-strings: a tail answering nil publishes nothing, and an
+     earlier read may have published (an_tail_is_shared_handle): the
+     call's nil is nil. A target the plan cannot list may be such a
+     method; a call that reaches none (a builtin's, `String.new`) has no
+     tail to answer nil through. */
+  if (repr_share_rule(c)) {
+    int t[8], n = cplan_targets(c, id, t, 8), nil = n < 0;
+    for (int i = 0; i < n && !nil; i++) nil = an_tail_answers_nil(c, t[i]);
+    if (nil) buf_printf(b, "!_v%d ? NULL : ", tvD);
+  }
+  buf_printf(b, "_sp_ret_strbuf ? (sp_String *)_sp_ret_strbuf"
+                " : sp_String_new_shared(_v%d); })", tvD);
+  return 1;
+}
+
 void emit_call_body(Compiler *c, int id, Buf *b) {
   /* the class's own method in a builtin's receiver test (`__r.is_a?(K) ?
      __r.m { } : __enum_m(__r) { }`): the test has decided the receiver is
@@ -24730,25 +24861,7 @@ void emit_call_body(Compiler *c, int id, Buf *b) {
       }
     }
   }
-  /* deep-return pickup (#3227 P6): a marked receiverless call to a method
-     whose every return path yields a shared handle -- reset the side
-     channel, run the ordinary call (its shared-slot tail read publishes),
-     then take the handle (falling back to a fresh wrap of the returned
-     copy if a path did not publish). */
-  /* An attr reader has no body to publish from; its implicit-self read hands
-     out the slot itself (emit_implicit_self_member). */
-  if (c->strbuf_box[id] && nt_ref(c->nt, id, "block") < 0 &&
-      (nt_ref(c->nt, id, "receiver") < 0 ? implicit_self_reader_cid(c, id) < 0
-                                         : comp_ntype(c, nt_ref(c->nt, id, "receiver")) == TY_CLASS)) {
-    int tvD = ++g_tmp;
-    buf_printf(b, "({ _sp_ret_strbuf = NULL; const char *_v%d = ", tvD);
-    int vs = view_push_repr(c, id, VR_STRBUF_BOX, 0);
-    emit_call(c, id, b);
-    view_pop(c, vs);
-    buf_printf(b, "; _sp_ret_strbuf ? (sp_String *)_sp_ret_strbuf"
-                  " : sp_String_new_shared(_v%d); })", tvD);
-    return;
-  }
+  if (emit_deep_return_pickup(c, id, b)) return;
 
   /* A program's own reopen of a builtin primitive owns the name, as it does
      in CRuby: `class Integer; def abs; 999; end; end` makes `(-5).abs` answer

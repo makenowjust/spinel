@@ -740,36 +740,48 @@ static const char *sh_lit_name(const NodeTable *nt, int a) {
 }
 
 static int sh_plain_operand(Compiler *c, int n);
-/* Does lending a parameter argument node a of `call` keep CRuby's answer
-   by itself? A value no variable holds is lent a temporary nothing else
-   names. A variable's C slot is lent by address, so it must be a local (or
-   parameter) nothing can rebind while the callee runs: no proc that
-   captures it assigns it, the call passes no block (the method's yield
-   runs the block, which may assign it), and every argument is a read, a
-   literal or scalar arithmetic over those (*plain, asked once per call). A
-   global's or an ivar's slot is refused where the call can rebind it
-   (#6179), which only the shared class avoids. */
+/* How lending a parameter argument node a of `call` keeps CRuby's answer:
+   SHL_HOLDS by itself, SHL_READ only while the method's value is taken as
+   read (F->mread), SHL_UNSOUND not at all. A value no variable holds is
+   lent a temporary nothing else names. A variable's C slot is lent by
+   address, so it must be a local (or parameter) nothing can rebind while
+   the callee runs: no proc that captures it assigns it, the call passes no
+   block (the method's yield runs the block, which may assign it), and every
+   argument is a read, a literal or scalar arithmetic over those (*plain,
+   asked once per call). A global's or an ivar's slot is refused where the
+   call can rebind it at the top level or in a class body (#6179), which
+   only the shared class avoids. A block of the call that can assign the
+   argument variable, a local or an instance variable
+   (comp_block_rebinds_arg: `m(s) { s = +"b" }`, `m(@s) { @s = +"b" }`),
+   rebinds the lent slot under the parameter while the method runs: its
+   appends then land on the new String. No lend holds there; the parameter
+   shares its argument's class instead. */
+enum { SHL_UNSOUND = -1, SHL_READ = 0, SHL_HOLDS = 1 };
 static int sh_lend_holds(Compiler *c, int call, int a, int *plain) {
   const NodeTable *nt = c->nt;
-  if (!sh_holder_read(nt, a)) return 1;
-  if (nt_kind(nt, a) != NK_LocalVariableReadNode || nt_ref(nt, call, "block") >= 0) return 0;
+  if (!sh_holder_read(nt, a)) return SHL_HOLDS;
+  int blk = nt_ref(nt, call, "block");
+  if (comp_block_rebinds_arg(c, blk, a)) return SHL_UNSOUND;
+  if (nt_kind(nt, a) != NK_LocalVariableReadNode) return SHL_READ;
   const char *ln = nt_str(nt, a, "name");
-  LocalVar *lv = ln ? scope_local(comp_scope_of(c, a), ln) : NULL;
-  if (!lv || lv->cell_outlives || lv->proc_rebinds) return 0;
+  Scope *s = ln ? comp_scope_of(c, a) : NULL;
+  LocalVar *lv = s ? scope_local(s, ln) : NULL;
+  if (blk >= 0 || !lv || lv->cell_outlives || lv->proc_rebinds) return SHL_READ;
   if (*plain < 0) {
     int args = nt_ref(nt, call, "arguments");
     int argc = 0; const int *argv = args >= 0 ? nt_arr(nt, args, "arguments", &argc) : NULL;
     *plain = 1;
     for (int i = 0; i < argc && *plain; i++) *plain = sh_plain_operand(c, argv[i]);
   }
-  return *plain;
+  return *plain ? SHL_HOLDS : SHL_READ;
 }
 
 /* Bind the arguments of `call` to method mi's parameters. A parameter the
    method may lend (only read and mutated) is bound by sh_lend, the rest by
    a union. An argument the layout places nowhere joins every parameter.
    A lend that does not hold by itself keeps mi's returns joining its value
-   (F->mread), as a caller that reads it does. */
+   (F->mread), as a caller that reads it does; one that cannot hold at all
+   (sh_lend_holds) is a union too. */
 static void sh_bind(ShareFacts *F, Compiler *c, int call, int mi) {
   const NodeTable *nt = c->nt;
   Scope *m = &c->scopes[mi];
@@ -787,8 +799,10 @@ static void sh_bind(ShareFacts *F, Compiler *c, int call, int mi) {
       int v = sh_val(F, c, a);
       if (j == m->rest_idx || j == m->kwrest_idx) sh_union(F, sh_elem(F, p), v);
       else {
-        sh_lend(F, v, p, sh_holder_read(nt, a));
-        if (!F->mread[mi] && !sh_lend_holds(c, call, a, &plain)) F->mread[mi] = 1;
+        int holds = sh_lend_holds(c, call, a, &plain);
+        if (holds == SHL_UNSOUND) sh_union(F, p, v);
+        else sh_lend(F, v, p, sh_holder_read(nt, a));
+        if (holds != SHL_HOLDS) F->mread[mi] = 1;
       }
     }
     else if (spread >= 0) sh_union(F, p, sh_elem(F, sh_val(F, c, spread)));
@@ -2537,13 +2551,24 @@ static int sh_route_to_root(const Compiler *c, const ShareRoute *q) {
    the rule does not share has one name, and the copy is unobservable; one
    it shares holds the handle in every holder (seal's holder check), and
    the carrying node hands it along. */
-static int sh_route_ok(const Compiler *c, const ShareRoute *q) {
+enum { SH_ROUTE_OK, SH_ROUTE_UNSEEN, SH_ROUTE_COPIES };
+static int sh_route_why(const Compiler *c, const ShareRoute *q) {
   const ShareFacts *F = c->share;
   int v = sh_node_root(F, q->value, q->elems);
-  if (v < 0) return 0;
-  if (q->to >= 0 && sh_route_to_root(c, q) != v) return 0;
-  if (!repr_str_class_shares(F->flags[v], sh_class_holders(F, v))) return 1;
-  return q->carry < 0 || sh_carries_handle(c, q->carry);
+  /* a value the walk reached and found no String identity in (`"a#{i}"`,
+     a builtin's fresh answer) is a String no other name holds: its class
+     is the holder it reaches */
+  if (v < 0 && F && !q->elems && q->to >= 0 && q->value >= 0 && q->value < F->nnodes &&
+      F->nval[q->value] == -1)
+    v = sh_route_to_root(c, q);
+  if (v < 0) return SH_ROUTE_UNSEEN;
+  if (q->to >= 0 && sh_route_to_root(c, q) != v) return SH_ROUTE_UNSEEN;
+  if (!repr_str_class_shares(F->flags[v], sh_class_holders(F, v))) return SH_ROUTE_OK;
+  if (q->carry == SHARE_CARRY_COPY) return SH_ROUTE_COPIES;
+  return q->carry < 0 || sh_carries_handle(c, q->carry) ? SH_ROUTE_OK : SH_ROUTE_COPIES;
+}
+static int sh_route_ok(const Compiler *c, const ShareRoute *q) {
+  return sh_route_why(c, q) == SH_ROUTE_OK;
 }
 
 int share_route_defer(Compiler *c, const ShareRoute *q, const char *msg) {
@@ -2574,7 +2599,19 @@ void share_routes_check(Compiler *c) {
       fprintf(stderr, "share-route: site %d value %d%s to %d%s%s%s carry %d ok=%d\n", r->site, r->value,
               r->elems ? " (elements)" : "", r->to, r->to_elems ? " (elements)" : "",
               r->to_name ? " local " : "", r->to_name ? r->to_name : "", r->carry, sh_route_ok(c, r));
-    if (!sh_route_ok(c, r)) unsupported_feature(c, r->site, r->msg);
+    int why = sh_route_why(c, r);
+    if (why == SH_ROUTE_OK) continue;
+    /* the refusal says which half the rule could not answer */
+    const char *lead = why == SH_ROUTE_UNSEEN
+      ? "under --share-strings, the share analysis does not follow this route, so it cannot prove "
+        "that no other name sees the copy: "
+      : "under --share-strings, this String is shared with another name, and the route does not "
+        "carry the shared handle yet: ";
+    size_t n = strlen(lead) + strlen(r->msg) + 1;
+    char *m = malloc(n);
+    if (!m) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+    snprintf(m, n, "%s%s", lead, r->msg);
+    unsupported_feature(c, r->site, m);
   }
 }
 

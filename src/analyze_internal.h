@@ -135,11 +135,20 @@ int an_user_ret_disagrees(Compiler *c, const char *name, TyKind want);
 int an_ty_holds_nil(TyKind t);
 int gvar_seeded_before_read(Compiler *c, const char *gname);
 int an_empty_container_kind(Compiler *c, int b);
+int an_literal_int_rows(Compiler *c, int arr);
 int an_empty_container_disagrees(int kind, TyKind other);
 int an_or_empty_hash_fallback(Compiler *c, int node);
 int an_chunk_family_to_a(Compiler *c, int id);
 const char *an_regex_lit_src(Compiler *c, int nid);
 int str_in(const char *s, const char *const *set);
+/* array element facts analyze.c's Integer/Float Array marks and the nil
+   fact's pointer Array marks (analyze_nil.c) share */
+int elem_preserving_call(const char *nm);
+int slice_read_call(Compiler *c, int call);
+int mutated_array(Compiler *c, int recv);
+int array_mutation_stores(Compiler *c, int call, int strict, int *from, int *to, int *elems);
+int elem_block_params(Compiler *c, int call, int *recv_out);
+int nullable_elem_ivar_in(Compiler *c, int cid, const char *nm, ClassInfo **out);
 int blk_locals_have(const char *locals, const char *nm);
 /* The calls named `name`, ascending: for (id = an_calls_named_first(c, nm);
    id >= 0; id = an_calls_named_next(id)). Check each node as before. */
@@ -163,6 +172,25 @@ int an_bare_call_class_owned(Compiler *c, int id);
    (0-based, matching ivar order) or -1. */
 int struct_member_idx(Compiler *c, ClassInfo *sc, int keynode);
 int struct_member_idx_float(Compiler *c, ClassInfo *sc, int keynode);
+/* A Struct `[]=` (analyze_scope.c): 1 for call id on a receiver typed as
+   a class (*cls; only a key no literal names is left a `[]=` there), 2 on
+   a boxed one, which reaches the classes poly_recv_classes lists, 0 for no
+   such call. struct_aset_members: 1 when class k's `[]=` is the Struct's
+   own (no `[]=` of the program's; cplan_struct_aset's), with the members
+   [*lo, *hi) the key can name (none for a literal naming no member: it
+   raises). */
+int struct_aset_receiver(Compiler *c, int id, int *cls);
+int struct_aset_members(Compiler *c, int id, int k, int *lo, int *hi);
+/* Can the `[]=` that node id makes on its receiver (a call, an index
+   op-write, an index target) store into a Struct's member: a receiver typed
+   as such a Struct, or a box that can hold one (every box whose classes the
+   analysis cannot bound, when the program has one)? */
+int struct_aset_may_reach(Compiler *c, int id);
+/* The classes the boxed receiver of call `call` can be an instance of, *n
+   of them, or NULL when the analysis cannot bound them (analyze_scope.c) */
+const int *poly_recv_classes(Compiler *c, int call, int *n);
+/* A read of a String slot the share rule holds as the handle (analyze.c) */
+int an_arg_is_shared_handle(Compiler *c, int node);
 /* Last statement of a scope's body, or -1. */
 int scope_body_last(Compiler *c, int mi);
 /* The expressions whose value method scope mi answers (its body's and each
@@ -310,9 +338,7 @@ TyKind an_builtin_answer(Compiler *c, int id);
 int an_yield_site_builtin_answer(Compiler *c, int id, TyKind kind, TyKind *out);
 extern int g_scopes_settled;   /* analysis done (codegen_util.c) */
 int poly_expr_flows_container(Compiler *c, int node);
-int reconcile_locals_reading_ivars(Compiler *c);
-int widen_container_locals_from_poly_writes(Compiler *c);
-int widen_locals_from_poly_writes(Compiler *c);
+int rejoin_local_writes(Compiler *c);
 int widen_arrays_from_map_bang(Compiler *c);
 void intern_block_params(Compiler *c);
 int local_all_writes_empty_array(Compiler *c, Scope *sc, const char *name);
@@ -601,6 +627,7 @@ int is_descendant(Compiler *c, int k, int anc);
 int dispatch_impl_count(Compiler *c, int cid, const char *name);
 /* Defined in codegen_util.c; the proc-form clone of scope `s`, or -1. */
 int scope_proc_form_of(Compiler *c, int s);
+int ctor_site_on_cycle(Compiler *c, int id, int initm);
 /* Defined in codegen_fold.c; the parameter a keyword hash binds as one more
    positional argument after `pos_argc` others, or -1. */
 int kwh_arg_param(Compiler *c, Scope *m, int pos_argc);

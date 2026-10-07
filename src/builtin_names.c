@@ -58,6 +58,10 @@ int is_basic_arith(const char *n) {
   return sp_streq(n, "+") || sp_streq(n, "-") || sp_streq(n, "*") || sp_streq(n, "/");
 }
 
+int is_int_arith_op(const char *n) {
+  return is_basic_arith(n) || sp_streq(n, "%");
+}
+
 int is_object_root(const char *n) {
   return sp_streq(n, "Object") || sp_streq(n, "BasicObject") || sp_streq(n, "Kernel");
 }
@@ -482,6 +486,10 @@ int is_unary_sign(const char *n) {
   return sp_streq(n, "-@") || sp_streq(n, "+@");
 }
 
+int is_unary_minus(const char *n) {
+  return sp_streq(n, "-@");
+}
+
 int is_text_conversion(const char *n) {
   return sp_streq(n, "to_s") || sp_streq(n, "inspect");
 }
@@ -615,6 +623,10 @@ int is_element_access(const char *n) {
   return sp_streq(n, "[]") || sp_streq(n, "[]=");
 }
 
+int is_index_assign(const char *n) {
+  return sp_streq(n, "[]=");
+}
+
 int is_first_or_take(const char *n) {
   return sp_streq(n, "first") || sp_streq(n, "take");
 }
@@ -706,6 +718,18 @@ int is_div_or_modulo(const char *n) {
 
 int is_div_name(const char *n) {
   return sp_streq(n, "div");
+}
+
+int is_divmod_name(const char *n) {
+  return sp_streq(n, "divmod");
+}
+
+int is_modulo_name(const char *n) {
+  return sp_streq(n, "modulo");
+}
+
+int is_mod_operator(const char *n) {
+  return sp_streq(n, "%");
 }
 
 int is_initialize_family(const char *n) {
@@ -944,3 +968,16 @@ int array_unseen_add_kind(const char *n) {
 }
 
 int is_scan_name(const char *n) { return sp_streq(n, "scan"); }
+
+/* with_index / with_object: an enumerator link that hands on its source's
+   elements first */
+int is_enumerator_with(const char *n) {
+  return sp_streq(n, "with_index") || sp_streq(n, "with_object");
+}
+int is_lazy_name(const char *n) { return sp_streq(n, "lazy"); }
+int is_concat_name(const char *n) { return sp_streq(n, "concat"); }
+
+/* `Array.new(...)`, by its receiver's constant name and the method */
+int is_array_constructor(const char *recv, const char *meth) {
+  return recv && meth && sp_streq(meth, "new") && sp_streq(recv, "Array");
+}

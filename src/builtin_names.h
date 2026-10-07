@@ -19,6 +19,7 @@ int is_round_family(const char *n);   /* round ceil floor truncate */
 int is_push_alias(const char *n);     /* push << append */
 int is_bit_op(const char *n);         /* & | ^ */
 int is_basic_arith(const char *n);    /* + - * / (is_arith_op adds % and **) */
+int is_int_arith_op(const char *n);   /* + - * / %: an Integer's arithmetic that answers an Integer */
 int is_add_sub_mul(const char *n);    /* + - * */
 int is_int_bit_op(const char *n);     /* & | ^ << >>: Integer's bitwise operators */
 int is_object_root(const char *n);    /* Object Kernel BasicObject: the classes every object has */
@@ -118,6 +119,7 @@ int is_nonblock_io(const char *n); /* read_nonblock write_nonblock */
 
 int is_mul_or_pow(const char *n); /* * ** */
 int is_unary_sign(const char *n); /* +@ -@ */
+int is_unary_minus(const char *n); /* -@ */
 int is_casecmp_family(const char *n); /* casecmp casecmp? */
 int is_hash_key_value_each(const char *n); /* each_key each_value */
 int is_encoding_mutator(const char *n); /* encode! force_encoding */
@@ -146,10 +148,14 @@ int is_object_receiver_handoff(const char *n); /* to_enum enum_for instance_eval
 int is_div_or_mod(const char *n); /* % / */
 int is_div_or_modulo(const char *n); /* div modulo: the named floored quotient and remainder */
 int is_div_name(const char *n); /* div: the named floored quotient */
+int is_divmod_name(const char *n); /* divmod: the [quotient, modulo] pair */
+int is_modulo_name(const char *n); /* modulo: the named method, not the % operator */
+int is_mod_operator(const char *n); /* %: the operator */
 int is_add_or_mul(const char *n); /* * + */
 int is_push_operator(const char *n); /* << push */
 int is_eq_or_eql(const char *n); /* == eql? */
 int is_element_access(const char *n); /* [] []= */
+int is_index_assign(const char *n); /* []= */
 
 int is_current_method(const char *n); /* __callee__ __method__ */
 int is_hash_constructor(const char *n); /* __hash_new_default new */
@@ -234,5 +240,9 @@ enum { ARRAY_ADD_NONE, ARRAY_ADD_CONCAT, ARRAY_ADD_INSERT, ARRAY_ADD_PREPEND };
 int array_unseen_add_kind(const char *n);
 
 int is_scan_name(const char *n); /* scan: a String's match iterator */
+int is_enumerator_with(const char *n); /* with_index with_object: an enumerator link */
+int is_lazy_name(const char *n);       /* lazy */
+int is_concat_name(const char *n);     /* concat */
+int is_array_constructor(const char *recv, const char *meth); /* Array.new */
 
 #endif

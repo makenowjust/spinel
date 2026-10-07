@@ -252,6 +252,11 @@ static void emit_hash_p0_rhs(Compiler *c, Repr hr, const char *hn,
   }
 }
 
+/* --share-strings: does a hash block's parameter slot lv hold a String
+   handle where the Hash hands it a String (`actual`)? */
+static int hash_param_handle(Compiler *c, LocalVar *lv, TyKind actual) {
+  return repr_share_rule(c) && lv && actual == TY_STRING && repr_of_slot(c, lv).kind == RK_STRBUF;
+}
 /* Bind a hash-iteration block's parameters to C locals for entry `ti` of the
    materialized hash temp `_t<trecv>` (held as hr, runtime cname hn), emit the
    block's leading statements into g_pre at g_indent+1, evaluate its final
@@ -261,6 +266,10 @@ static void emit_hash_p0_rhs(Compiler *c, Repr hr, const char *hn,
    lone parameter receives the value) over select-style (it receives the key).
    The caller emits the loop header and consumes the returned text; this routine
    owns the intricate |k, v| binding shared by every hash block walk. */
+/* a caller of emit_hash_block_eval that tests the value's nil asks for an
+   Integer or Float value that can be nil to be held as its oint; the eval
+   answers whether it did */
+static int g_hbe_want_oint = 0, g_hbe_oint = 0;
 static char *emit_hash_block_eval(Compiler *c, int block, Repr hr, const char *hn,
                                   int trecv, int ti, int p0_solo_is_value, TyKind *out_bret) {
   const NodeTable *nt = c->nt;
@@ -284,8 +293,14 @@ static char *emit_hash_block_eval(Compiler *c, int block, Repr hr, const char *h
   LocalVar *p1_lv = p1_orig ? scope_local(pscope, p1_orig) : NULL;
   TyKind p0_decl = p0_lv ? p0_lv->type : TY_UNKNOWN;
   TyKind p1_decl = p1_lv ? p1_lv->type : TY_UNKNOWN;
-  int ns0 = p0_orig && p0_actual != TY_UNKNOWN && p0_decl != TY_UNKNOWN && p0_decl != p0_actual;
-  int ns1 = p1_orig && p1_actual != TY_UNKNOWN && p1_decl != TY_UNKNOWN && p1_decl != p1_actual;
+  /* --share-strings: a parameter whose slot is a String handle binds a
+     fresh handle over the key or value it is handed (each key is the
+     Hash's own frozen copy), not a String shadow the handle's reads cannot
+     take */
+  int hb0 = hash_param_handle(c, p0_lv, p0_actual) && !(!p1_orig && p0_solo_is_value == 2);
+  int hb1 = hash_param_handle(c, p1_lv, p1_actual);
+  int ns0 = !hb0 && p0_orig && p0_actual != TY_UNKNOWN && p0_decl != TY_UNKNOWN && p0_decl != p0_actual;
+  int ns1 = !hb1 && p1_orig && p1_actual != TY_UNKNOWN && p1_decl != TY_UNKNOWN && p1_decl != p1_actual;
   int st0 = -1, sri0 = -1, srn0 = 0; char sro0[112]; sro0[0] = '\0';
   int st1 = -1, sri1 = -1, srn1 = 0; char sro1[112]; sro1[0] = '\0';
   /* p0 reads the key for a 2-param block, or for select-style solo binding. */
@@ -307,6 +322,14 @@ static char *emit_hash_block_eval(Compiler *c, int block, Repr hr, const char *h
         snprintf(g_ren_from[g_nren], sizeof g_ren_from[0], "%s", p0_orig);
         snprintf(g_ren_to[g_nren++], sizeof g_ren_to[0], "_bp%d", st0);
       }
+    }
+    else if (hb0) {
+      char src[160];
+      if (p0_is_key) snprintf(src, sizeof src, "_t%d->order[_t%d]", trecv, ti);
+      else snprintf(src, sizeof src, "sp_%sHash_get(_t%d, _t%d->order[_t%d])", hn, trecv, trecv, ti);
+      buf_printf(g_pre, "lv_%s = ", p0);
+      emit_strbuf_param_bind(c, p0_lv, TY_STRING, src, g_pre);
+      buf_puts(g_pre, ";\n");
     }
     else {
       buf_printf(g_pre, "lv_%s = ", p0);
@@ -332,6 +355,13 @@ static char *emit_hash_block_eval(Compiler *c, int block, Repr hr, const char *h
         snprintf(g_ren_to[g_nren++], sizeof g_ren_to[0], "_bp%d", st1);
       }
     }
+    else if (hb1) {
+      char src[160];
+      snprintf(src, sizeof src, "sp_%sHash_get(_t%d, _t%d->order[_t%d])", hn, trecv, trecv, ti);
+      buf_printf(g_pre, "lv_%s = ", p1);
+      emit_strbuf_param_bind(c, p1_lv, TY_STRING, src, g_pre);
+      buf_puts(g_pre, ";\n");
+    }
     else {
       if (repr_hash_is(hr, TY_POLY, TY_POLY))
         buf_printf(g_pre, "lv_%s = _t%d->vals[_t%d->order[_t%d]];\n", p1, trecv, trecv, ti);
@@ -354,10 +384,18 @@ static char *emit_hash_block_eval(Compiler *c, int block, Repr hr, const char *h
   /* a block that always yields nil has TY_NIL/TY_VOID element type, which has
      no C storage (emit_ctype -> void); collect it as a boxed poly nil (#2343). */
   int want_poly = (bret == TY_POLY || bret == TY_NIL || bret == TY_VOID);
+  /* an Integer or Float value that can be nil, where the caller asked */
+  int vo = g_hbe_want_oint && oint_kind(bret) && bb && bn > 0 &&
+           (node_has_oint_form(c, bb[bn - 1]) || block_next_may_be_nil(c, body, 0));
+  g_hbe_oint = vo;
   emit_indent(g_pre, g_indent + 1);
   if (want_poly) buf_printf(g_pre, "sp_RbVal _t%d = sp_box_nil();\n", tvv);
+  else if (vo) buf_printf(g_pre, "%s _t%d = %s;\n", oint_ctype(bret), tvv, oint_nil(bret));
   else { emit_ctype(c, bret, g_pre); buf_printf(g_pre, " _t%d = %s;\n", tvv, default_value_from_compiler(c, bret)); }
+  int sv_bvo = g_bv_dest_oint;
+  if (vo) g_bv_dest_oint = 1;
   emit_block_value_into(c, block, tvvb, want_poly, g_indent + 1);
+  g_bv_dest_oint = sv_bvo;
   if (ns0 && p0_lv) p0_lv->type = p0_decl;
   if (ns1 && p1_lv) p1_lv->type = p1_decl;
   if (sri1 >= 0) { if (srn1) g_nren = sri1; else strncpy(g_ren_to[sri1], sro1, sizeof g_ren_to[0]-1); }
@@ -416,7 +454,10 @@ int emit_hash_collect_expr(Compiler *c, int id, Buf *b) {
     /* the type of the temp the block's value is collected into: the tail's,
        or boxed when a `next` or `break` in the block widens it */
     TyKind bvt2 = TY_UNKNOWN;
+    g_hbe_want_oint = 1;
     char *vb = emit_hash_block_eval(c, block, rr, hn, trecv, ti, 0, &bvt2);
+    g_hbe_want_oint = 0;
+    int vb_o = g_hbe_oint; g_hbe_oint = 0;
     emit_indent(g_pre, g_indent + 1);
     TyKind vtt = rr.val;
     /* Ruby truthiness on the block's value. A boxed one -- the block calls a
@@ -432,8 +473,17 @@ int emit_hash_collect_expr(Compiler *c, int id, Buf *b) {
         buf_printf(g_pre, "if (((void)(%s), %d)) { ", vb ? vb : "0", is_rej ? 1 : 0);
       else if (bvt2 == TY_POLY || bvt2 == TY_UNKNOWN)
         buf_printf(g_pre, "if (%ssp_poly_truthy(%s)) { ", is_rej ? "!" : "", vb ? vb : "sp_box_nil()");
-      else
-        buf_printf(g_pre, "if (%s(%s)) { ", is_rej ? "!" : "", vb ? vb : "0");
+      /* a plain Integer or Float holds no nil (it is out of band) and 0
+         is truthy: Ruby's truthiness, not C's */
+      else if ((bvt2 == TY_INT || bvt2 == TY_FLOAT) && vb_o)
+        buf_printf(g_pre, "if (%s(%s).nil) { ", is_rej ? "" : "!", vb);
+      else if (bvt2 == TY_INT || bvt2 == TY_FLOAT)
+        buf_printf(g_pre, "if (((void)(%s), %d)) { ", vb ? vb : "0", is_rej ? 0 : 1);
+      else {
+        buf_printf(g_pre, "if (%s", is_rej ? "!" : "");
+        emit_slot_truthy(bvt2, vb ? vb : "0", g_pre);
+        buf_puts(g_pre, ") { ");
+      }
     }
     free(vb);
     if (repr_hash_is(rr, TY_POLY, TY_POLY)) {
@@ -6546,6 +6596,15 @@ int emit_lent_local(LocalVar *lv, const char *vn, Buf *out) {
      sp_gc_pin_remembered, which reads a header off it -- the fault
      #4391's first half was. */
   int fwd = lv && (lv->byref_out || lv->inline_alias);   /* an inline alias is a forward too: it points at whatever the caller lent */
+  /* Inside a shared-handle shim the local is the shim's shadow, a plain C
+     local the shim declares: its address is the slot, whether the local
+     itself lives in a cell or a capture field, and nothing is pinned (the
+     cell form spelled `_cell__sbN`, which nothing declares). */
+  const char *srn = rename_local(vn);
+  if (sb_shim_shadow(vn, srn) && (!lv || lv->type == TY_STRING)) {
+    buf_printf(out, "&lv_%s", srn);
+    return 1;
+  }
   if (g_cap_struct && g_cap_names && nameset_has(g_cap_names, vn)) {
     /* a capture of another type has a cell of that type, no String slot */
     if (lv && lv->type != TY_STRING) return 0;

@@ -1548,7 +1548,61 @@ void emit_poly_lift_ref(const char *ref, Buf *b) {
 void emit_local_ref(Compiler *c, int scope_node, const char *name, Buf *b) {
   emit_scope_local_ref(c, scope_node >= 0 ? comp_scope_of(c, scope_node) : NULL, name, b);
 }
+/* Is `rn`, what rename_local answers for local `name`, the shadow a
+   shared-handle shim reads and writes that local through (`_sbN`, the
+   shim's `lv__sbN`)? Only as a rename: a local the program itself names
+   `_sb1` is its own. */
+int sb_shim_shadow(const char *name, const char *rn) {
+  return rn != name && !strncmp(rn, "_sb", 3) && isdigit((unsigned char)rn[3]);
+}
+/* A shim types its receiver local String for the arm it re-runs, though the
+   slot is the handle (sb_shim_enter); it answers the local's shim state as
+   it was, which sb_shim_leave puts back whole. A shim inside a proc made in
+   another shim's arm enters a local the outer one lifted: putting back only
+   the type cleared the outer shim's shim_ty, so its drop skipped the local,
+   which kept the handle type for the rest of the outer arm. */
+SbShimSave sb_shim_enter(LocalVar *lv) {
+  SbShimSave sv = { lv->type, lv->shim_ty, lv->shim_lift };
+  lv->shim_ty = lv->type;
+  lv->type = TY_STRING;
+  lv->shim_lift = 0;
+  return sv;
+}
+void sb_shim_leave(LocalVar *lv, SbShimSave sv) {
+  lv->type = sv.type;
+  lv->shim_ty = sv.shim_ty;
+  lv->shim_lift = sv.shim_lift;
+}
+/* A proc or a fiber made inside the arm shares the real slot, and types its
+   capture struct and its body from the local: put the handle type back on
+   the locals a live shim lowered, for it (sb_shim_drop sets them back). Only
+   the shim's own local carries shim_ty, so a same-named local of an inlined
+   method is left alone. */
+static void sb_shim_lifted(Compiler *c, int node, int delta) {
+  Scope *sc = node >= 0 ? comp_scope_of(c, node) : NULL;
+  if (!sc) return;
+  for (int i = 0; i < g_nren; i++) {
+    if (!sb_shim_shadow(g_ren_from[i], g_ren_to[i])) continue;
+    LocalVar *lv = scope_local(sc, g_ren_from[i]);
+    if (!lv || lv->shim_ty == TY_UNKNOWN) continue;
+    if (delta > 0) { if (lv->shim_lift++ == 0) lv->type = lv->shim_ty; }
+    else if (--lv->shim_lift == 0) lv->type = TY_STRING;
+  }
+}
+void sb_shim_lift(Compiler *c, int node) { sb_shim_lifted(c, node, 1); }
+void sb_shim_drop(Compiler *c, int node) { sb_shim_lifted(c, node, -1); }
 void emit_scope_local_ref(Compiler *c, Scope *s, const char *name, Buf *b) {
+  /* Inside a shared-handle shim the local reads as the shim's shadow, a
+     plain C local the shim declares, even when the local itself lives in a
+     cell or a capture field: that slot holds the handle, which the shim
+     reads before and writes back after. The cell form spelled the shadow
+     `(*_cell__sbN)`, and the capture form handed the arm the handle slot,
+     neither of which compiles. */
+  const char *rn = rename_local(name);
+  if (sb_shim_shadow(name, rn)) {
+    buf_printf(b, "lv_%s", rn);
+    return;
+  }
   if (g_cap_struct && g_cap_names && nameset_has(g_cap_names, name)) {
     /* A TY_PROC capture is stored as (sp_int)(uintptr_t)sp_Proc* in the cell.
        Cast it back to sp_Proc* so call sites work. A heap-object cell is a real
@@ -1567,12 +1621,11 @@ void emit_scope_local_ref(Compiler *c, Scope *s, const char *name, Buf *b) {
        follow -- the prologue declared `lv__y1_n` while the body read
        `(*_cell_n)`, which nothing declared (#4088). Outside an inline the map
        is empty and this is the name itself. */
-    const char *crn = rename_local(name);
-    if (lv->type == TY_PROC) buf_printf(b, "(sp_Proc *)(uintptr_t)(*_cell_%s)", crn);
-    else buf_printf(b, "(*_cell_%s)", crn);
+    if (lv->type == TY_PROC) buf_printf(b, "(sp_Proc *)(uintptr_t)(*_cell_%s)", rn);
+    else buf_printf(b, "(*_cell_%s)", rn);
     return;
   }
-  buf_printf(b, "lv_%s", rename_local(name));
+  buf_printf(b, "lv_%s", rn);
 }
 void emit_yblk_ref(Buf *b) {
   /* The lowered method's block param: the declared &block name when the def
@@ -2604,6 +2657,14 @@ int strbuf_slot_ref(Compiler *c, int recv, char *out, size_t cap) {
   if (recv < 0 || nt_kind(c->nt, recv) != NK_InstanceVariableReadNode || !holder_of_node(c, recv, &h) ||
       h.idx < 0 || c->classes[h.cid].ivar_types[h.idx] != TY_STRBUF) return 0;
   return holder_slot_text(c, &h, out, cap);
+}
+/* rename_local for a name whose CELL is wanted: the shim's shadow rename is
+   skipped, since the shadow is a plain C local and the cell the local lives
+   in keeps the name an enclosing inline gave it (or the source name). */
+const char *rename_local_cell(const char *nm) {
+  for (int i = g_nren - 1; i >= 0; i--)
+    if (sp_streq(g_ren_from[i], nm) && !sb_shim_shadow(nm, g_ren_to[i])) return g_ren_to[i];
+  return nm;
 }
 const char *rename_local(const char *nm) {
   /* Innermost first. A nested inline pushes its own locals above the caller's,
@@ -4435,6 +4496,15 @@ int proc_form_source(Compiler *c, int s) {
   memcpy(src, nm, n); src[n] = 0;
   if (pf->class_id < 0) return comp_method_index(c, src);
   return (pf->is_cmethod ? comp_cmethod_in_class : comp_method_in_class)(c, pf->class_id, src);
+}
+/* Is `new` call `id`, which runs yielding initialize `initm`, a step of a
+   cycle of constructors (mark_ctor_cycles)? Its own scope, or the method a
+   clone holding it was made from, is on the same cycle as initm. */
+int ctor_site_on_cycle(Compiler *c, int id, int initm) {
+  if (initm < 0 || initm >= c->nscopes || !c->scopes[initm].ctor_cycle) return 0;
+  int s = id >= 0 && id < c->nt->count ? c->nscope[id] : -1;
+  if (s >= 0 && s < c->nscopes && c->scopes[s].is_proc_form) s = proc_form_source(c, s);
+  return s >= 0 && s < c->nscopes && c->scopes[s].ctor_cycle == c->scopes[initm].ctor_cycle;
 }
 int scope_needs_proc_form(Compiler *c, int s) {
   return scope_proc_form_of(c, s) >= 0;
