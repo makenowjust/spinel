@@ -2155,13 +2155,14 @@ int emit_array_op_assign(Compiler *c, const char *lval, TyKind t,
                   " for (sp_int _t%d = 0; _t%d < _t%d; _t%d++)"
                   " for (sp_int _t%d = 0; _t%d < _t%d->len; _t%d++)",
                tn, k, tr, k, tr, ti, ti, tn, ti, tj, tj, ta, tj);
+    /* the repeated elements carry the receiver's nils */
+    if (t == TY_INT_ARRAY || t == TY_FLOAT_ARRAY)
+      buf_printf(b, " sp_%sArray_push_o(_t%d, sp_%sArray_oget(_t%d, _t%d));", k, tr, k, ta, tj);
     /* only an IntArray carries a start offset */
-    if (t == TY_INT_ARRAY)
+    else if (t == TY_INT_ARRAY)
       buf_printf(b, " sp_%sArray_push(_t%d, _t%d->data[_t%d->start + _t%d]);", k, tr, ta, ta, tj);
     else
       buf_printf(b, " sp_%sArray_push(_t%d, _t%d->data[_t%d]);", k, tr, ta, tj);
-    /* the repeated elements carry the receiver's nils */
-    if (t == TY_INT_ARRAY || t == TY_FLOAT_ARRAY) buf_printf(b, " sp_%sArray_nil_from(_t%d, _t%d);", k, tr, ta);
     buf_printf(b, " %s = _t%d; }", lval, tr);
     op_assign_slot_end(src, lval, b);
     return 1;
@@ -15840,8 +15841,10 @@ static int emit_array_mutate_stmt_body(Compiler *c, int id, Buf *b, int indent) 
           const char *ssfx = sp_streq(ak, "Poly") ? nil_store_sfx(c, k, NIL_STORE_BOXED) : "";
           buf_printf(b, "{ sp_%sArray *_t%d = ", ak, tsrc); emit_expr(c, inner, b); buf_puts(b, "; ");
           buf_printf(b, "sp_int _t%d = sp_%sArray_length(_t%d); ", tn, ak, tsrc);
-          buf_printf(b, "for (sp_int _t%d = 0; _t%d < _t%d; _t%d++) sp_%sArray_push%s(_t%d, ", ti, ti, tn, ti, k, ssfx, tr);
-          char getx[128]; snprintf(getx, sizeof getx, "sp_%sArray_get(_t%d, _t%d)", ak, tsrc, ti);
+          /* the same kind copies each element with its nil */
+          int same_o = sp_streq(ak, k) && (et == TY_INT || et == TY_FLOAT);
+          buf_printf(b, "for (sp_int _t%d = 0; _t%d < _t%d; _t%d++) sp_%sArray_push%s(_t%d, ", ti, ti, tn, ti, k, same_o ? "_o" : ssfx, tr);
+          char getx[128]; snprintf(getx, sizeof getx, "sp_%sArray_%s(_t%d, _t%d)", ak, same_o ? "oget" : "get", tsrc, ti);
           TyKind selem = ty_array_elem(at);
           if (et == TY_POLY && !sp_streq(ak, "Poly")) { Buf bx; memset(&bx, 0, sizeof bx); emit_boxed_text(c, selem, getx, &bx); buf_puts(b, bx.p ? bx.p : getx); free(bx.p); }
           else if (sp_streq(ak, "Poly") && et == TY_STRING) buf_printf(b, "sp_poly_elem_s(%s)", getx);
@@ -15849,7 +15852,6 @@ static int emit_array_mutate_stmt_body(Compiler *c, int id, Buf *b, int indent) 
           else if (sp_streq(ak, "Poly") && et == TY_FLOAT) buf_printf(b, "sp_poly_elem_f(%s)", getx);
           else buf_puts(b, getx);
           buf_puts(b, ");");
-          if (sp_streq(ak, k) && (et == TY_INT || et == TY_FLOAT)) buf_printf(b, " sp_%sArray_nil_from(_t%d, _t%d);", k, tr, tsrc);
           buf_puts(b, " }\n");
         }
         else {
@@ -15969,10 +15971,12 @@ static int emit_array_mutate_stmt_body(Compiler *c, int id, Buf *b, int indent) 
       emit_indent(&hd, indent + 1);
       buf_printf(&hd, "sp_int _t%d = sp_%sArray_length(_t%d);\n", tn, ak, ts);
       emit_indent(&lp, indent + 1);
+      /* the same number kind copies each element with its nil */
+      int same_o = *nilable && sp_streq(ak, k) && (sp_streq(k, "Int") || sp_streq(k, "Float"));
       buf_printf(&lp, "for (sp_int _t%d = 0; _t%d < _t%d; _t%d++) sp_%sArray_push%s(_t%d, ",
-                 ti, ti, tn, ti, k, sp_streq(ak, "Poly") ? nilable : "", tr);
+                 ti, ti, tn, ti, k, same_o ? "_o" : sp_streq(ak, "Poly") ? nilable : "", tr);
       char getexpr[256];
-      snprintf(getexpr, sizeof getexpr, "sp_%sArray_get(_t%d, _t%d)", ak, ts, ti);
+      snprintf(getexpr, sizeof getexpr, "sp_%sArray_%s(_t%d, _t%d)", ak, same_o ? "oget" : "get", ts, ti);
       if (sp_streq(k, "Poly") && !sp_streq(ak, "Poly")) {
         /* box the source scalar into the poly receiver */
         emit_boxed_text(c, ty_array_elem(at), getexpr, &lp);
@@ -15986,8 +15990,6 @@ static int emit_array_mutate_stmt_body(Compiler *c, int id, Buf *b, int indent) 
       }
       else buf_puts(&lp, getexpr);
       buf_puts(&lp, ");");
-      /* the same kind copies the source's elements, nils and all */
-      if (*nilable && sp_streq(ak, k)) buf_printf(&lp, " sp_%sArray_nil_from(_t%d, _t%d);", k, tr, ts);
       buf_puts(&lp, "\n");
     }
     if (hd.p) buf_puts(b, hd.p);

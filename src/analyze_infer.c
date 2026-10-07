@@ -144,6 +144,10 @@ int an_builtin_only_p(void) { return an_builtin_only; }
    mark it builtin_only (infer_call_inner): a pure read keeps both for its
    own inference and leaves the node as the analysis left it. */
 static int an_pure_reads = 0;
+/* a node codegen has pinned to a type for a re-entered emission
+   (emit_poly_builtin_default_at): its recomputed answer is not recorded */
+static int an_pinned_node = -1;
+int an_pin_node(int id) { int sv = an_pinned_node; an_pinned_node = id; return sv; }
 void an_pure_read_begin(void) { an_pure_reads++; }
 void an_pure_read_end(void) { an_pure_reads--; }
 /* What call `id` would be typed if no user class owned the name: the
@@ -9625,7 +9629,7 @@ TyKind infer_type(Compiler *c, int id) {
   }
   /* Nor is a pure read's answer recorded (an_pure_reads): it is asked after
      the analysis, under whatever view codegen has open. */
-  if (!an_builtin_only && !an_pure_reads) {
+  if (!an_builtin_only && !an_pure_reads && id != an_pinned_node) {
     c->ntype[id] = t;
     /* the origin only when a consumer asked (--warn-widen, --emit-types):
        its ivar arm walks the program's ivar writes per read and its call

@@ -5430,7 +5430,8 @@ int node_is_oint(Compiler *c, int node) {
     /* an element read that can miss, a fold or a search over a container
        that can hold nil: the analysis's answer, for a container receiver */
     if (r >= 0 && (ty_is_array(rt) || ty_is_hash(rt) || rt == TY_RANGE) &&
-        (sp_streq(nm, "[]") || sp_streq(nm, "at") || sp_streq(nm, "fetch") || sp_streq(nm, "dig") ||
+        (sp_streq(nm, "[]") || (sp_streq(nm, "slice") && an2 == 1) || sp_streq(nm, "at") ||
+         sp_streq(nm, "fetch") || sp_streq(nm, "dig") ||
          sp_streq(nm, "first") || sp_streq(nm, "last") || sp_streq(nm, "min") || sp_streq(nm, "max") ||
          sp_streq(nm, "sum") || sp_streq(nm, "sample") || sp_streq(nm, "find_index") ||
          is_find_alias(nm) || is_reduce_alias(nm)))

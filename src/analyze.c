@@ -1699,6 +1699,23 @@ void propagate_bigint_cascade(Compiler *c) {
    receiver's class during inference (codegen mirrors this via an_ie_class_id). */
 int *g_ie_node_class = NULL;
 static int g_ie_node_class_cap = 0;
+/* nodes inside an instance_eval / exec block over a receiver of no class
+   of the program's (nil, a number, a String): its ivars are nil there.
+   Sized as g_ie_node_class. */
+static unsigned char *g_ie_nonobj = NULL;
+static void mark_ie_nonobj(Compiler *c, int node) {
+  if (node < 0 || node >= g_ie_node_class_cap) return;
+  NodeKind k = nt_kind(c->nt, node);
+  if (k == NK_DefNode || k == NK_ClassNode || k == NK_ModuleNode) return;
+  g_ie_nonobj[node] = 1;
+  int nr = nt_num_refs(c->nt, node);
+  for (int i = 0; i < nr; i++) mark_ie_nonobj(c, nt_ref_at(c->nt, node, i));
+  int na = nt_num_arrs(c->nt, node);
+  for (int i = 0; i < na; i++) { int n = 0; const int *ids = nt_arr_at(c->nt, node, i, &n); for (int j = 0; j < n; j++) mark_ie_nonobj(c, ids[j]); }
+}
+int ie_nonobj_node(int node) {
+  return g_ie_nonobj && node >= 0 && node < g_ie_node_class_cap && g_ie_nonobj[node];
+}
 
 void mark_ie_subtree(Compiler *c, int node, int cls) {
   if (node < 0) return;
@@ -2372,9 +2389,13 @@ void build_ie_map(Compiler *c) {
   if (g_ie_node_class_cap < nt->count) {
     int *grown = realloc(g_ie_node_class, sizeof(int) * (size_t)nt->count);
     if (!grown) return;  /* OOM: keep the old map rather than leak/deref NULL */
+    unsigned char *gn = realloc(g_ie_nonobj, (size_t)nt->count);
+    if (!gn) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
     g_ie_node_class = grown;
+    g_ie_nonobj = gn;
     g_ie_node_class_cap = nt->count;
   }
+  memset(g_ie_nonobj, 0, (size_t)g_ie_node_class_cap);
   int *pend = malloc(sizeof(int) * (size_t)nt->count);
   if (!pend) return;
   ie_forward_memo_reset();
@@ -2401,6 +2422,10 @@ void build_ie_map(Compiler *c) {
       TyKind rt = infer_type(c, recv);
       cls = ty_is_object(rt) ? ty_object_class(rt) : ie_poly_mark(c, id, rt);
       if (cls == -1 && !ty_is_object(rt)) cls = ie_class_value_target(c, id, recv, rt, blk);
+      if (cls == -1 && pass && rt != TY_POLY && rt != TY_UNKNOWN && !ty_is_object(rt) &&
+          (sp_streq(nm, "instance_eval") || sp_streq(nm, "instance_exec")) &&
+          nt_kind(nt, blk) == NK_BlockNode)
+        mark_ie_nonobj(c, blk);
       if (cls == -1) continue;
       if (ty_is_object(rt) && !sp_streq(nm, "instance_eval") && !sp_streq(nm, "instance_exec")) {
         /* not a direct instance_eval/exec: maybe a trampoline method on `cls`? */
@@ -27375,12 +27400,21 @@ int nullable_int_value(Compiler *c, int v) {
   if (nt_kind(nt, v) == NK_InstanceVariableReadNode) {
     Scope *s = comp_scope_of(c, v);
     int cid = s ? s->class_id : -1;
-    /* inside an instance_eval / exec splice the ivar is the receiver's */
+    /* inside an instance_eval / exec splice the ivar is the receiver's;
+       a receiver of no class of the program's has none: nil */
+    if (ie_nonobj_node(v)) return 1;
     if (ie_class_of(c, v) >= 0) cid = ie_class_of(c, v);
     if (cid < 0) cid = comp_class_index(c, "Toplevel");
     if (cid < 0 || cid >= c->nclasses) return 0;
     ClassInfo *ci = &c->classes[cid];
     int iv = comp_ivar_index(ci, nt_str(nt, v, "name"));
+    /* a splice's receiver class that never writes the ivar reads it nil */
+    if (iv < 0 && ie_class_of(c, v) >= 0) {
+      int has = 0;
+      for (int k = cid, hop = 0; k >= 0 && !has && hop < 64; k = c->classes[k].parent, hop++)
+        has = comp_ivar_index(&c->classes[k], nt_str(nt, v, "name")) >= 0;
+      if (!has) return 1;
+    }
     /* a boxed ivar (a promote-widened member) can hold nil too */
     return iv >= 0 && (ci->ivar_nullable_int[iv] || ci->ivar_types[iv] == TY_POLY);
   }
@@ -28620,6 +28654,22 @@ static void mark_nullable_int_locals(Compiler *c) {
            ivar initialize never assigns): the slot holds its nil beside the value */
         if (nt_kind(nt, dv2) != NK_NilNode && !nullable_int_value(c, dv2)) continue;
         p2->nullable_int = 1; changed = 1;
+      }
+    }
+    /* A block's optional or keyword parameter whose default can be nil
+       (`|k: @d|` under an instance_exec whose receiver has no @d) binds
+       that nil whenever the call leaves it out */
+    for (int q = 0; q < 2; q++) {
+      NodeKind pk = q ? NK_OptionalKeywordParameterNode : NK_OptionalParameterNode;
+      NT_FOREACH_KIND(nt, pk, id) {
+        int dv = nt_ref(nt, id, "value");
+        const char *pn = nt_str(nt, id, "name");
+        if (dv < 0 || !pn) continue;
+        Scope *ps = comp_scope_of(c, id);
+        LocalVar *pv = ps ? scope_local(ps, pn) : NULL;
+        if (!pv || (pv->type != TY_INT && pv->type != TY_FLOAT) || pv->nullable_int) continue;
+        if (nt_kind(nt, dv) != NK_NilNode && !nullable_int_value(c, dv)) continue;
+        pv->nullable_int = 1; changed = 1;
       }
     }
     /* An int/float ARRAY local holding such a value hands it to every element
