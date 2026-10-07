@@ -225,8 +225,8 @@ int emit_call_identity_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
       char ref[24];
       buf_puts(b, "({ "); emit_sentinel_bind(c, rt, recv, ref, sizeof ref, b);
       emit_slot_truthy(rt, ref, b);
-      if (rt == TY_INT) buf_printf(b, " ? 2*%s+1 : 4; })", ref);
-      else buf_printf(b, " ? sp_rbval_hash_key(sp_box_float(%s)) : 4; })", ref);
+      if (rt == TY_INT) buf_printf(b, " ? 2*%s.v+1 : 4; })", ref);
+      else buf_printf(b, " ? sp_rbval_hash_key(sp_box_float(%s.v)) : 4; })", ref);
     }
     else if (rt == TY_INT) { buf_puts(b, "(2*("); emit_expr(c, recv, b); buf_puts(b, ")+1)"); }
     else if (rt == TY_SYMBOL) { buf_puts(b, "((sp_int)("); emit_expr(c, recv, b); buf_puts(b, ")*2)"); }
@@ -2301,8 +2301,12 @@ static void emit_reflect_ivar_set(Compiler *c, int id, int recv, int value, int 
   if (is_val) buf_puts(b, ")");
   buf_puts(b, "; ");
   if (!is_val) buf_printf(b, "SP_GC_ROOT(_t%d); ", tr);
-  emit_ctype(c, mt, b); buf_printf(b, " _t%d = ", tv);
-  if (emit_array_into_poly_slot(c, mt, value, b)) { }
+  /* a number field with a nil bit takes the value with its nil */
+  int iv = comp_ivar_index(&c->classes[cid], sym);
+  int nb = oint_kind(mt) && iv >= 0 && ivar_has_nilbit(c, cid, iv);
+  if (nb) buf_printf(b, "%s _t%d = ", oint_ctype(mt), tv); else { emit_ctype(c, mt, b); buf_printf(b, " _t%d = ", tv); }
+  if (nb) emit_oint_expr(c, value, mt, b);
+  else if (emit_array_into_poly_slot(c, mt, value, b)) { }
   else emit_coerce(c, value, mt, CO_HOLD, "an instance variable write", b);
   buf_puts(b, "; ");
   char obj[32], val[32];
@@ -2310,9 +2314,18 @@ static void emit_reflect_ivar_set(Compiler *c, int id, int recv, int value, int 
   snprintf(val, sizeof val, "_t%d", tv);
   emit_gc_root_var(c, mt, val, b);
   emit_frozen_obj_guard(c, cid, obj, b);
-  buf_printf(b, "%s->iv_%s = %s; %s->_sp_set_%s = TRUE; ", obj, iv_c(sym + 1), val, obj, iv_c(sym + 1));
+  if (nb) {
+    char objp[40]; snprintf(objp, sizeof objp, "%s->", obj);
+    emit_ivar_text_nilbit(c, cid, iv, objp, val, b);
+    buf_printf(b, "; %s->_sp_set_%s = TRUE; ", obj, iv_c(sym + 1));
+  }
+  else buf_printf(b, "%s->iv_%s = %s; %s->_sp_set_%s = TRUE; ", obj, iv_c(sym + 1), val, obj, iv_c(sym + 1));
   Repr rp = repr_of(c, id);
-  emit_coerce_text(c, id, mt, rp.as_ty, CO_HOLD, val, "an instance variable write result", b);
+  /* the call answers the value: with its nil where the consumer takes the
+     oint, boxed with it, or unwrapped */
+  if (nb && rp.kind == RK_BOXED) buf_printf(b, "%s(%s)", oint_box(mt), val);
+  else if (nb) { oint_open(c, id, mt, b); buf_puts(b, val); oint_close(c, id, b); }
+  else emit_coerce_text(c, id, mt, rp.as_ty, CO_HOLD, val, "an instance variable write result", b);
   buf_puts(b, "; })");
 }
 

@@ -19,6 +19,9 @@ static void oint_close(Compiler *c, int id, Buf *b) { if (!node_is_oint(c, id)) 
    analysis marks the call nullable): wrapped as never nil. */
 static void oint_lift_open(Compiler *c, int id, TyKind t, Buf *b) { if (node_is_oint(c, id)) buf_printf(b, "%s(", oint_of(t)); }
 static void oint_lift_close(Compiler *c, int id, Buf *b) { if (node_is_oint(c, id)) buf_puts(b, ")"); }
+/* The value a raising arm yields in the slot of kind t: nil beside the value
+   where the call's consumer takes the oint, raise_tail_value_c's otherwise */
+static const char *raise_tail_c(Compiler *c, int id, TyKind t) { return oint_kind(t) && node_is_oint(c, id) ? oint_nil(t) : raise_tail_value_c(c, t); }
 
 /* The value of the block a `fetch` or `delete` runs when it finds nothing, as
    `({ bind; leading statements; setup; value; })`. `bind` sets the block's
@@ -1954,8 +1957,11 @@ else {
       else emit_recv_rooted(c, recv, t, "SP_GC_ROOT", b);
       /* the arguments left to right into temporaries, then prepended in
          reverse, as the Float branch below does */
+      /* a value that can be nil travels as its oint into the _nilable store */
       for (int a = 0; a < argc; a++) {
-        buf_printf(b, " sp_int _u%d_%d = ", t, a); emit_typed_elem_value(c, argv[a], TY_INT, b); buf_puts(b, ";");
+        if (nil_store_sfx(c, "Int", argv[a])[0]) { buf_printf(b, " sp_oint _u%d_%d = ", t, a); emit_elem_store_value(c, "Int", argv[a], b); }
+        else { buf_printf(b, " sp_int _u%d_%d = ", t, a); emit_typed_elem_value(c, argv[a], TY_INT, b); }
+        buf_puts(b, ";");
       }
       for (int a = argc - 1; a >= 0; a--) {
         buf_printf(b, " sp_IntArray_unshift%s(_t%d, _u%d_%d);", nil_store_sfx(c, "Int", argv[a]), t, t, a);
@@ -1984,7 +1990,9 @@ else {
       if (held) { emit_expr(c, recv, b); buf_puts(b, ";"); }
       else emit_recv_rooted(c, recv, t, "SP_GC_ROOT", b);
       for (int a = 0; a < argc; a++) {
-        buf_printf(b, " sp_float _u%d_%d = ", t, a); emit_typed_elem_value(c, argv[a], TY_FLOAT, b); buf_puts(b, ";");
+        if (nil_store_sfx(c, "Float", argv[a])[0]) { buf_printf(b, " sp_ofloat _u%d_%d = ", t, a); emit_elem_store_value(c, "Float", argv[a], b); }
+        else { buf_printf(b, " sp_float _u%d_%d = ", t, a); emit_typed_elem_value(c, argv[a], TY_FLOAT, b); }
+        buf_puts(b, ";");
       }
       for (int a = argc - 1; a >= 0; a--) {
         buf_printf(b, " sp_FloatArray_unshift%s(_t%d, _u%d_%d);", nil_store_sfx(c, "Float", argv[a]), t, t, a);
@@ -2939,6 +2947,7 @@ static int emit_typed_array_call(Compiler *c, int id, Buf *b, const NodeTable *n
         TyKind fit = filv ? filv->type : TY_INT;
         emit_indent(g_pre, g_indent + 1);
         if (fit == TY_POLY) buf_printf(g_pre, "lv_%s = sp_box_int(_t%d);\n", ip, ti);
+        else if (slot_is_oint(filv)) buf_printf(g_pre, "lv_%s = sp_oint_of(_t%d);\n", ip, ti);   /* an index is never nil */
         else buf_printf(g_pre, "lv_%s = _t%d;\n", ip, ti);
       }
       /* A poly value is boxed by the step, once: boxed again here, with
@@ -2954,8 +2963,13 @@ static int emit_typed_array_call(Compiler *c, int id, Buf *b, const NodeTable *n
         buf_puts(g_pre, ");\n");
       }
       else {
-        buf_printf(g_pre, "sp_%sArray_set%s(_t%d, _t%d, ", fk, nil_store_sfx(c, fk, fbb[fbn - 1]), trecv, ti);
-        emit_typed_sink_text(c, fbb[fbn - 1], sp_streq(fk, "Int") ? TY_INT : sp_streq(fk, "Float") ? TY_FLOAT : TY_UNKNOWN, vb.p ? vb.p : "", g_pre);
+        const char *fsfx = nil_store_sfx(c, fk, fbb[fbn - 1]);
+        buf_printf(g_pre, "sp_%sArray_set%s(_t%d, _t%d, ", fk, fsfx, trecv, ti);
+        /* the _nilable store takes the value with its nil (a block
+           parameter that can be nil, a nullable read); the plain store the
+           sink's plain value */
+        if (fsfx[0]) emit_oint_expr(c, fbb[fbn - 1], sp_streq(fk, "Float") ? TY_FLOAT : TY_INT, g_pre);
+        else emit_typed_sink_text(c, fbb[fbn - 1], sp_streq(fk, "Int") ? TY_INT : sp_streq(fk, "Float") ? TY_FLOAT : TY_UNKNOWN, vb.p ? vb.p : "", g_pre);
         buf_puts(g_pre, ");\n");
       }
       free(vb.p);
@@ -6963,7 +6977,7 @@ static int str_arms_pattern(Compiler *c, int id, Buf *b, const NodeTable *nt, co
       buf_printf(b, "sp_raise_cls(\"TypeError\", _t%d"
                     " ? \"wrong argument type true (expected Regexp)\""
                     " : \"wrong argument type false (expected Regexp)\");", prb);
-    buf_printf(b, " %s; })", raise_tail_value_c(c, prty));
+    buf_printf(b, " %s; })", raise_tail_c(c, id, prty));
   }
   /* string methods taking a regex-literal argument route to the engine */
   else if ((is_substitution(name)) && argc == 2 && re_lit_index(c, argv[0]) >= 0) {
@@ -8853,7 +8867,7 @@ static int emit_struct_recv_call(Compiler *c, int id, Buf *b, const NodeTable *n
       buf_puts(b, "(void)("); emit_boxed(c, argv[da], b); buf_puts(b, "); ");
     }
     buf_printf(b, "sp_raise_nomethod(sp_nomethod_msg(\"[]\", sp_box_obj((void *)0, %d))); %s; })",
-               ty_object_class(rt), raise_tail_value_c(c, dar));
+               ty_object_class(rt), raise_tail_c(c, id, dar));
     { *out = 1; return 1; }
   }
   /* a Struct's [] / dig / deconstruct_keys validate like CRuby: a missing
@@ -8866,7 +8880,7 @@ static int emit_struct_recv_call(Compiler *c, int id, Buf *b, const NodeTable *n
     buf_printf(b, "); sp_raise_cls(\"ArgumentError\","
                   " \"wrong number of arguments (given 0, expected %s)\"); %s; })",
                sp_streq(name, "dig") ? "1+" : "1",
-               raise_tail_value_c(c, z0));
+               raise_tail_c(c, id, z0));
     { *out = 1; return 1; }
   }
   if (!sc->is_data && sp_streq(name, "[]") && argc >= 2) {
@@ -8877,7 +8891,7 @@ static int emit_struct_recv_call(Compiler *c, int id, Buf *b, const NodeTable *n
     }
     buf_printf(b, "sp_raise_cls(\"ArgumentError\","
                   " \"wrong number of arguments (given %d, expected 1)\"); %s; })",
-               argc, raise_tail_value_c(c, za));
+               argc, raise_tail_c(c, id, za));
     { *out = 1; return 1; }
   }
   if (!sc->is_data && (sp_streq(name, "[]") || sp_streq(name, "dig")) && argc >= 1 &&
@@ -8900,7 +8914,7 @@ static int emit_struct_recv_call(Compiler *c, int id, Buf *b, const NodeTable *n
       buf_printf(b, "sp_raise_cls(\"TypeError\", _t%d"
                     " ? \"no implicit conversion of true into Integer\""
                     " : \"no implicit conversion of false into Integer\");", zb);
-    buf_printf(b, " %s; })", raise_tail_value_c(c, z1));
+    buf_printf(b, " %s; })", raise_tail_c(c, id, z1));
     { *out = 1; return 1; }
   }
   if (sp_streq(name, "dig") && argc >= 1) {
@@ -9687,7 +9701,7 @@ int emit_object_call(Compiler *c, int id, Buf *b) {
               buf_printf(b, "sp_raise_cls(\"TypeError\", _t%d"
                             " ? \"no implicit conversion of true into String\""
                             " : \"no implicit conversion of false into String\");", nrb);
-            buf_printf(b, " %s; })", raise_tail_value_c(c, nrty));
+            buf_printf(b, " %s; })", raise_tail_c(c, id, nrty));
             return 1;
           }
           nm = -1; break;
@@ -9829,7 +9843,7 @@ int emit_object_call(Compiler *c, int id, Buf *b) {
           }
           buf_printf(b, "sp_raise_cls(\"ArgumentError\","
                         " \"wrong number of arguments (given %d, expected 0)\"); %s; })",
-                     argc, raise_tail_value_c(c, rrty2));
+                     argc, raise_tail_c(c, id, rrty2));
           return 1;
         }
         const char *rn2 = comp_resolve_alias(c, cid, name);
@@ -10626,7 +10640,12 @@ int emit_range_call(Compiler *c, int id, Buf *b) {
       buf_printf(b, "({ sp_FloatRange _t%d = ", tr); emit_expr(c, recv, b);
       /* an omitted end: #end is nil and #last the RangeError, as CRuby */
       if (as_int2) buf_printf(b, "; (sp_int)_t%d.last; })", tr);
-      else buf_printf(b, "; sp_frange_%s_v(_t%d); })", sp_streq(name, "end") ? "end" : "last", tr);
+      else {
+        /* the runtime answers the endpoint with its nil (an endless range) */
+        buf_puts(b, "; "); oint_open(c, id, TY_FLOAT, b);
+        buf_printf(b, "sp_frange_%s_v(_t%d)", sp_streq(name, "end") ? "end" : "last", tr);
+        oint_close(c, id, b); buf_puts(b, "; })");
+      }
       return 1;
     }
     if (argc == 0 && sp_streq(name, "max")) {
@@ -10634,7 +10653,10 @@ int emit_range_call(Compiler *c, int id, Buf *b) {
          whatever the other endpoint made of the range's kind (#3837) */
       int as_int = comp_ntype(c, id) == TY_INT;
       buf_printf(b, "({ sp_FloatRange _t%d = ", tr); emit_expr(c, recv, b);
-      buf_printf(b, "; %ssp_frange_max_v(_t%d); })", as_int ? "(sp_int)" : "", tr); return 1;
+      buf_puts(b, "; ");
+      if (as_int) buf_printf(b, "(sp_int)sp_ofloat_arg(sp_frange_max_v(_t%d)); })", tr);
+      else { oint_open(c, id, TY_FLOAT, b); buf_printf(b, "sp_frange_max_v(_t%d)", tr); oint_close(c, id, b); buf_puts(b, "; })"); }
+      return 1;
     }
     /* Range#size counts the integers a range enumerates, so it answers only
        for an Integer begin -- and Infinity when the end is unbounded, which is

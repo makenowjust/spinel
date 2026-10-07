@@ -899,6 +899,16 @@ int emit_call_compare_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
        String slot holds nil as NULL and answers the same way. */
     if (emit_scalar_class_test(c, recv, eff_rt, nt_str(nt, argv[0], "name"),
                                sp_streq(name, "instance_of?"), b)) return 1;
+    if (yes >= 0 && oint_kind(eff_rt) && node_has_oint_form(c, recv)) {
+      /* a number that can be nil: nil's own answer where it is one
+         (`Integer === nil` false, `nil.is_a?(Object)` true) */
+      int nilyes = ty_matches_class(TY_NIL, nt_str(nt, argv[0], "name"), sp_streq(name, "instance_of?"));
+      if (nilyes < 0) nilyes = 0;
+      int tq = ++g_tmp;
+      buf_printf(b, "({ %s _t%d = ", oint_ctype(eff_rt), tq); emit_oint_expr(c, recv, eff_rt, b);
+      buf_printf(b, "; _t%d.nil ? %d : %d; })", tq, nilyes, yes);
+      return 1;
+    }
     if (yes >= 0) { buf_puts(b, "((void)("); emit_expr(c, recv, b); buf_printf(b, "), %d)", yes); return 1; }
   }
 

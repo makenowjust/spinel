@@ -29,6 +29,13 @@ static char *op_recv_text(Compiler *c, const BopCtx *x) {
           Emitted at its first occurrence, repeated after, as $r is. The
           caller's x->rtext is the plain rendering, so a receiver with an
           oint form is rendered again from the node (as the nil? arm does)
+     $O   "_o" for an Integer or Float array receiver, "" for the other
+          kinds: the runtime's `_o` twin answers those elements with their
+          nil (sp_$AArray_pop$O)
+     $<   open and $> close an unwrap of the row's sp_oint / sp_ofloat
+          answer where the call's consumer wants it plain (sp_oint_arg, by
+          node_is_oint of the call); nothing where it takes the oint. The
+          kind is the row's result, or the call's type when the row has none
      $h   the receiver held across the arguments (hold_recv_open, rooted
           in a temp of its C type): the hold opens before anything else is
           emitted or any temp is taken, and closes after the row's text
@@ -109,6 +116,16 @@ static int emit_op_template(Compiler *c, const BopCtx *x, Buf *b) {
     else if (p[0] == '$' && p[1] == 'A') {
       const char *ak = x->rt == TY_POLY_ARRAY ? "Poly" : array_kind(x->rt);
       buf_puts(b, ak ? ak : "");
+      p++;
+    }
+    else if (p[0] == '$' && p[1] == 'O') {
+      if (ty_is_array(x->rt) && oint_kind(ty_array_elem(x->rt))) buf_puts(b, "_o");
+      p++;
+    }
+    else if (p[0] == '$' && (p[1] == '<' || p[1] == '>')) {
+      TyKind rk = bop_result(x->op, x->rt);
+      if (!oint_kind(rk)) rk = comp_ntype(c, x->id);
+      if (oint_kind(rk) && !node_is_oint(c, x->id)) buf_printf(b, p[1] == '<' ? "%s(" : ")", oint_arg(rk));
       p++;
     }
     else if (p[0] == '$' && p[1] == 'K') {
