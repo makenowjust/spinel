@@ -10848,6 +10848,10 @@ static int emit_multi_write_scalar(Compiler *c, int id, Buf *b, int indent, cons
           char ipfx[300]; snprintf(ipfx, sizeof ipfx, "%.*s", (int)pn, iv_lhs);
           emit_ivar_text_nilbit(c, iv_home_cid, iv_rt, ipfx, og, b);
         }
+        /* a boxed field from a number array: past the end (or a nil
+           element) is nil, boxed with it, as for a local */
+        else if (ivt == TY_POLY && oint_kind(elem) && !sp_streq(k, "Poly"))
+          buf_printf(b, "%s(sp_%sArray_oget(_t%d, %dLL))", oint_box(elem), k, tarr, i);
         else if (ivt == TY_POLY && elem != TY_POLY) emit_boxed_src(c, elem, get_expr, b);
         else if (sp_streq(k, "Poly") && ivt != TY_POLY && ivt != TY_UNKNOWN) {
           /* typed target from a poly tuple (known multi-value return) */

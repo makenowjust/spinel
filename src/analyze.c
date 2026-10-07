@@ -26236,6 +26236,173 @@ int nullable_int_elem_array(Compiler *c, int node) {
   return nullable_int_elem_expr(c, node, 0);
 }
 
+/* ---- constant arrays of a known length ----
+   A constant bound to an Array literal with no splat (`LUT = [4, 8, 16]`,
+   also `[..].freeze` and `[..].map { }`) that nothing can change has the
+   literal's length: a read at an index proven below it is no miss, and a
+   multiple assignment from it fills that many targets. Constants are
+   interned by their last name (`DMC::LUT` and a `LUT` elsewhere share one),
+   so every definition of the name is asked, and every read of the name must
+   be the receiver of a call that leaves the array as it is, or the value a
+   multiple assignment takes apart (through `?:`). */
+typedef struct { const char *name; int len; int nlit; int lit[8]; int blk[8]; } CArr;
+static CArr *carr_tab; static int carr_n, carr_cap, carr_count = -1;
+static int carr_lit(const NodeTable *nt, int v, int *blk) {
+  *blk = -1;
+  if (v >= 0 && nt_kind(nt, v) == NK_CallNode && nt_str(nt, v, "name") && nt_ref(nt, v, "arguments") < 0) {
+    const char *nm = nt_str(nt, v, "name");
+    int b = nt_ref(nt, v, "block");
+    if (sp_streq(nm, "freeze") && b < 0) v = nt_ref(nt, v, "receiver");
+    else if ((sp_streq(nm, "map") || sp_streq(nm, "collect")) && b >= 0 && nt_kind(nt, b) == NK_BlockNode) {
+      *blk = b; v = nt_ref(nt, v, "receiver");
+    }
+  }
+  if (v < 0 || nt_kind(nt, v) != NK_ArrayNode) return -1;
+  int en = 0; const int *ev = nt_arr(nt, v, "elements", &en);
+  for (int e = 0; e < en; e++) if (nt_kind(nt, ev[e]) == NK_SplatNode) return -1;
+  return v;
+}
+static int carr_is_read(const NodeTable *nt, int n, const char *name) {
+  NodeKind k = n >= 0 ? nt_kind(nt, n) : NK_NONE;
+  return (k == NK_ConstantReadNode || k == NK_ConstantPathNode) && nt_str(nt, n, "name") &&
+         sp_streq(nt_str(nt, n, "name"), name);
+}
+/* the reads a multiple assignment's value takes apart, through `?:` */
+static void carr_mark_masgn_value(const NodeTable *nt, int v, const char *name, unsigned char *ok) {
+  while (v >= 0 && nt_kind(nt, v) == NK_ParenthesesNode) {
+    int b = nt_ref(nt, v, "body"), n = 0;
+    const int *st = b >= 0 && nt_kind(nt, b) == NK_StatementsNode ? nt_arr(nt, b, "body", &n) : NULL;
+    v = st && n == 1 ? st[0] : -1;
+  }
+  if (v < 0) return;
+  if (carr_is_read(nt, v, name)) { ok[v] = 1; return; }
+  if (nt_kind(nt, v) == NK_IfNode) {
+    int t = nt_ref(nt, v, "statements"), e = nt_ref(nt, v, "subsequent");
+    if (e < 0) e = nt_ref(nt, v, "consequent");
+    int n = 0; const int *st = t >= 0 ? nt_arr(nt, t, "body", &n) : NULL;
+    if (st && n == 1) carr_mark_masgn_value(nt, st[0], name, ok);
+    if (e >= 0 && nt_kind(nt, e) == NK_ElseNode) {
+      int es = nt_ref(nt, e, "statements"), en = 0;
+      const int *ev = es >= 0 ? nt_arr(nt, es, "body", &en) : NULL;
+      if (ev && en == 1) carr_mark_masgn_value(nt, ev[0], name, ok);
+    }
+  }
+}
+static int carr_keeps(const char *nm) {
+  static const char *const K[] = {
+    "[]", "at", "slice", "first", "last", "size", "length", "count", "empty?", "any?", "all?", "none?",
+    "include?", "index", "find_index", "each", "each_with_index", "each_index", "map", "collect", "select",
+    "filter", "reject", "find", "detect", "min", "max", "sum", "inject", "reduce", "sort", "sort_by",
+    "reverse", "each_slice", "each_cons", "zip", "join", "inspect", "to_s", "hash", "==", "!=", "eql?",
+    "frozen?", "dig", "fetch", "values_at", "take", "drop", "uniq", "flatten", "+", "-", "*", "&", "|", NULL };
+  return str_in(nm, K);
+}
+static const CArr *const_array(Compiler *c, const char *name) {
+  const NodeTable *nt = c->nt;
+  if (!name) return NULL;
+  if (carr_count != nt->count) { carr_n = 0; carr_count = nt->count; }
+  for (int i = 0; i < carr_n; i++) if (sp_streq(carr_tab[i].name, name)) return carr_tab[i].len >= 0 ? &carr_tab[i] : NULL;
+  CArr r; memset(&r, 0, sizeof r); r.name = name; r.len = -1;
+  int len = -1, bad = 0;
+  for (int id = 0; id < nt->count && !bad; id++) {
+    NodeKind k = nt_kind(nt, id);
+    const char *wn = NULL; int v = -1;
+    if (k == NK_ConstantWriteNode) { wn = nt_str(nt, id, "name"); v = nt_ref(nt, id, "value"); }
+    else if (k == NK_ConstantPathWriteNode) { int tg = nt_ref(nt, id, "target"); wn = tg >= 0 ? nt_str(nt, tg, "name") : NULL; v = nt_ref(nt, id, "value"); }
+    else if (k == NK_ConstantOrWriteNode || k == NK_ConstantAndWriteNode || k == NK_ConstantOperatorWriteNode ||
+             k == NK_ConstantTargetNode || k == NK_ConstantPathTargetNode) wn = nt_str(nt, id, "name");
+    else if (k == NK_ConstantPathOrWriteNode || k == NK_ConstantPathAndWriteNode || k == NK_ConstantPathOperatorWriteNode) {
+      int tg = nt_ref(nt, id, "target"); wn = tg >= 0 ? nt_str(nt, tg, "name") : NULL;
+    }
+    else if (k == NK_CallNode && nt_str(nt, id, "name") &&
+             (sp_streq(nt_str(nt, id, "name"), "const_set") || sp_streq(nt_str(nt, id, "name"), "remove_const"))) bad = 1;
+    if (!wn || !sp_streq(wn, name)) continue;
+    int blk, lit = (k == NK_ConstantWriteNode || k == NK_ConstantPathWriteNode) ? carr_lit(nt, v, &blk) : -1;
+    if (lit < 0 || r.nlit >= 8) { bad = 1; break; }
+    int en = 0; nt_arr(nt, lit, "elements", &en);
+    if (len < 0 || en < len) len = en;
+    r.lit[r.nlit] = lit; r.blk[r.nlit] = blk; r.nlit++;
+  }
+  if (!bad && r.nlit > 0) {
+    unsigned char *ok = calloc((size_t)nt->count + 1, 1);
+    if (!ok) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+    NT_FOREACH_KIND(nt, NK_CallNode, cl) {
+      int rc = nt_ref(nt, cl, "receiver");
+      if (carr_is_read(nt, rc, name) && nt_str(nt, cl, "name") && carr_keeps(nt_str(nt, cl, "name")) &&
+          !(nt_ref(nt, cl, "block") >= 0 && nt_kind(nt, nt_ref(nt, cl, "block")) == NK_BlockArgumentNode)) ok[rc] = 1;
+    }
+    NT_FOREACH_KIND(nt, NK_MultiWriteNode, mw) carr_mark_masgn_value(nt, nt_ref(nt, mw, "value"), name, ok);
+    for (int id = 0; id < nt->count && !bad; id++)
+      if (carr_is_read(nt, id, name) && !ok[id]) bad = 1;
+    free(ok);
+  }
+  if (!bad && r.nlit > 0) r.len = len;
+  if (carr_n == carr_cap) { carr_cap = carr_cap ? carr_cap * 2 : 16; carr_tab = realloc(carr_tab, sizeof(CArr) * (size_t)carr_cap);
+    if (!carr_tab) { fprintf(stderr, "spinel: out of memory\n"); exit(1); } }
+  carr_tab[carr_n++] = r;
+  return r.len >= 0 ? &carr_tab[carr_n - 1] : NULL;
+}
+/* `CONST[i]` with i proven in 0...len (or -len...0): a literal, or `x & K`
+   with 0 <= K < len */
+static int const_array_index_in_range(Compiler *c, int recv, int idx) {
+  const NodeTable *nt = c->nt;
+  if (!carr_is_read(nt, recv, nt_str(nt, recv, "name"))) return 0;
+  const CArr *ca = const_array(c, nt_str(nt, recv, "name"));
+  if (!ca || idx < 0) return 0;
+  if (nt_kind(nt, idx) == NK_IntegerNode && !nt_str(nt, idx, "bigval")) {
+    long long k = (long long)nt_int(nt, idx, "value", 0);
+    return k < ca->len && k >= -(long long)ca->len;
+  }
+  if (nt_kind(nt, idx) == NK_CallNode && nt_str(nt, idx, "name") && sp_streq(nt_str(nt, idx, "name"), "&") &&
+      infer_type(c, nt_ref(nt, idx, "receiver")) == TY_INT) {
+    int a = nt_ref(nt, idx, "arguments"), an = 0;
+    const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &an) : NULL;
+    if (an == 1 && nt_kind(nt, av[0]) == NK_IntegerNode && !nt_str(nt, av[0], "bigval")) {
+      long long k = (long long)nt_int(nt, av[0], "value", 0);
+      return k >= 0 && k < ca->len;
+    }
+  }
+  return 0;
+}
+
+/* Can position `pos` of a multiple assignment's value be nil, where the
+   value is a constant Array of a known length or a `?:` of such (1 when it
+   is anything else)? An element past the length is nil; one within it is
+   the literal's element, or the value the `map` block gives it. */
+static int masgn_const_pos_may_nil(Compiler *c, int v, int pos) {
+  const NodeTable *nt = c->nt;
+  while (v >= 0 && nt_kind(nt, v) == NK_ParenthesesNode) {
+    int b = nt_ref(nt, v, "body"), n = 0;
+    const int *st = b >= 0 && nt_kind(nt, b) == NK_StatementsNode ? nt_arr(nt, b, "body", &n) : NULL;
+    v = st && n == 1 ? st[0] : -1;
+  }
+  if (v < 0) return 1;
+  if (nt_kind(nt, v) == NK_IfNode) {
+    int t = nt_ref(nt, v, "statements"), e = nt_ref(nt, v, "subsequent");
+    if (e < 0) e = nt_ref(nt, v, "consequent");
+    int n = 0; const int *st = t >= 0 ? nt_arr(nt, t, "body", &n) : NULL;
+    if (!st || n != 1 || e < 0 || nt_kind(nt, e) != NK_ElseNode) return 1;
+    int es = nt_ref(nt, e, "statements"), en = 0;
+    const int *ev = es >= 0 ? nt_arr(nt, es, "body", &en) : NULL;
+    if (!ev || en != 1) return 1;
+    return masgn_const_pos_may_nil(c, st[0], pos) || masgn_const_pos_may_nil(c, ev[0], pos);
+  }
+  if (!carr_is_read(nt, v, nt_str(nt, v, "name"))) return 1;
+  const CArr *ca = const_array(c, nt_str(nt, v, "name"));
+  if (!ca || pos >= ca->len) return 1;
+  for (int i = 0; i < ca->nlit; i++) {
+    if (ca->blk[i] >= 0) {
+      int bd = nt_ref(nt, ca->blk[i], "body"), bn = 0;
+      const int *bs = bd >= 0 ? nt_arr(nt, bd, "body", &bn) : NULL;
+      if (!bs || bn == 0 || nt_kind(nt, bs[bn - 1]) == NK_NilNode || nullable_int_value(c, bs[bn - 1])) return 1;
+      continue;
+    }
+    int en = 0; const int *ev = nt_arr(nt, ca->lit[i], "elements", &en);
+    if (pos >= en || nt_kind(nt, ev[pos]) == NK_NilNode || nullable_int_value(c, ev[pos])) return 1;
+  }
+  return 0;
+}
+
 /* A call that answers one element of its receiver, or nil when there is none
    (`a[i]`, `h[k]`, `[].max`, `a.find { }`), plus `Integer(s, exception: false)`. */
 static int elem_miss_call(Compiler *c, int v) {
@@ -26255,7 +26422,8 @@ static int elem_miss_call(Compiler *c, int v) {
      only as type evidence (desugar_masgn_store_evidence): it is no more a
      miss there than it is for the assignment's local and ivar targets */
   if (nt_int(nt, v, "masgn_elem", LLONG_MIN) != LLONG_MIN) return 0;
-  if (sp_streq(nm, "[]") || sp_streq(nm, "at") || sp_streq(nm, "slice")) return argc == 1 && blk < 0;
+  if (sp_streq(nm, "[]") || sp_streq(nm, "at") || sp_streq(nm, "slice"))
+    return argc == 1 && blk < 0 && !const_array_index_in_range(c, recv, argv[0]);
   if (sp_streq(nm, "dig")) return argc >= 1;
   if (is_element_pick(nm))
     return argc == 0 && blk < 0;
@@ -29451,6 +29619,10 @@ static void mark_nullable_int_locals(Compiler *c) {
             may_nil = (pos < 0 || pos >= en || (pass && pos < ln)) ? 1 : nullable_int_value(c, ev[pos]);
           }
           else if (scalar_rhs) may_nil = pass || j > 0 || nullable_int_value(c, mv);
+          /* a constant Array of a known length (through `?:`): a left
+             within it takes that element of each literal the constant
+             can be */
+          else if (!pass && mrest < 0) may_nil = masgn_const_pos_may_nil(c, mv, j);
           else may_nil = 1;   /* an array of unknown length, or a boxed value */
           if (!may_nil) continue;
           ClassInfo *ci = NULL; int iv = -1, is_cv = 0;
