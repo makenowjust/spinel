@@ -7382,6 +7382,13 @@ int hc_array(Compiler *c, int recv, int is_float, char *d, char *l, char *w, siz
   return 1;
 }
 
+/* The nil-free read length (_hcr) of the Int / Float cache entry whose
+   element pointer is `hd` (_hcdR_E -> _hcrR_E). */
+void hc_read_len(const char *hd, char *out, size_t cap) {
+  snprintf(out, cap, "%s", hd);
+  if (!strncmp(out, "_hcd", 4)) out[3] = 'r';
+}
+
 /* The same cache, with a length that is 0 when the array may hold nil
    (_hcn): an index below it reads an element that is no nil. `guard`, when
    it is a Float local the loop does not assign, zeroes that length while
@@ -7546,9 +7553,10 @@ static void hc_close(HcRegion *r, const char *loop, Buf *b, int indent) {
       const char *et = r->e[i].kind == HC_INT ? "sp_int" : r->e[i].kind == HC_FLOAT ? "sp_float" : "const char";
       emit_indent(b, indent + 1);
       buf_printf(b, "%s *_hcd%d_%d; sp_int _hcl%d_%d;", et, r->id, i, r->id, i);
-      /* _hcz: the array has no nil bitmap, so no element is nil (tested
-         once per refresh instead of per read) */
-      if (r->e[i].kind != HC_STR) buf_printf(b, " int _hcw%d_%d; int _hcz%d_%d;", r->id, i, r->id, i);
+      /* _hcr: the length a read can take the cached element below -- 0
+         while the array has a nil bitmap, so a read below it meets no nil
+         and needs no test of its own; any other read takes the slow path */
+      if (r->e[i].kind != HC_STR) buf_printf(b, " int _hcw%d_%d; sp_int _hcr%d_%d;", r->id, i, r->id, i);
       if (r->e[i].nf) buf_printf(b, " sp_int _hcn%d_%d;", r->id, i);
       buf_puts(b, "\n");
     }
@@ -7559,7 +7567,7 @@ static void hc_close(HcRegion *r, const char *loop, Buf *b, int indent) {
         buf_printf(b, "{ const char *_s = %s; _hcd%d_%d = _s; _hcl%d_%d = _s ? (sp_int)sp_str_byte_len(_s) : 0; } ",
                    rv, r->id, i, r->id, i);
       else {
-        buf_printf(b, "{ sp_%sArray *_a = %s; _hcd%d_%d = _a ? _a->data%s : NULL; _hcl%d_%d = _a ? _a->len : 0; _hcw%d_%d = _a && !_a->frozen; _hcz%d_%d = _a && !_a->nilbits; ",
+        buf_printf(b, "{ sp_%sArray *_a = %s; _hcd%d_%d = _a ? _a->data%s : NULL; _hcl%d_%d = _a ? _a->len : 0; _hcw%d_%d = _a && !_a->frozen; _hcr%d_%d = _a && !_a->nilbits ? _a->len : 0; ",
                    r->e[i].kind == HC_INT ? "Int" : "Float", rv, r->id, i,
                    r->e[i].kind == HC_INT ? " + _a->start" : "", r->id, i, r->id, i, r->id, i);
         if (r->e[i].nf)

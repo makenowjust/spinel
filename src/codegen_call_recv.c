@@ -1833,12 +1833,11 @@ static int emit_kind_array_call(Compiler *c, int id, Buf *b, const NodeTable *nt
         }
         const char *inil = "";
         char inb[32]; if (io) { snprintf(inb, sizeof inb, "!_o%d.nil && ", tk); inil = inb; }
-        /* the header's no-bitmap flag (_hcz) settles most reads without
-           touching the array */
-        char hz[48]; snprintf(hz, sizeof hz, "%s", hd); if (!strncmp(hz, "_hcd", 4)) hz[3] = 'z';
-        if (oread) buf_printf(b, "; (%s(unsigned long long)_t%d < (unsigned long long)%s && (%s || !sp_%sArray_elem_nil(", inil, tk, hl, hz, k);
+        /* an oint read below the header's nil-free length (_hcr) is the
+           element, with no test of its own; the rest take the oget */
+        char hr[48]; hc_read_len(hd, hr, sizeof hr);
+        if (oread) buf_printf(b, "; %s(unsigned long long)_t%d < (unsigned long long)%s ? %s(%s[_t%d]) : ({ ", inil, tk, hr, oint_of(ek), hd, tk);
         else buf_printf(b, "; %s(unsigned long long)_t%d < (unsigned long long)%s ? %s[_t%d] : ({ ", inil, tk, hl, hd, tk);
-        if (oread) { emit_expr(c, recv, b); buf_printf(b, ", _t%d))) ? %s(%s[_t%d]) : ({ ", tk, oint_of(ek), hd, tk); }
         emit_nil_cold_test(c, id, recv, b);
         buf_puts(b, " ");
         buf_printf(b, "sp_%sArray_%s(", k, oread ? "oget" : "get");
@@ -1853,9 +1852,9 @@ static int emit_kind_array_call(Compiler *c, int id, Buf *b, const NodeTable *nt
       /* unwrapped at once by its consumer (g_ck_node): the plain cached
          element, else the checked read raising the unwrap's error */
       if (oread && g_ck_node == id) {
-        char hz[48]; snprintf(hz, sizeof hz, "%s", hd); if (!strncmp(hz, "_hcd", 4)) hz[3] = 'z';
-        buf_printf(b, "; ((unsigned long long)_t%d < (unsigned long long)%s && %s) ? %s[_t%d] : sp_%sArray_get_%s(",
-                   tk, hl, hz, hd, tk, k, g_ck_op ? "ck" : "arg");
+        char hr[48]; hc_read_len(hd, hr, sizeof hr);
+        buf_printf(b, "; (unsigned long long)_t%d < (unsigned long long)%s ? %s[_t%d] : sp_%sArray_get_%s(",
+                   tk, hr, hd, tk, k, g_ck_op ? "ck" : "arg");
         emit_expr(c, recv, b);
         if (g_ck_op) buf_printf(b, ", _t%d, \"%s\"); })", tk, g_ck_op);
         else buf_printf(b, ", _t%d); })", tk);
@@ -1863,10 +1862,8 @@ static int emit_kind_array_call(Compiler *c, int id, Buf *b, const NodeTable *nt
         { *out = 1; return 1; }
       }
       if (oread) {
-        char hz[48]; snprintf(hz, sizeof hz, "%s", hd); if (!strncmp(hz, "_hcd", 4)) hz[3] = 'z';
-        buf_printf(b, "; ((unsigned long long)_t%d < (unsigned long long)%s && (%s || !sp_%sArray_elem_nil(", tk, hl, hz, k);
-        emit_expr(c, recv, b);
-        buf_printf(b, ", _t%d))) ? %s(%s[_t%d]) : ", tk, oint_of(ek), hd, tk);
+        char hr[48]; hc_read_len(hd, hr, sizeof hr);
+        buf_printf(b, "; (unsigned long long)_t%d < (unsigned long long)%s ? %s(%s[_t%d]) : ", tk, hr, oint_of(ek), hd, tk);
       }
       else buf_printf(b, "; (unsigned long long)_t%d < (unsigned long long)%s ? %s[_t%d] : ", tk, hl, hd, tk);
       buf_printf(b, "sp_%sArray_%s(", k, oread ? "oget" : "get");
