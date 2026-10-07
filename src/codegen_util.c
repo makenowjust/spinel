@@ -5140,8 +5140,9 @@ int node_is_oint(Compiler *c, int node) {
     /* the runtime functions that answer an sp_oint (RUNTIME-API.md) */
     if ((sp_streq(nm, "bsearch") || sp_streq(nm, "bsearch_index")) && blk >= 0) return 1;
     if ((sp_streq(nm, "nonzero?") && oint_kind(rt)) || (sp_streq(nm, "infinite?") && rt == TY_FLOAT)) return 1;
-    if (rt == TY_STRING && (sp_streq(nm, "index") || sp_streq(nm, "rindex") ||
-                            sp_streq(nm, "byteindex") || sp_streq(nm, "byterindex"))) return 1;
+    /* a search with its needle; without one the call is an arity error, no nil */
+    if (rt == TY_STRING && an2 >= 1 && (sp_streq(nm, "index") || sp_streq(nm, "rindex") ||
+                                        sp_streq(nm, "byteindex") || sp_streq(nm, "byterindex"))) return 1;
     /* String#getbyte past the end, IO#getbyte at end of file: nil */
     if (sp_streq(nm, "getbyte") && r >= 0 && !oint_kind(rt)) return 1;
     if (sp_streq(nm, "exitstatus") || sp_streq(nm, "termsig") ||
