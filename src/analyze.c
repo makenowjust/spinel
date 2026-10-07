@@ -2422,7 +2422,9 @@ void build_ie_map(Compiler *c) {
       TyKind rt = infer_type(c, recv);
       cls = ty_is_object(rt) ? ty_object_class(rt) : ie_poly_mark(c, id, rt);
       if (cls == -1 && !ty_is_object(rt)) cls = ie_class_value_target(c, id, recv, rt, blk);
-      if (cls == -1 && pass && rt != TY_POLY && rt != TY_UNKNOWN && !ty_is_object(rt) &&
+      /* (a boxed receiver no class of the program's can be -- Object.new --
+         counts too: ie_poly_mark found none) */
+      if (cls == -1 && pass && rt != TY_UNKNOWN && !ty_is_object(rt) &&
           (sp_streq(nm, "instance_eval") || sp_streq(nm, "instance_exec")) &&
           nt_kind(nt, blk) == NK_BlockNode)
         mark_ie_nonobj(c, blk);
