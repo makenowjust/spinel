@@ -11,6 +11,14 @@
 #include "call_plan.h"
 #include "codegen_call_arms.h"
 
+/* ---- nil out of band: an emitter whose C result is an sp_oint / sp_ofloat
+   leaves it bare when the node is one (node_is_oint: the dispatcher's
+   consumer takes the oint) and otherwise reads it as the plain scalar through
+   sp_oint_arg (TypeError for nil) -- the same wrap the dispatcher applies to an
+   oint producer, applied here because this emitter decides the form. */
+static void oint_open(Compiler *c, int id, TyKind t, Buf *b) { if (!node_is_oint(c, id)) buf_printf(b, "%s(", oint_arg(t)); }
+static void oint_close(Compiler *c, int id, Buf *b) { if (!node_is_oint(c, id)) buf_puts(b, ")"); }
+
 /* the Kernel calls without a receiver: __dir__, at_exit, attr_* declarations, block_given?,
    the conversion functions (Integer, Float, String, Array, Hash, Rational, Complex), sleep,
    exit / exit! / abort, puts / print, p / pp, warn */
@@ -276,13 +284,15 @@ int emit_call_kernel_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, cons
       TyKind at0 = comp_ntype(c, av[0]);
       if (at0 == TY_STRING) {
         int promo = repr_of(c, id).kind == RK_BOXED;   /* promote mode: a Bignum past sp_int */
+        if (!promo) oint_open(c, id, TY_INT, b);
         buf_puts(b, promo ? "sp_str_to_i_promote(" : "sp_str_to_i_lenient_base("); emit_expr(c, av[0], b); buf_puts(b, ", ");
         if (ac == 2) emit_int_expr(c, av[1], b); else buf_puts(b, "0");
         buf_puts(b, promo ? ", 2)" : ")");
+        if (!promo) oint_close(c, id, b);
         return 1;
       }
       /* with a base only a String converts, so a number is nil here */
-      if (at0 == TY_INT && ac == 1) { emit_expr(c, av[0], b); return 1; }
+      if (at0 == TY_INT && ac == 1) { oint_open(c, id, TY_INT, b); buf_puts(b, "sp_oint_of("); emit_expr(c, av[0], b); buf_puts(b, ")"); oint_close(c, id, b); return 1; }
       /* a user object, a boxed value that may hold one, or a Float (NaN and
          Infinity are nil, CRuby's FloatDomainError swallowed) converts
          through the runtime's Kernel#Integer path, nil for every failure */
@@ -290,19 +300,21 @@ int emit_call_kernel_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, cons
         emit_kconv_call(c, id, av, ac, 0, b);
         return 1;
       }
-      buf_puts(b, "((void)("); emit_expr(c, av[0], b); buf_puts(b, "), SP_INT_NIL)");
+      oint_open(c, id, TY_INT, b); buf_puts(b, "((void)("); emit_expr(c, av[0], b); buf_puts(b, "), sp_oint_nil())"); oint_close(c, id, b);
       return 1;
     }
     if (kconv_noraise && sp_streq(name, "Float") && ac == 1) {
       TyKind at0 = comp_ntype(c, av[0]);
-      if (at0 == TY_STRING) { buf_puts(b, "sp_str_to_f_lenient("); emit_expr(c, av[0], b); buf_puts(b, ")"); return 1; }
-      if (at0 == TY_INT) { buf_puts(b, "((sp_float)("); emit_expr(c, av[0], b); buf_puts(b, "))"); return 1; }
-      if (at0 == TY_FLOAT) { emit_expr(c, av[0], b); return 1; }
-      if (ty_is_object(at0) || at0 == TY_POLY) {
+      /* every arm answers an sp_ofloat: nil for a rejected value */
+      oint_open(c, id, TY_FLOAT, b);
+      if (at0 == TY_STRING) { buf_puts(b, "sp_str_to_f_lenient("); emit_expr(c, av[0], b); buf_puts(b, ")"); }
+      else if (at0 == TY_INT) { buf_puts(b, "sp_ofloat_of((sp_float)("); emit_expr(c, av[0], b); buf_puts(b, "))"); }
+      else if (at0 == TY_FLOAT) { buf_puts(b, "sp_ofloat_of("); emit_expr(c, av[0], b); buf_puts(b, ")"); }
+      else if (ty_is_object(at0) || at0 == TY_POLY) {
         buf_puts(b, "sp_poly_Float_ex("); emit_boxed(c, av[0], b); buf_puts(b, ", 0)");
-        return 1;
       }
-      buf_puts(b, "((void)("); emit_expr(c, av[0], b); buf_puts(b, "), sp_float_nil())");
+      else { buf_puts(b, "((void)("); emit_expr(c, av[0], b); buf_puts(b, "), sp_ofloat_nil())"); }
+      oint_close(c, id, b);
       return 1;
     }
     if (sp_streq(name, "Integer") && ac == 1) {

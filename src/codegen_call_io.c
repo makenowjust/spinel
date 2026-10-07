@@ -769,17 +769,17 @@ int emit_call_io_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const ch
           int tn = ++g_tmp;
           buf_printf(b, "({ const char *_t%d = ", ts);
           emit_str_expr(c, argv[0], b);
-          buf_printf(b, "; sp_int _n%d = sp_sock_connect_nb_sa(%s, _t%d,", tn, r, ts);
+          buf_printf(b, "; sp_oint _n%d = sp_sock_connect_nb_sa(%s, _t%d,", tn, r, ts);
           buf_printf(b, " (sp_int)sp_str_byte_len(_t%d), 0);", ts);
-          buf_printf(b, " _n%d == SP_INT_NIL", tn);
+          buf_printf(b, " _n%d.nil", tn);
           buf_printf(b, " ? sp_box_sym(sp_sym_intern(\"wait_writable\"))");
-          buf_printf(b, " : sp_box_int(_n%d); })", tn);
+          buf_printf(b, " : sp_box_int(_n%d.v); })", tn);
         }
         else {
           buf_printf(b, "({ const char *_t%d = ", ts);
           emit_str_expr(c, argv[0], b);
           buf_printf(b, "; sp_sock_connect_nb_sa(%s, _t%d,"
-                        " (sp_int)sp_str_byte_len(_t%d), 1); })",
+                        " (sp_int)sp_str_byte_len(_t%d), 1).v; })",   /* exception: true never answers nil */
                         r, ts, ts);
         }
         free(rb.p); return 1;
@@ -787,14 +787,14 @@ int emit_call_io_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const ch
       if (sp_streq(name, "connect_nonblock") && pos9 == 2) {
         if (no_exc) {
           int tw = ++g_tmp;
-          buf_printf(b, "({ sp_int _t%d = sp_sock_connect_nb(%s, ", tw, r);
+          buf_printf(b, "({ sp_oint _t%d = sp_sock_connect_nb(%s, ", tw, r);
           emit_str_expr(c, argv[0], b); buf_puts(b, ", "); emit_int_expr(c, argv[1], b);
-          buf_printf(b, ", 0); _t%d == SP_INT_NIL"
-                        " ? sp_box_sym(sp_sym_intern(\"wait_writable\")) : sp_box_int(_t%d); })", tw, tw);
+          buf_printf(b, ", 0); _t%d.nil"
+                        " ? sp_box_sym(sp_sym_intern(\"wait_writable\")) : sp_box_int(_t%d.v); })", tw, tw);
         }
         else {
           buf_printf(b, "sp_sock_connect_nb(%s, ", r); emit_str_expr(c, argv[0], b);
-          buf_puts(b, ", "); emit_int_expr(c, argv[1], b); buf_puts(b, ", 1)");
+          buf_puts(b, ", "); emit_int_expr(c, argv[1], b); buf_puts(b, ", 1).v");
         }
         free(rb.p); return 1;
       }
@@ -998,14 +998,14 @@ int emit_call_io_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const ch
         const char *wfn = skw ? "sp_sock_write_nb_bin" : "sp_sock_write_nb";
         if (no_exc8) {
           int tw = ++g_tmp;
-          buf_printf(b, "({ sp_int _t%d = %s(%s, ", tw, wfn, r);
+          buf_printf(b, "({ sp_oint _t%d = %s(%s, ", tw, wfn, r);
           emit_to_s_expr(c, argv[0], b);
-          buf_printf(b, ", 0); _t%d == SP_INT_NIL"
-                        " ? sp_box_sym(sp_sym_intern(\"wait_writable\")) : sp_box_int(_t%d); })", tw, tw);
+          buf_printf(b, ", 0); _t%d.nil"
+                        " ? sp_box_sym(sp_sym_intern(\"wait_writable\")) : sp_box_int(_t%d.v); })", tw, tw);
         }
         else {
           buf_printf(b, "%s(%s, ", wfn, r); emit_to_s_expr(c, argv[0], b);
-          buf_puts(b, ", 1)");
+          buf_puts(b, ", 1).v");
         }
       }
       free(rb.p); return 1;
@@ -1065,7 +1065,9 @@ int emit_call_io_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const ch
       buf_puts(b, "({ ");
       buf_printf(b, "sp_File *_t%d = %s; SP_GC_ROOT(_t%d); ", rf2, r, rf2);
       if (is_byte)
-        buf_printf(b, "sp_int _t%d; while ((_t%d = sp_File_getbyte(_t%d)) != SP_INT_NIL) {", lt2, lt2, rf2);
+        /* getbyte answers nil at EOF: the oint read into its own temp, the
+           byte handed on as the plain Integer the block takes */
+        buf_printf(b, "sp_int _t%d; sp_oint _t%db; while (!(_t%db = sp_File_getbyte(_t%d)).nil && (_t%d = _t%db.v, 1)) {", lt2, lt2, lt2, rf2, lt2, lt2);
       else if (is_cp)
         /* each_codepoint yields the ordinal of each character, so read a
            whole UTF-8 character and decode it (#3038) */

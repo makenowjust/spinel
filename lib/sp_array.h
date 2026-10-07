@@ -515,6 +515,23 @@ sp_StrArray *sp_StrArray_sort(sp_StrArray *a);
 sp_StrArray *sp_StrArray_shuffle(sp_StrArray *a);
 const char *sp_StrArray_sample(sp_StrArray *a);
 
+/* The searches with a needle that may itself be nil: a nil needle finds the
+   array's nil elements, a value its equals. */
+sp_oint sp_IntArray_index_nil(sp_IntArray *a, int rev);
+sp_oint sp_FloatArray_index_nil(sp_FloatArray *a, int rev);
+static inline sp_bool sp_IntArray_include_o(sp_IntArray *a, sp_oint o) { return o.nil ? sp_IntArray_has_nil(a) : sp_IntArray_include(a, o.v); }
+static inline sp_bool sp_FloatArray_include_o(sp_FloatArray *a, sp_ofloat o) { return o.nil ? sp_FloatArray_has_nil(a) : sp_FloatArray_include(a, o.v); }
+static inline sp_oint sp_IntArray_index_o(sp_IntArray *a, sp_oint o) { if (o.nil) return sp_IntArray_index_nil(a, 0); { sp_int n = sp_IntArray_index(a, o.v); return n < 0 ? sp_oint_nil() : sp_oint_of(n); } }
+static inline sp_oint sp_IntArray_rindex_o(sp_IntArray *a, sp_oint o) { if (o.nil) return sp_IntArray_index_nil(a, 1); { sp_int n = sp_IntArray_rindex(a, o.v); return n < 0 ? sp_oint_nil() : sp_oint_of(n); } }
+static inline sp_oint sp_FloatArray_index_o(sp_FloatArray *a, sp_ofloat o) { if (o.nil) return sp_FloatArray_index_nil(a, 0); { sp_int n = sp_FloatArray_index(a, o.v); return n < 0 ? sp_oint_nil() : sp_oint_of(n); } }
+static inline sp_oint sp_FloatArray_rindex_o(sp_FloatArray *a, sp_ofloat o) { if (o.nil) return sp_FloatArray_index_nil(a, 1); { sp_int n = sp_FloatArray_rindex(a, o.v); return n < 0 ? sp_oint_nil() : sp_oint_of(n); } }
+/* delete(v) with a needle that may be nil: the deleted value (nil for a nil needle, which removes the nils) */
+static inline sp_oint sp_IntArray_delete_on(sp_IntArray *a, sp_oint o) { if (o.nil) { sp_IntArray_delete_nil(a); return sp_oint_nil(); } return sp_IntArray_delete_o(a, o.v); }
+static inline sp_ofloat sp_FloatArray_delete_on(sp_FloatArray *a, sp_ofloat o) { if (o.nil) { sp_FloatArray_delete_nil(a); return sp_ofloat_nil(); } return sp_FloatArray_delete_o(a, o.v); }
+/* count(v) with a needle that may be nil */
+static inline sp_int sp_IntArray_count_o(sp_IntArray *a, sp_oint o) { sp_int n = 0; if (!a) return 0; for (sp_int i = 0; i < a->len; i++) { int en = sp_IntArray_elem_nil(a, i); if (o.nil ? en : (!en && a->data[a->start + i] == o.v)) n++; } return n; }
+static inline sp_int sp_FloatArray_count_o(sp_FloatArray *a, sp_ofloat o) { sp_int n = 0; if (!a) return 0; for (sp_int i = 0; i < a->len; i++) { int en = sp_FloatArray_elem_nil(a, i); if (o.nil ? en : (!en && (a->data[i] == o.v || (o.v != o.v && a->data[i] != a->data[i])))) n++; } return n; }
+
 /* ---- poly/inspect-dependent ops (lib/sp_array.c; need sp_inspect.h/sp_str.h) ---- */
 void sp_str_upto_each(const char *s, const char *e, sp_int excl, int (*fn)(const char *, void *), void *arg);
 sp_StrArray *sp_StrArray_from_string_range(const char *s, const char *e, sp_int excl);
