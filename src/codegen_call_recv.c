@@ -10089,7 +10089,21 @@ int emit_object_call(Compiler *c, int id, Buf *b) {
       if (sym && sym[0] == '@')
         for (int i = c->classes[cid].is_struct ? c->classes[cid].nmembers : 0; i < c->classes[cid].nivars; i++)
           if (sp_streq(c->classes[cid].ivars[i], sym)) { mi = i; break; }
-      if (mi >= 0) {
+      /* a boxed field that starts with the unset mark (poly_ivar_unset_marked)
+         can be undefined again: an unset one raises NameError, a set one
+         answers its value and takes the mark back, so defined? and
+         instance_variable_defined? read it as never set, as CRuby does */
+      if (mi >= 0 && !comp_ty_value_obj(c, rt) && poly_ivar_unset_marked(c, cid, mi)) {
+        int to = ++g_tmp, tv = ++g_tmp;
+        buf_printf(b, "({ sp_%s *_t%d = ", c->classes[cid].c_name, to); emit_expr(c, recv, b);
+        buf_printf(b, "; sp_RbVal _t%d = _t%d->iv_%s;", tv, to, iv_c(sym + 1));
+        buf_printf(b, " if (_t%d.tag == SP_TAG_NIL && _t%d.cls_id == 0x%x)"
+                      " sp_raise_cls(\"NameError\", \"instance variable %s not defined\");",
+                   tv, tv, SP_IVAR_UNSET_MARK, sym);
+        buf_printf(b, " _t%d->iv_%s = ((sp_RbVal){SP_TAG_NIL, 0x%x, {0}}); _t%d; })",
+                   to, iv_c(sym + 1), SP_IVAR_UNSET_MARK, tv);
+      }
+      else if (mi >= 0) {
         const char *acc = comp_ty_value_obj(c, rt) ? "." : "->";
         buf_puts(b, "("); emit_expr(c, recv, b);
         buf_printf(b, ")%siv_%s", acc, iv_c(sym + 1));
