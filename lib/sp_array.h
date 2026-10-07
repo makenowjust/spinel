@@ -236,6 +236,9 @@ static inline sp_bool sp_FloatArray_empty(sp_FloatArray*a){return a->len==0;}
 static inline sp_float sp_FloatArray_get(sp_FloatArray*a,sp_int i){if(!a)return 0.0;if(i<0)i+=a->len;if(i<0||i>=a->len)return 0.0;return a->data[i];}
 static inline sp_bool sp_FloatArray_elem_nil(sp_FloatArray*a,sp_int i){return SP_UNLIKELY(a->nilbits!=NULL)&&sp_nilbit_get(a->nilbits,i);}
 static inline sp_ofloat sp_FloatArray_oget(sp_FloatArray*a,sp_int i){if(!a)return sp_ofloat_nil();if(i<0)i+=a->len;if(i<0||i>=a->len)return sp_ofloat_nil();if(SP_UNLIKELY(a->nilbits)&&sp_nilbit_get(a->nilbits,i))return sp_ofloat_nil();return sp_ofloat_of(a->data[i]);}
+/* the `_o` spelling of the element read with its nil (a builtin row's sp_$AArray_get$O) */
+#define sp_IntArray_get_o(a, i) sp_IntArray_oget((a), (i))
+#define sp_FloatArray_get_o(a, i) sp_FloatArray_oget((a), (i))
 /* first/last: nil when empty, else the element */
 static inline sp_ofloat sp_FloatArray_first_opt(sp_FloatArray*a){return (!a||a->len<=0)?sp_ofloat_nil():sp_FloatArray_oget(a,0);}
 static inline sp_ofloat sp_FloatArray_last_opt(sp_FloatArray*a){return (!a||a->len<=0)?sp_ofloat_nil():sp_FloatArray_oget(a,a->len-1);}

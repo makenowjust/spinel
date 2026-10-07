@@ -11020,6 +11020,19 @@ static inline sp_int sp_poly_index_int(sp_RbVal a, sp_int i) {
   }
   return sp_poly_to_i(sp_poly_arr_get_hash(a, i));
 }
+/* sp_poly_index_int where the read can answer nil (a nil element, an index
+   past the end, a Hash miss): the element with its nil. A callable keeps
+   sp_poly_index_int's call. */
+static inline sp_oint sp_poly_index_oint(sp_RbVal a, sp_int i) {
+  if (a.tag == SP_TAG_OBJ && a.cls_id == SP_BUILTIN_POLY_ARRAY && a.v.p) {
+    sp_PolyArray *ar = (sp_PolyArray *)a.v.p;
+    if (i >= 0 && i < ar->len && ar->data[i].tag == SP_TAG_INT) return sp_oint_of(ar->data[i].v.i);
+  }
+  if (a.tag == SP_TAG_INT) return sp_oint_of((a.v.i >> i) & 1);
+  if (a.tag == SP_TAG_OBJ && a.cls_id == SP_BUILTIN_METHOD) return sp_oint_of(sp_poly_index_int(a, i));
+  if (a.tag == SP_TAG_OBJ && a.cls_id == SP_BUILTIN_INT_ARRAY) return sp_IntArray_oget((sp_IntArray *)a.v.p, i);
+  return sp_unbox_oint(sp_poly_arr_get_hash(a, i));
+}
 static sp_RbVal sp_poly_set_poly(sp_RbVal v, sp_RbVal key, sp_RbVal val);   /* fwd: hash []= from widen_and_set */
 static sp_RbVal sp_poly_arr_set_hash(sp_RbVal v, sp_int idx, sp_RbVal val) {
   sp_poly_coll_chk(v, "[]=");

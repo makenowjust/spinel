@@ -7116,6 +7116,7 @@ static void emit_arg_or_default_fill(Compiler *c, Scope *m, int idx, int provide
        A poly-widened slot must mirror the scalar `0` an int slot emits, not
        sp_box_nil() -- otherwise the padded value renders as blank. */
     if (pt == TY_POLY) buf_puts(out, "sp_box_int(0)");
+    else if (oint_kind(pt) && p && slot_is_oint(p)) buf_printf(out, "%s(0)", oint_of(pt));
     else buf_puts(out, pt == TY_RANGE ? "(sp_Range){0}" : default_value_from_compiler(c, pt));
   }
 else if (dty && sp_streq(dty, "NilNode")) {
@@ -7131,7 +7132,9 @@ else if (dty && sp_streq(dty, "NilNode")) {
   else if (pt != TY_POLY && repr_of(c, dv).as_ty == TY_VOID) {
     buf_puts(out, "(");
     emit_expr(c, dv, out);
-    buf_printf(out, ", %s)", pt == TY_RANGE ? "(sp_Range){0}" : default_value_from_compiler(c, pt));
+    /* an oint slot's dead value is its nil */
+    if (oint_kind(pt) && p && slot_is_oint(p)) buf_printf(out, ", %s)", oint_nil(pt));
+    else buf_printf(out, ", %s)", pt == TY_RANGE ? "(sp_Range){0}" : default_value_from_compiler(c, pt));
   }
   else if (pt == TY_POLY) emit_boxed(c, dv, out);
   /* A default expression typed poly landing in a concrete parameter slot: it

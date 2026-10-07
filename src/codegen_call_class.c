@@ -54,6 +54,20 @@ static int emit_attr_writer_nilbit(Compiler *c, int id, int cid, int iv, int tmp
   return 1;
 }
 
+/* A user class method's call where the method answers its nil beside the
+   value (method_ret_is_oint) and the consumer takes the plain value, or the
+   other way: unwrapped (TypeError for nil) or lifted. w: the consumer takes
+   the oint. */
+static void cm_ret_open(const Scope *s, int w, Buf *b) {
+  if (!oint_kind(s->ret)) return;
+  int m = method_ret_is_oint(s);
+  if (m && !w) buf_printf(b, "%s(", oint_arg(s->ret));
+  else if (!m && w) buf_printf(b, "%s(", oint_of(s->ret));
+}
+static void cm_ret_close(const Scope *s, int w, Buf *b) {
+  if (oint_kind(s->ret) && method_ret_is_oint(s) != (w != 0)) buf_puts(b, ")");
+}
+
 /* respond_to?, method_defined? and its kin, const_set / const_get / const_defined? */
 int emit_call_reflection_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv, int argc, const int *argv, TyKind rt) {
   if (sp_streq(name, "respond_to?") && argc >= 1 && !respond_to_user_defined(c, id, recv)) {
@@ -1337,11 +1351,14 @@ int emit_call_cmethod_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
       int mi = comp_cmethod_in_chain(c, fold_ci, name, &defcls);
       if (mi >= 0) {
         nd_callee(c, id, mi, defcls, 0);
+        int w0 = node_is_oint(c, id);
+        cm_ret_open(&c->scopes[mi], w0, b);
         buf_printf(b, "sp_%s_s_%s(", c->classes[defcls].c_name, mc(c->scopes[mi].name));
         const char *lead0 = emit_cmethod_self_cls_arg(c, mi, fold_ci, b);
         emit_args_filled(c, mi, nt_ref(nt, id, "arguments"), lead0, b);
         emit_cmethod_block_arg(c, id, &c->scopes[mi], -1, b);
         buf_puts(b, ")");
+        cm_ret_close(&c->scopes[mi], w0, b);
         return 1;
       }
     }
@@ -1399,7 +1416,10 @@ int emit_call_cmethod_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
           buf_printf(b, "0; })");
           return 1;
         }
-        emit_ctype(c, res, b); buf_printf(b, " _t%d_r = %s; ", tcid, default_value_from_compiler(c, res));
+        /* the result slot holds its nil where the consumer takes the oint */
+        int wr = oint_kind(res) && node_is_oint(c, id);
+        if (wr) buf_printf(b, "%s _t%d_r = %s; ", oint_ctype(res), tcid, oint_nil(res));
+        else { emit_ctype(c, res, b); buf_printf(b, " _t%d_r = %s; ", tcid, default_value_from_compiler(c, res)); }
         for (int k = 0; k < ncand; k++) {
           int defcls = -1;
           int mi = comp_cmethod_in_chain(c, cand[k], name, &defcls);
@@ -1412,15 +1432,17 @@ int emit_call_cmethod_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
               emit_args_filled(c, mi, nt_ref(nt, id, "arguments"), leadb, &cb); }
             emit_cmethod_block_arg(c, id, &c->scopes[mi], blk_tmp, &cb);
             buf_puts(&cb, ")");
-            emit_boxed_text(c, c->scopes[mi].ret, cb.p ? cb.p : "0", b);
+            emit_boxed_ret_call(c, &c->scopes[mi], cb.p ? cb.p : "0", b);
             free(cb.p);
           }
           else {
+            cm_ret_open(&c->scopes[mi], wr, b);
             buf_printf(b, "sp_%s_s_%s(", c->classes[defcls].c_name, mc(c->scopes[mi].name));
             { const char *leadc = emit_cmethod_self_cls_arg(c, mi, cand[k], b);
               emit_args_filled(c, mi, nt_ref(nt, id, "arguments"), leadc, b); }
             emit_cmethod_block_arg(c, id, &c->scopes[mi], blk_tmp, b);
             buf_puts(b, ")");
+            cm_ret_close(&c->scopes[mi], wr, b);
           }
           buf_puts(b, "; ");
         }
@@ -1468,6 +1490,8 @@ int emit_call_cmethod_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
       }
       if (mi >= 0) {
         nd_callee(c, id, mi, defcls, 0);
+        int w1 = node_is_oint(c, id);
+        cm_ret_open(&c->scopes[mi], w1, b);
         buf_printf(b, "sp_%s_s_%s(", c->classes[defcls].c_name, mc(c->scopes[mi].name));
         const char *lead1 = emit_cmethod_self_cls_arg(c, mi, ci, b);
         emit_args_filled(c, mi, nt_ref(nt, id, "arguments"), lead1, b);
@@ -1476,6 +1500,7 @@ int emit_call_cmethod_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
            paths already do this; a module/class-method call must too. */
         emit_cmethod_block_arg(c, id, &c->scopes[mi], -1, b);
         buf_puts(b, ")");
+        cm_ret_close(&c->scopes[mi], w1, b);
         return 1;
       }
     }

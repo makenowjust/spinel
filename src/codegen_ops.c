@@ -128,6 +128,14 @@ static int emit_op_template(Compiler *c, const BopCtx *x, Buf *b) {
       if (oint_kind(rk) && !node_is_oint(c, x->id)) buf_printf(b, p[1] == '<' ? "%s(" : ")", oint_arg(rk));
       p++;
     }
+    /* `$[` ... `$]`: a row answering the plain value, lifted (sp_oint_of)
+       where the consumer takes the oint (node_is_oint) */
+    else if (p[0] == '$' && (p[1] == '[' || p[1] == ']')) {
+      TyKind rk = bop_result(x->op, x->rt);
+      if (!oint_kind(rk)) rk = comp_ntype(c, x->id);
+      if (oint_kind(rk) && node_is_oint(c, x->id)) buf_printf(b, p[1] == '[' ? "%s(" : ")", oint_of(rk));
+      p++;
+    }
     else if (p[0] == '$' && p[1] == 'K') {
       buf_puts(b, hash_box_cls(x->rt));
       p++;
