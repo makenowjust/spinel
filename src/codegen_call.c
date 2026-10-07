@@ -5498,7 +5498,12 @@ static int emit_poly_kw_param(Compiler *c, Scope *ms, int a, const PolyKw *kw,
     if (kpt == TY_POLY && at != TY_POLY) emit_boxed_text(c, at, tn, pa);
     /* a boxed value may be nil, which an Integer or Float keyword takes as
        its own nil: the plain unbox read the zero under the nil tag */
-    else if (at == TY_POLY && kpt != TY_POLY && kpt != TY_UNKNOWN) emit_unbox_nilable_text(c, kpt, tn, pa);
+    else if (at == TY_POLY && kpt != TY_POLY && kpt != TY_UNKNOWN) {
+      /* an Integer or Float keyword slot holding its nil takes the oint; a
+         plain one the value (a nil raised, not read as 0) */
+      if (oint_kind(kpt) && !(kpv && slot_is_oint(kpv))) emit_unbox_text(c, kpt, tn, pa);
+      else emit_unbox_nilable_text(c, kpt, tn, pa);
+    }
     else { emit_obj_upcast_prefix(c, kpt, at, pa); buf_puts(pa, tn); }
   }
   else emit_arg_or_default(c, ms, a, -1, pa);
@@ -6807,12 +6812,16 @@ void poly_arm_layout(Compiler *c, Scope *ms, const PolyArgs *A, ArgLayout *L) {
 }
 
 /* Temp `tmp` of type `at` as a parameter of type `pt`. */
-static void emit_poly_temp_as(Compiler *c, TyKind pt, int tmp, TyKind at, Buf *pa) {
+static void emit_poly_temp_as(Compiler *c, TyKind pt, const LocalVar *pv, int tmp, TyKind at, Buf *pa) {
   char tn[32]; snprintf(tn, sizeof tn, "_t%d", tmp);
   if (pt == TY_POLY && at != TY_POLY) emit_boxed_text(c, at, tn, pa);
-  /* a boxed argument may be nil, which an Integer or Float parameter takes
-     as its own nil: the plain unbox read the zero under the nil tag */
-  else if (at == TY_POLY && pt != TY_POLY && pt != TY_UNKNOWN) emit_unbox_nilable_text(c, pt, tn, pa);
+  /* a boxed argument may be nil, which an Integer or Float parameter slot
+     holding its nil takes as the oint; a plain slot takes the value (a nil
+     raised, not read as the zero under the tag) */
+  else if (at == TY_POLY && pt != TY_POLY && pt != TY_UNKNOWN) {
+    if (oint_kind(pt) && !(pv && slot_is_oint(pv))) emit_unbox_text(c, pt, tn, pa);
+    else emit_unbox_nilable_text(c, pt, tn, pa);
+  }
   /* a subclass argument into an ancestor-typed parameter: layout-compatible,
      but C wants it spelled (#3418) */
   else { emit_obj_upcast_prefix(c, pt, at, pa); buf_puts(pa, tn); }
@@ -7145,7 +7154,7 @@ static void emit_poly_arm_param(Compiler *c, Scope *ms, int a, const ArgLayout *
       if (repr_of_slot(c, pv).handle && emit_poly_shared_arg(c, A, L->arg[a], pa)) return;
       if (pt == TY_POLY && pv && (pv->poly_lift & POLY_LIFT_APPENDED) &&
           emit_poly_boxed_shared_arg(c, A, L->arg[a], pa)) return;
-      emit_poly_temp_as(c, pt, A->atmp[L->arg[a]], A->atmp_ty[L->arg[a]], pa);
+      emit_poly_temp_as(c, pt, pv, A->atmp[L->arg[a]], A->atmp_ty[L->arg[a]], pa);
       return;
     }
     /* fall through */

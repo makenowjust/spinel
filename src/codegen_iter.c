@@ -1646,7 +1646,12 @@ static void emit_block_arg_coerced(Compiler *c, int node, TyKind ot, Buf *b) {
      0 for a nil @u */
   else if (at == TY_POLY && ot != TY_POLY && ot != TY_UNKNOWN) {
     Buf t; memset(&t, 0, sizeof t); emit_expr(c, node, &t);
-    emit_unbox_nilable_text(c, ot, t.p ? t.p : "", b); free(t.p);
+    /* a parameter slot holding its nil took the oint above
+       (emit_block_arg_coerced_lv); this one is plain: the value, a nil
+       raised (the analysis said none reaches it) rather than read as 0 */
+    if (oint_kind(ot)) emit_unbox_text(c, ot, t.p ? t.p : "", b);
+    else emit_unbox_nilable_text(c, ot, t.p ? t.p : "", b);
+    free(t.p);
   }
   /* a String into a parameter a mutating callee made a buffer, as a plain
      assignment of one takes it (#6039) */
