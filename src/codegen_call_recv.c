@@ -211,6 +211,19 @@ static void emit_struct_float_offset(Buf *b, int tk, int tk0) {
    end), a Symbol or a String naming a member. CRuby raises for a key no member
    matches, so the miss is IndexError / NameError rather than nil. `rtxt` names
    a temp already holding the receiver. */
+/* A Struct / Data member's field text boxed for a poly consumer: an Integer
+   or Float member with a nil bit boxes as nil where the bit is set
+   (emit_member_boxed_text, which takes the receiver prefix: the field text
+   up to its last `iv_`). */
+static void emit_member_box(Compiler *c, ClassInfo *sc, int i, const char *fld, Buf *b) {
+  const char *iv = NULL;
+  for (const char *q = strstr(fld, "iv_"); q; q = strstr(q + 1, "iv_")) iv = q;
+  if (!iv) { emit_member_box(c, sc, i, fld, b); return; }
+  char pfx[400]; size_t n = (size_t)(iv - fld); if (n >= sizeof pfx) n = sizeof pfx - 1;
+  memcpy(pfx, fld, n); pfx[n] = 0;
+  emit_member_boxed_text(c, sc, i, pfx, fld, b);
+}
+
 static void emit_struct_member_by_key(Compiler *c, ClassInfo *sc, const char *rtxt,
                                       int key, int int_only, int nil_on_miss, Buf *b) {
   int tk = ++g_tmp, tk0 = ++g_tmp, tr = ++g_tmp;
@@ -237,7 +250,7 @@ static void emit_struct_member_by_key(Compiler *c, ClassInfo *sc, const char *rt
                tk, comp_sym_intern(c, sc->ivars[i] + 1), tk, (long long)i,
                tk, sc->ivars[i] + 1, tr);
     char fld[300]; snprintf(fld, sizeof fld, "%s->iv_%s", rtxt, iv_c(sc->ivars[i] + 1));
-    emit_boxed_text(c, sc->ivar_types[i], fld, b);
+    emit_member_box(c, sc, i, fld, b);
     buf_puts(b, ";}\nelse");
   }
   /* #dig answers nil for a key no member matches, where #[] raises (#3892) */
@@ -8542,7 +8555,7 @@ static int emit_struct_recv_call(Compiler *c, int id, Buf *b, const NodeTable *n
     for (int i = 0; i < sc->nmembers; i++) {
       buf_printf(b, " sp_PolyArray_push(_t%d, ", rt2);
       Buf fb; memset(&fb, 0, sizeof fb); buf_printf(&fb, "_t%d->iv_%s", t, iv_c(sc->ivars[i] + 1));
-      emit_boxed_text(c, sc->ivar_types[i], fb.p, b); free(fb.p);
+      emit_member_box(c, sc, i, fb.p ? fb.p : "", b); free(fb.p);
       buf_puts(b, ");");
     }
     buf_printf(b, " _t%d; })", rt2);
@@ -8576,7 +8589,7 @@ static int emit_struct_recv_call(Compiler *c, int id, Buf *b, const NodeTable *n
         if (kp) buf_printf(b, " lv_%s = (sp_sym)%d;", kp, comp_sym_intern(c, sc->ivars[i] + 1));
         if (vp) {
           char fb[300]; snprintf(fb, sizeof fb, "_t%d->iv_%s", t, iv_c(sc->ivars[i] + 1));
-          buf_printf(b, " lv_%s = ", vp); emit_boxed_text(c, sc->ivar_types[i], fb, b); buf_puts(b, ";");
+          buf_printf(b, " lv_%s = ", vp); emit_member_box(c, sc, i, fb, b); buf_puts(b, ";");
         }
         /* a composite key/value (an Array or Hash literal built from the
            block parameters) hoists its construction into the prelude, which
@@ -8607,7 +8620,7 @@ static int emit_struct_recv_call(Compiler *c, int id, Buf *b, const NodeTable *n
       for (int i = 0; i < sc->nmembers; i++) {
         buf_printf(b, " sp_SymPolyHash_set(_t%d, (sp_sym)%d, ", rh, comp_sym_intern(c, sc->ivars[i] + 1));
         char fb[300]; snprintf(fb, sizeof fb, "_t%d->iv_%s", t, iv_c(sc->ivars[i] + 1));
-        emit_boxed_text(c, sc->ivar_types[i], fb, b);
+        emit_member_box(c, sc, i, fb, b);
         buf_puts(b, ");");
       }
     }
@@ -8640,7 +8653,7 @@ static int emit_struct_recv_call(Compiler *c, int id, Buf *b, const NodeTable *n
         if (ix < 0 || ix >= sc->nmembers) { ok4 = 0; break; }
         char fb4[300]; snprintf(fb4, sizeof fb4, "_t%d->iv_%s", tv4, iv_c(sc->ivars[(int)ix] + 1));
         buf_printf(b4, " sp_PolyArray_push(_t%d, ", to4);
-        emit_boxed_text(c, sc->ivar_types[(int)ix], fb4, b4);
+        emit_member_box(c, sc, (int)ix, fb4, b4);
         buf_puts(b4, ");");
       }
       else if (aty4 && sp_streq(aty4, "RangeNode")) {
@@ -8704,7 +8717,7 @@ static int emit_struct_recv_call(Compiler *c, int id, Buf *b, const NodeTable *n
     for (int i5 = 0; i5 < sc->nmembers; i5++) {
       char fb5[300]; snprintf(fb5, sizeof fb5, "_t%d->iv_%s", tv5, iv_c(sc->ivars[i5] + 1));
       buf_printf(b, " _t%d = (_t%d ^ (uint64_t)sp_rbval_hash_key(", th5, th5);
-      emit_boxed_text(c, sc->ivar_types[i5], fb5, b);
+      emit_member_box(c, sc, i5, fb5, b);
       buf_puts(b, ")) * 1099511628211ULL;");
     }
     buf_printf(b, " (sp_int)(_t%d >> 1); })", th5);
@@ -8755,7 +8768,7 @@ static int emit_struct_recv_call(Compiler *c, int id, Buf *b, const NodeTable *n
         int i = keyed[e];
         buf_printf(b, " sp_SymPolyHash_set(_t%d, (sp_sym)%d, ", rh, comp_sym_intern(c, sc->ivars[i] + 1));
         char fb2[300]; snprintf(fb2, sizeof fb2, "_t%d->iv_%s", t, iv_c(sc->ivars[i] + 1));
-        emit_boxed_text(c, sc->ivar_types[i], fb2, b);
+        emit_member_box(c, sc, i, fb2, b);
         buf_puts(b, ");");
       }
       buf_printf(b, " _t%d; })", rh);
@@ -9165,6 +9178,17 @@ static int emit_struct_recv_call(Compiler *c, int id, Buf *b, const NodeTable *n
         emit_strbuf_node_read(c, id, sref, b);
         buf_puts(b, "; })");
       }
+      /* a number member with a nil bit reads with it: the oint where the
+         call's consumer takes one, else unwrapped (or boxed) */
+      else if (oint_kind(sc->ivar_types[mi]) && ivar_has_nilbit(c, (int)(sc - c->classes), mi)) {
+        char objp[40]; snprintf(objp, sizeof objp, "_t%d->", t);
+        char bit[400]; ivar_nilbit_test(c, (int)(sc - c->classes), mi, objp, bit, sizeof bit);
+        TyKind mt = sc->ivar_types[mi];
+        char ot[600]; snprintf(ot, sizeof ot, "((%s){ _t%d->iv_%s, (%s) != 0 })", oint_ctype(mt), t, iv_c(sc->ivars[mi] + 1), bit);
+        if (repr_of(c, id).kind == RK_BOXED) buf_printf(b, "%s(%s); })", oint_box(mt), ot);
+        else if (node_is_oint(c, id)) buf_printf(b, "%s; })", ot);
+        else buf_printf(b, "%s(%s); })", oint_arg(mt), ot);
+      }
       else buf_printf(b, "_t%d->iv_%s; })", t, iv_c(sc->ivars[mi] + 1));
       { *out = 1; return 1; }
     }
@@ -9188,7 +9212,7 @@ static int emit_struct_recv_call(Compiler *c, int id, Buf *b, const NodeTable *n
         buf_printf(b, " if(sp_rbval_eql_key(_t%d,sp_box_sym((sp_sym)%d))||sp_rbval_eql_key(_t%d,sp_box_int(%lldLL))){ _t%d = ",
                    tk, comp_sym_intern(c, sc->ivars[i]+1), tk, (long long)i, tr);
         char fld2[300]; snprintf(fld2, sizeof fld2, "_t%d->iv_%s", t, iv_c(sc->ivars[i] + 1));
-        emit_boxed_text(c, sc->ivar_types[i], fld2, b);
+        emit_member_box(c, sc, i, fld2, b);
         buf_printf(b, ";}\nelse");
       }
       /* a miss is an error: IndexError for an offset, NameError for a name */
