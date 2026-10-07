@@ -1273,7 +1273,7 @@ decisions-test: $(SPINEL) $(SPINEL_TIMEOUT)
 	t=$$tmp/nil_narrowing; f=test/nil_narrowing.rb; k='nn-read@test/nil_narrowing.rb:39:8:v'; \
 	grep -vxF "$$k" "$$t.log" > "$$t.allow"; \
 	$(SPINEL) --decisions="$$t.allow" $$f -c -o "$$t.c" >/dev/null 2>&1; \
-	[ "$$(grep -o SP_INT_NIL_CMP_CK "$$t.c" | wc -l)" -eq $$(( $$(grep -o SP_INT_NIL_CMP_CK "$$t.plain" | wc -l) + 1 )) ] || \
+	[ "$$(grep -oF 'sp_oint_val(' "$$t.c" | wc -l)" -eq $$(( $$(grep -oF 'sp_oint_val(' "$$t.plain" | wc -l) + 1 )) ] || \
 	  { echo "decisions-test: FAIL (denying $$k did not put back that one read's nil check)"; ok=0; }; \
 	rm -rf "$$tmp"; \
 	[ $$ok = 1 ] && echo "decisions-test: pass" || exit 1
@@ -3621,7 +3621,7 @@ infer-test: $(SPINEL) $(SP_RT_LIB)
 	! grep -q 'sp_IntArray_set_nilable(lv_a, \|sp_IntArray_push_nilable(lv_b, \|sp_FloatArray_set_nilable(lv_f, ' "$$tmp/anf.c" && grep -q '\] = _t[0-9]*; else sp_IntArray_set(lv_a, ' "$$tmp/anf.c" && grep -q 'sp_IntArray_push(lv_b, ' "$$tmp/anf.c" && grep -q 'sp_FloatArray_set(lv_f, ' "$$tmp/anf.c" || { echo "infer-test: FAIL (a loop storing numbers into a typed array took the nil-flag-setting store)"; ok=0; }; \
 	grep -q 'sp_IntArray_push_nilable(lv_c, sp_IntArray_oget(lv_a, ' "$$tmp/anf.c" && grep -q 'sp_IntArray_push_nilable(lv_q, sp_IntArray_pop_o(lv_b))' "$$tmp/anf.c" && grep -q 'sp_IntArray_push(_t[0-9]*, self->iv_v)\|sp_IntArray_push(lv_out, self->iv_v)' "$$tmp/anf.c" || { echo "infer-test: FAIL (copying an element or an ivar into a typed array took the nil-flag-setting store)"; ok=0; }; \
 	grep -q 'sp_IntArray_sum(sp_IntArray_nil_sum_if_flagged(lv_a, 0), 0)' "$$tmp/anf.c" && grep -q 'sp_IntArray_max_o(sp_IntArray_nil_cmp_if_flagged(lv_b))' "$$tmp/anf.c" || { echo "infer-test: FAIL (a whole-array sum or max does not ask the nil flag)"; ok=0; }; \
-	grep -q 'sp_IntArray_sum(sp_IntArray_nil_sum_ck(lv_m, 0), 0)' "$$tmp/anf.c" || { echo "infer-test: FAIL (the sum of an array analyze marked does not scan for nil)"; ok=0; }; \
+	grep -q 'sp_IntArray_sum(sp_IntArray_nil_sum_if_flagged(lv_m, 0), 0)' "$$tmp/anf.c" || { echo "infer-test: FAIL (the sum of an array that can hold nil does not ask its nil bitmap)"; ok=0; }; \
 	$(SPINEL) test/infer/nil_narrowing_reads.rb -c --no-line-map -o "$$tmp/nnr.c" >/dev/null 2>&1 || { echo "infer-test: FAIL (nil_narrowing_reads: -c)"; ok=0; }; \
 	grep -q 'if ((lv_w.v > 2LL))' "$$tmp/nnr.c" && grep -q 'if ((lv_v > lv_k))' "$$tmp/nnr.c" || { echo "infer-test: FAIL (a read a guard or an in-bounds index proves non-nil still tests for nil)"; ok=0; }; \
 	grep -q '_t[0-9]*_r = lv_best.v; _t[0-9]* > _t[0-9]*_r; })' "$$tmp/nnr.c" && grep -q '_t[0-9]*_r = lv_lo.v; _t[0-9]* < _t[0-9]*_r; })' "$$tmp/nnr.c" || { echo "infer-test: FAIL (a narrowed read of a nilable local does not keep the other operand's half of the test)"; ok=0; }; \
