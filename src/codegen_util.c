@@ -5687,7 +5687,17 @@ void emit_ivar_value_nilbit(Compiler *c, int cid, int iv, const char *obj, int v
   if (node_has_oint_form(c, v) || r.kind == RK_BOXED || r.as_ty == TY_NIL || r.as_ty == TY_VOID ||
       r.as_ty == TY_UNKNOWN || (oint_kind(r.as_ty) && r.as_ty != t)) {
     buf_printf(b, "({ %s _t%d = ", oint_ctype(t), to);
-    if (r.as_ty == TY_UNKNOWN) { buf_printf(b, "%s(", oint_unbox(t)); emit_expr(c, v, b); buf_puts(b, ")"); }
+    /* a boxed value into a slot an --rbs seed pins: the seed's assertion
+       (nil passes) before the narrowing, as the plain slot's write has it */
+    const char *ivn = c->classes[cid].ivars[iv];
+    if ((r.kind == RK_BOXED || r.as_ty == TY_POLY) && ivn && class_ivar_pinned(&c->classes[cid], ivn)) {
+      Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, v, &rb);
+      Buf ck; memset(&ck, 0, sizeof ck);
+      emit_rbs_checked_text(c, t, ivn, rb.p ? rb.p : "sp_box_nil()", &ck);
+      buf_printf(b, "%s(%s)", oint_unbox(t), ck.p ? ck.p : "sp_box_nil()");
+      free(rb.p); free(ck.p);
+    }
+    else if (r.as_ty == TY_UNKNOWN) { buf_printf(b, "%s(", oint_unbox(t)); emit_expr(c, v, b); buf_puts(b, ")"); }
     else emit_oint_expr(c, v, t, b);
     buf_printf(b, "; if (_t%d.nil) %s; else %s; _t%d.v; })", to, bs, bc, to);
     return;
