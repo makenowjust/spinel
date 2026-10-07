@@ -5287,7 +5287,8 @@ int node_is_oint(Compiler *c, int node) {
     /* a class's own methods (File.delete, IO::Buffer.size_of) are no container's */
     if (r >= 0 && (nt_kind(nt, r) == NK_ConstantReadNode || nt_kind(nt, r) == NK_ConstantPathNode) &&
         !oint_kind(rt) && rt != TY_COMPLEX && rt != TY_RATIONAL && rt != TY_BIGINT &&
-        !ty_is_array(rt) && !ty_is_hash(rt) && rt != TY_RANGE && rt != TY_STRING)   /* a constant holding a number or a container (Float::INFINITY, FREE = []) is a value */
+        !ty_is_array(rt) && !ty_is_hash(rt) && rt != TY_RANGE && rt != TY_STRING &&   /* a constant holding a number or a container (Float::INFINITY, FREE = []) is a value */
+        !sp_streq(nm, "world_readable?") && !sp_streq(nm, "world_writable?"))   /* File.world_readable?(f): nil when it is not */
       return 0;
     /* the runtime functions that answer an sp_oint (RUNTIME-API.md) */
     if ((sp_streq(nm, "bsearch") || sp_streq(nm, "bsearch_index")) && blk >= 0) return 1;
@@ -5317,6 +5318,7 @@ int node_is_oint(Compiler *c, int node) {
         (sp_streq(nm, "index") || sp_streq(nm, "rindex") || sp_streq(nm, "delete_at") || sp_streq(nm, "delete") ||
          ((sp_streq(nm, "pop") || sp_streq(nm, "shift")) && an2 == 0))) return 1;
     if (r >= 0 && ty_is_hash(rt) && sp_streq(nm, "delete")) return 1;
+    if (r >= 0 && rt == TY_MATCHDATA && (sp_streq(nm, "bytebegin") || sp_streq(nm, "byteend"))) return 1;
     if (is_range_bound_reader(nm) && r >= 0 &&
         (rt == TY_MATCHDATA || rt == TY_RANGE || rt == TY_FLOAT_RANGE)) return 1;
     if (r >= 0 && (rt == TY_INT_ARRAY || rt == TY_FLOAT_ARRAY)) {
