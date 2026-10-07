@@ -971,7 +971,7 @@ const char *past_open_parens(const char *s) {
    shape a call on a raising receiver takes, `((void)(<raise>), nil)`)? The
    voided form nests when such a chain is itself the receiver or left operand
    of another (`a.b && a.b.c`). */
-static void emit_member_boxed_text(Compiler *c, ClassInfo *ci, int i, const char *objprefix, const char *expr, Buf *b);
+void emit_member_boxed_text(Compiler *c, ClassInfo *ci, int i, const char *objprefix, const char *expr, Buf *b);
 int text_diverges(const char *txt) {
   const char *p = past_open_parens(txt);
   while (strncmp(p, "void)", 5) == 0) p = past_open_parens(p + 5);
@@ -9625,7 +9625,7 @@ static void emit_cls_answers_dispatch(Compiler *c, Buf *b) {
 /* A member of class `ci` (index i) read through `objprefix` ("o->",
    "self->") boxed with its nil: an Integer / Float one by its nil bit
    (emit_marshal_box_ivar_of), the rest by their type. */
-static void emit_member_boxed_text(Compiler *c, ClassInfo *ci, int i, const char *objprefix, const char *expr, Buf *b) {
+void emit_member_boxed_text(Compiler *c, ClassInfo *ci, int i, const char *objprefix, const char *expr, Buf *b) {
   TyKind mt = ci->ivar_types[i];
   if (mt == TY_INT || mt == TY_FLOAT) emit_marshal_box_ivar_of(c, (int)(ci - c->classes), i, objprefix, expr, b);
   else emit_boxed_text(c, mt, expr, b);

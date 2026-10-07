@@ -2011,6 +2011,9 @@ int block_next_may_be_nil(Compiler *c, int id, int depth);
 /* Struct.new / Data.new of class ci with call id's arguments: the members,
    and the nil bits of members left nil (codegen_call.c) */
 int emit_struct_new_call(Compiler *c, int id, int ci, int argc, const int *argv, Buf *b);
+/* member i of class ci read as `expr` through `objprefix` ("_t3->"), boxed
+   with its nil: an Integer / Float member by its nil bit (codegen.c) */
+void emit_member_boxed_text(Compiler *c, ClassInfo *ci, int i, const char *objprefix, const char *expr, Buf *b);
 /* the head of a Range walk that stops at the ends of sp_int (see codegen_util.c) */
 void emit_range_walk_head(Buf *b, int indent, const char *var, int decl, const char *first,
                           const char *step, const char *last);
