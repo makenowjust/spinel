@@ -13982,7 +13982,10 @@ static int emit_array_arith_call(Compiler *c, int id, Buf *b) {
           Buf *svp = g_pre; g_pre = &ap;
           emit_oint_expr(c, argv[0], rgt9, &ov);
           g_pre = svp;
-          buf_printf(&av, "%s(%s)", rgt9 == TY_INT ? "sp_oint_opnd" : "sp_ofloat_opnd", ov.p ? ov.p : "");
+          /* nil coerced into the LEFT operand's class: an Integer receiver
+             says "into Integer" for a nil Float as for a nil Integer */
+          if (rgt9 == TY_FLOAT && lft9 == TY_INT) buf_printf(&av, "sp_ofloat_opnd_in(%s, \"Integer\")", ov.p ? ov.p : "");
+          else buf_printf(&av, "%s(%s)", rgt9 == TY_INT ? "sp_oint_opnd" : "sp_ofloat_opnd", ov.p ? ov.p : "");
           free(ov.p);
         }
         else emit_split_pre(c, argv[0], emit_float_operand_expr, &ap, &av);
@@ -14030,6 +14033,7 @@ static int emit_array_arith_call(Compiler *c, int id, Buf *b) {
       else if (rgt9 == TY_BIGINT) buf_puts(b, "sp_bigint_to_double(");
       if (rnf.p) buf_puts(b, rnf.p);
       /* a nil right operand: a comparison's ArgumentError, an arithmetic's TypeError */
+      else if (rfn && is_arith_op(name) && lft9 == TY_INT) { buf_puts(b, "sp_ofloat_opnd_in("); emit_oint_expr(c, argv[0], TY_FLOAT, b); buf_puts(b, ", \"Integer\")"); }
       else if (rfn && is_arith_op(name)) { buf_puts(b, "sp_ofloat_opnd("); emit_oint_expr(c, argv[0], TY_FLOAT, b); buf_puts(b, ")"); }
       else if (rfn) { buf_puts(b, "sp_ofloat_cmp_opnd("); emit_oint_expr(c, argv[0], TY_FLOAT, b); buf_printf(b, ", \"%s\", \"Float\")", name); }
       else emit_scalar_operand(c, argv[0], "0.0", b);
