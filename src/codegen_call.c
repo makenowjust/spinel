@@ -13397,6 +13397,8 @@ void emit_array_splice(Compiler *c, int id, int recv, TyKind rt,
   char valtmp[24];
   snprintf(valtmp, sizeof valtmp, "_t%d", ts);
   int tam_src = 0;   /* the source is the array an object's to_ary answered */
+  int onum = elem == TY_INT || elem == TY_FLOAT;
+  int poly_so = 0;   /* the boxed-RHS branch tracks its array source in _soN */
   buf_printf(b, "({ sp_%sArray *_t%d = ", k, ta); emit_expr(c, recv, b); buf_puts(b, "; ");
   buf_printf(b, "%s_src%d; sp_int _srcn%d; ", srcty, ta, ta);
 
@@ -13421,8 +13423,12 @@ void emit_array_splice(Compiler *c, int id, int recv, TyKind rt,
       else buf_printf(b, "_ca%d->data", ta);
       buf_printf(b, "; _srcn%d = _ca%d->len; ", ta, ta);
       emit_splice_bounds(c, ta, tg, start_node, len_node, range_node, b);
-      buf_printf(b, "sp_%sArray_splice(_t%d, _s%d, _l%d, _src%d, _srcn%d); _t%d; })",
-                 k, ta, ta, ta, ta, ta, ts);
+      /* an Integer or Float element that was nil keeps its nil (splice_o) */
+      if (elem == TY_INT || elem == TY_FLOAT)
+        buf_printf(b, "sp_%sArray_splice_o(_t%d, _s%d, _l%d, _ca%d); _t%d; })", k, ta, ta, ta, ta, ts);
+      else
+        buf_printf(b, "sp_%sArray_splice(_t%d, _s%d, _l%d, _src%d, _srcn%d); _t%d; })",
+                   k, ta, ta, ta, ta, ta, ts);
       return;
     }
     if (rhs_elem != elem) {
@@ -13475,6 +13481,9 @@ void emit_array_splice(Compiler *c, int id, int recv, TyKind rt,
        _sa->data, which the splice's pushes can collect out from under us */
     buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); ", ts);
     emit_ctype(c, elem, b); buf_printf(b, " _v%d; ", ta);
+    poly_so = onum;
+    /* an Integer or Float source with nils is spliced as the array (splice_o) */
+    if (onum) buf_printf(b, "sp_%sArray *_so%d = NULL; ", k, ta);
     /* An array of another kind (a poly array from `poly.first(n)`) is
        re-laid element by element into _ca, rooted at this scope since _src
        points into it. */
@@ -13483,17 +13492,27 @@ void emit_array_splice(Compiler *c, int id, int recv, TyKind rt,
                ts, ts, bcon, k, ta, k, ts, ta);
     if (elem == TY_INT) buf_printf(b, "_sa%d->data + _sa%d->start", ta, ta);
     else buf_printf(b, "_sa%d->data", ta);
-    /* a boxed source takes no flag test: this is optcarrot's per-tile
-       @bg_pixels splice, and a nil it carries is the one copy the flag
-       does not follow (as a static mark does not either) */
-    buf_printf(b, "; _srcn%d = _sa%d->len; }\n", ta, ta);
+    /* optcarrot's per-tile @bg_pixels splice: splice_o answers the plain
+       splice at once when the source has no nil bits */
+    buf_printf(b, "; _srcn%d = _sa%d->len; ", ta, ta);
+    if (onum) buf_printf(b, "_so%d = _sa%d; ", ta, ta);
+    buf_puts(b, "}\n");
     buf_printf(b, "else if (_t%d.tag == SP_TAG_OBJ && sp_poly_is_array_kind(_t%d.cls_id)) { _ca%d = sp_%sArray_from_elems(_t%d); _src%d = ",
                ts, ts, ta, k, ts, ta);
     if (elem == TY_INT) buf_printf(b, "_ca%d->data + _ca%d->start", ta, ta);
     else buf_printf(b, "_ca%d->data", ta);
-    buf_printf(b, "; _srcn%d = _ca%d->len; }\n", ta, ta);
-    buf_printf(b, "else { _v%d = %s(_t%d); _src%d = &_v%d; _srcn%d = 1; } ",
-               ta, conv, ts, ta, ta, ta);
+    buf_printf(b, "; _srcn%d = _ca%d->len; ", ta, ta);
+    if (onum) buf_printf(b, "_so%d = _ca%d; ", ta, ta);
+    buf_puts(b, "}\n");
+    /* a nil scalar is spliced in as a one-element array holding nil */
+    if (onum)
+      buf_printf(b, "else { %s _o%d = %s(_t%d); if (_o%d.nil) { _ca%d = sp_%sArray_new(); sp_%sArray_push_nil(_ca%d); _so%d = _ca%d; }"
+                    " else { _v%d = _o%d.v; _src%d = &_v%d; _srcn%d = 1; } } ",
+                 oint_ctype(elem), ta, elem == TY_INT ? "sp_poly_elem_i" : "sp_poly_elem_f", ts, ta, ta, k, k, ta, ta, ta,
+                 ta, ta, ta, ta, ta);
+    else
+      buf_printf(b, "else { _v%d = %s(_t%d); _src%d = &_v%d; _srcn%d = 1; } ",
+                 ta, conv, ts, ta, ta, ta);
   }
   else {
     /* scalar RHS: replace the slice with a single element */
@@ -13506,11 +13525,16 @@ void emit_array_splice(Compiler *c, int id, int recv, TyKind rt,
   }
 
   emit_splice_bounds(c, ta, tg, start_node, len_node, range_node, b);
-  buf_printf(b, "sp_%sArray_splice(_t%d, _s%d, _l%d, _src%d, _srcn%d); ", k, ta, ta, ta, ta, ta);
-  /* the spliced-in values carry their nils: a same-kind array its flag, in
-     O(1); a scalar that can be nil marks the receiver statically */
-  if ((elem == TY_INT || elem == TY_FLOAT) && (rhs_is_arr || tam_src))
-    buf_printf(b, "sp_%sArray_nil_from(_t%d, _t%d); ", k, ta, ts);
+  /* the spliced-in values carry their nils: an Integer or Float source
+     array goes through splice_o, which takes its bits along (and is the
+     plain splice when it has none) */
+  if (onum && (rhs_is_arr || tam_src))
+    buf_printf(b, "sp_%sArray_splice_o(_t%d, _s%d, _l%d, _t%d); ", k, ta, ta, ta, ts);
+  else if (poly_so)
+    buf_printf(b, "if (_so%d) sp_%sArray_splice_o(_t%d, _s%d, _l%d, _so%d); else sp_%sArray_splice(_t%d, _s%d, _l%d, _src%d, _srcn%d); ",
+               ta, k, ta, ta, ta, ta, k, ta, ta, ta, ta, ta);
+  else
+    buf_printf(b, "sp_%sArray_splice(_t%d, _s%d, _l%d, _src%d, _srcn%d); ", k, ta, ta, ta, ta, ta);
   buf_printf(b, "%s; })", valtmp);
 }
 
