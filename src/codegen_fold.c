@@ -6848,7 +6848,21 @@ static void emit_arg_or_default_fill(Compiler *c, Scope *m, int idx, int provide
         unsupported_feature(c, provided, msg);
       }
     }
-    if (pt == TY_POLY) emit_boxed(c, provided, out);   /* box into a poly param */
+    /* the receiver of a builtin written in Ruby, boxed (a promote-widened
+       slot): nil has none of these methods, CRuby's NoMethodError naming
+       the method */
+    if (pt == TY_POLY && idx == 0 && m->pnames[0] && sp_streq(m->pnames[0], "__self") && m->name &&
+        (!strncmp(m->name, "__int_", 6) || !strncmp(m->name, "__flt_", 6) || !strncmp(m->name, "__cmp_", 6)) &&
+        (comp_ntype(c, provided) == TY_POLY || node_may_be_nil(c, provided))) {
+      const char *rn = m->name + 6;
+      size_t rl = strlen(rn);
+      while (rl > 0 && rn[rl - 1] >= '0' && rn[rl - 1] <= '9') rl--;
+      if (rl >= 2 && rl < strlen(rn) && rn[rl - 1] == '_' && rn[rl - 2] == '_') rl -= 2; else rl = strlen(rn);
+      int tn = ++g_tmp;
+      buf_printf(out, "({ sp_RbVal _t%d = ", tn); emit_boxed(c, provided, out);
+      buf_printf(out, "; if (_t%d.tag == SP_TAG_NIL) sp_raise_poly_nomethod(\"%.*s\", _t%d); _t%d; })", tn, (int)rl, rn, tn, tn);
+    }
+    else if (pt == TY_POLY) emit_boxed(c, provided, out);   /* box into a poly param */
     else {
       Repr ar = repr_of(c, provided);
       TyKind at = ar.as_ty;
