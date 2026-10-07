@@ -5329,7 +5329,10 @@ int node_is_oint(Compiler *c, int node) {
       /* a seedless fold, a comparator min / max: nil over an empty receiver */
       if (blk >= 0 && an2 == 0 && (is_reduce_alias(nm) || sp_streq(nm, "min") || sp_streq(nm, "max"))) return 1;
     }
-    if (r >= 0 && rt == TY_RANGE && an2 == 0 && blk < 0 && (sp_streq(nm, "min") || sp_streq(nm, "max"))) return 1;
+    if (r >= 0 && (rt == TY_RANGE || rt == TY_FLOAT_RANGE) && an2 == 0 && blk < 0 &&
+        (sp_streq(nm, "min") || sp_streq(nm, "max"))) return 1;
+    /* `s.unpack1("q")` past the input's end is nil */
+    if (r >= 0 && sp_streq(nm, "unpack1")) return 1;
     /* a String range has no size (nil); an Enumerator's find_index / index
        answers nil on a miss */
     if (r >= 0 && rt == TY_STR_RANGE && an2 == 0 && (sp_streq(nm, "size"))) return 1;
