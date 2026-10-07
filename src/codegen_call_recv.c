@@ -3243,7 +3243,8 @@ static int emit_typed_array_call(Compiler *c, int id, Buf *b, const NodeTable *n
     if (sp_streq(name, "each_index") && ei_blk >= 0) {
       const char *ek = (rt == TY_POLY_ARRAY) ? "Poly" : array_kind(rt);
       if (ek) {
-        const char *ip = block_param_name(c, ei_blk, 0); if (ip) ip = rename_local(ip);
+        const char *ip0 = block_param_name(c, ei_blk, 0);
+        const char *ip = ip0 ? rename_local(ip0) : NULL;
         int body = nt_ref(nt, ei_blk, "body");
         int trecv = ++g_tmp, ti = ++g_tmp;
         Buf rb = expr_buf(c, recv);
@@ -3257,11 +3258,14 @@ static int emit_typed_array_call(Compiler *c, int id, Buf *b, const NodeTable *n
                    ti, ti, ek, trecv, ti);
         if (ip) {
           Scope *eic = comp_scope_of(c, ei_blk);
-          LocalVar *eilv = eic ? scope_local(eic, ip) : NULL;
+          LocalVar *eilv = eic ? scope_local(eic, ip0) : NULL;
           TyKind eit = eilv ? eilv->type : TY_INT;
           emit_indent(g_pre, g_indent + 1);
           if (eit == TY_POLY)
             buf_printf(g_pre, "lv_%s = sp_box_int(_t%d);\n", ip, ti);
+          /* a slot that holds its nil (a block-splat temp shared with nil) */
+          else if (eilv && slot_is_oint(eilv))
+            buf_printf(g_pre, "lv_%s = sp_oint_of(_t%d);\n", ip, ti);
           else
             buf_printf(g_pre, "lv_%s = _t%d;\n", ip, ti);
         }
