@@ -5252,6 +5252,15 @@ int node_is_oint(Compiler *c, int node) {
       int a1 = nt_ref(nt, node, "arguments"), a1n = 0;
       const int *a1a = a1 >= 0 ? nt_arr(nt, a1, "arguments", &a1n) : NULL;
       TyKind at = a1a && a1n == 1 ? comp_ntype(c, a1a[0]) : TY_UNKNOWN;
+      /* a builtin receiver with no `<=>` of its own (a Regexp, a Proc, a
+         Queue, an exception) takes a reopened Object's: its answer's form */
+      if (r >= 0 && rt != TY_POLY && rt != TY_UNKNOWN && !ty_is_object(rt) && !oint_kind(rt) &&
+          rt != TY_BIGINT && rt != TY_RATIONAL && rt != TY_STRING && rt != TY_SYMBOL && rt != TY_TIME &&
+          !ty_is_array(rt)) {
+        int oc = comp_class_index(c, "Object");
+        int omi = oc >= 0 ? comp_method_in_chain(c, oc, nm, NULL) : -1;
+        if (omi >= 0) return method_ret_is_oint(&c->scopes[omi]);
+      }
       int num_l = rt == TY_INT || rt == TY_FLOAT || rt == TY_BIGINT || rt == TY_RATIONAL;
       int num_r = at == TY_INT || at == TY_FLOAT || at == TY_BIGINT || at == TY_RATIONAL;
       /* a Float side can be NaN; a non-literal String side can be nil */
