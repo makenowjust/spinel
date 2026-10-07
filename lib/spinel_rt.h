@@ -3264,8 +3264,28 @@ static sp_bool sp_frange_cover_poly(sp_FloatRange r, sp_RbVal v) {
    where the plain conversions answer 0 / 0.0 for it -- an ordinary value the
    caller cannot tell from a real zero. A method whose declared return is
    `Integer?` / `Float?` narrows a boxed body through these (#3458). */
-static sp_oint sp_unbox_oint(sp_RbVal v) { return v.tag == SP_TAG_NIL ? sp_oint_nil() : v.tag == SP_TAG_INT ? sp_oint_of(v.v.i) : sp_oint_of(sp_poly_to_i(v)); }
-static sp_ofloat sp_unbox_ofloat(sp_RbVal v) { return v.tag == SP_TAG_NIL ? sp_ofloat_nil() : v.tag == SP_TAG_FLT ? sp_ofloat_of(v.v.f) : sp_ofloat_of(sp_poly_to_f(v)); }
+/* A boxed value into an Integer / Float slot that holds its nil. A Bignum
+   has no spelling in either: past the word it raises (CRuby's NUM2LONG
+   RangeError), where the lenient conversion kept its low word and a Bignum
+   2**63 stored into an Integer array read back as -2**63, silently. One that
+   fits (a promote-mode Bignum that came back into range) is its value. */
+static SP_NOINLINE SP_COLD sp_int sp_unbox_big_i(sp_RbVal v) {
+  sp_Bigint *b = (sp_Bigint *)v.v.p;
+  if (b && sp_bigint_fits_int(b)) return (sp_int)sp_bigint_to_int(b);
+  sp_raise_cls("RangeError", "bignum too big to convert into 'long'");
+}
+static sp_oint sp_unbox_oint(sp_RbVal v) {
+  if (v.tag == SP_TAG_NIL) return sp_oint_nil();
+  if (v.tag == SP_TAG_INT) return sp_oint_of(v.v.i);
+  if (SP_UNLIKELY(v.tag == SP_TAG_BIGINT)) return sp_oint_of(sp_unbox_big_i(v));
+  return sp_oint_of(sp_poly_to_i(v));
+}
+static sp_ofloat sp_unbox_ofloat(sp_RbVal v) {
+  if (v.tag == SP_TAG_NIL) return sp_ofloat_nil();
+  if (v.tag == SP_TAG_FLT) return sp_ofloat_of(v.v.f);
+  if (SP_UNLIKELY(v.tag == SP_TAG_BIGINT)) return sp_ofloat_of((sp_float)sp_unbox_big_i(v));
+  return sp_ofloat_of(sp_poly_to_f(v));
+}
 /* An FFI argument or callback return that C takes as an integer or a
    double: nil is no number there, and the ffi gem's NUM2INT / NUM2DBL raise
    TypeError for it. NUM2DBL also refuses a String, which
@@ -3284,8 +3304,8 @@ static SP_UNUSED sp_int sp_poly_arg_i_msg(sp_RbVal v, const char *msg) { if (SP_
 /* The right operand of an Integer or Float op-assign read out of a box:
    `x += nil` is the coercion TypeError ("nil can't be coerced into
    Integer"), and a shift count the conversion one, as CRuby raises. */
-static SP_UNUSED sp_int sp_poly_opnd_i(sp_RbVal v) { if (SP_UNLIKELY(v.tag == SP_TAG_NIL)) sp_raise_nil_opnd("Integer"); return sp_poly_to_i(v); }
-static SP_UNUSED sp_float sp_poly_opnd_f(sp_RbVal v) { if (SP_UNLIKELY(v.tag == SP_TAG_NIL)) sp_raise_nil_float_op(0, ""); return sp_poly_to_f(v); }
+static SP_UNUSED sp_int sp_poly_opnd_i(sp_RbVal v) { if (SP_UNLIKELY(v.tag == SP_TAG_NIL)) sp_raise_nil_opnd("Integer"); if (SP_UNLIKELY(v.tag == SP_TAG_BIGINT)) return sp_unbox_big_i(v); return sp_poly_to_i(v); }
+static SP_UNUSED sp_float sp_poly_opnd_f(sp_RbVal v) { if (SP_UNLIKELY(v.tag == SP_TAG_NIL)) sp_raise_nil_float_op(0, ""); if (SP_UNLIKELY(v.tag == SP_TAG_BIGINT)) return (sp_float)sp_unbox_big_i(v); return sp_poly_to_f(v); }
 static SP_UNUSED sp_int sp_poly_arg_i_of(sp_RbVal v) { if (SP_UNLIKELY(v.tag == SP_TAG_NIL)) sp_raise_nil_to_int(1); return sp_poly_to_i(v); }
 /* A sort / min / max block's boxed answer: a nil one says the two elements
    do not compare, which CRuby reports as "comparison of A with b failed". */
