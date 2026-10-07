@@ -5115,6 +5115,16 @@ void emit_oint_expr(Compiler *c, int node, TyKind t, Buf *b) {
   buf_printf(b, "%s(", oint_of(t)); emit_expr(c, node, b); buf_puts(b, ")");
 }
 
+/* Ruby truthiness of an Integer or Float node: a plain one is always
+   truthy (evaluated for its effect); one with an oint form is truthy
+   exactly when it is not nil. */
+void emit_oint_truthy(Compiler *c, int node, TyKind t, Buf *b) {
+  if (node_has_oint_form(c, node)) {
+    buf_puts(b, "(!("); emit_oint_expr(c, node, t, b); buf_puts(b, ").nil)");
+  }
+  else { buf_puts(b, "(("); emit_expr(c, node, b); buf_puts(b, "), 1)"); }
+}
+
 void emit_scalar_operand_op(Compiler *c, int node, const char *op, Buf *b) {
   TyKind t = comp_ntype(c, node);
   if (oint_kind(t) && cmp_operand_may_be_nil(c, node)) {

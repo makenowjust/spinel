@@ -2003,7 +2003,7 @@ int node_is_oint(Compiler *c, int node);
 int node_has_oint_form(Compiler *c, int node);
 /* node as an sp_oint / sp_ofloat: the bare producer, a plain value wrapped
    in sp_oint_of, nil as sp_oint_nil(); a slot read as its slot's own oint */
-void emit_oint_expr(Compiler *c, int node, Buf *b);
+void emit_oint_expr(Compiler *c, int node, TyKind t, Buf *b);
 /* set by emit_oint_expr for the one node it is about to emit: emit_expr
    consumes it (leaves the oint producer bare) before any child is emitted */
 extern int g_want_oint;
@@ -2018,4 +2018,14 @@ void emit_slot_nil_read(Compiler *c, TyKind t, Buf *b);
 /* node as a plain scalar through its oint form: `sp_oint_val(<oint>, op)`
    when the node may be nil (cmp_operand_may_be_nil), else emit_expr */
 void emit_scalar_operand_op(Compiler *c, int node, const char *op, Buf *b);
+/* Ruby truthiness of an Integer / Float node as a C condition: `!o.nil`
+   for one with an oint form, else always true (the node evaluated) */
+void emit_oint_truthy(Compiler *c, int node, TyKind t, Buf *b);
+/* a method's Integer / Float return that can be nil is an sp_oint /
+   sp_ofloat (codegen.c): the C return type, the dead value where control
+   never arrives, and a C call of it boxed */
+int method_ret_is_oint(const Scope *s);
+void emit_method_ret_ctype(Compiler *c, const Scope *s, Buf *b);
+const char *method_ret_zero(Compiler *c, const Scope *s);
+void emit_boxed_ret_call(Compiler *c, const Scope *s, const char *call, Buf *b);
 #endif

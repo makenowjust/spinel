@@ -69,12 +69,12 @@ void emit_puts_one(Compiler *c, int arg, Buf *b, int indent) {
   TyKind t = comp_ntype(c, arg);
   emit_indent(b, indent);
   if (t == TY_INT) {
-    /* a nullable int at the sentinel prints as nil (an empty line) -- a value
-       position that reads the sentinel itself, not a strict Integer slot that
-       refuses it (#4896), so the nilable emitter is the right one here. */
+    /* a nullable int holding nil prints as nil (an empty line) -- a value
+       position that reads the nil itself, not a strict Integer slot that
+       refuses it (#4896), so the oint form is the right one here. */
     int tv = ++g_tmp;
-    buf_printf(b, "{ sp_int _t%d = ", tv); emit_int_expr_nilable(c, arg, b);
-    buf_printf(b, "; if (_t%d == SP_INT_NIL) putchar('\\n'); else printf(\"%%lld\\n\", (long long)_t%d); }\n", tv, tv);
+    buf_printf(b, "{ sp_oint _t%d = ", tv); emit_oint_expr(c, arg, TY_INT, b);
+    buf_printf(b, "; if (_t%d.nil) putchar('\\n'); else printf(\"%%lld\\n\", (long long)_t%d.v); }\n", tv, tv);
   }
   else if (t == TY_BIGINT) {
     /* NULL is this slot's nil (nil_value), so it prints the empty line
@@ -103,7 +103,7 @@ void emit_puts_one(Compiler *c, int arg, Buf *b, int indent) {
     buf_puts(b, "));\n");
   }
   else if (t == TY_FLOAT) {
-    buf_puts(b, "{ const char *_fs = sp_float_opt_to_s("); emit_expr(c, arg, b);
+    buf_puts(b, "{ const char *_fs = sp_float_opt_to_s("); emit_oint_expr(c, arg, TY_FLOAT, b);
     buf_puts(b, "); sp_puts_line(_fs); }\n");
   }
   else if (t == TY_STRING) {
@@ -133,10 +133,10 @@ void emit_puts_one(Compiler *c, int arg, Buf *b, int indent) {
        the end fills its gap with nil where analyze cannot see it -- and the
        test is nothing beside the print. */
     if (t == TY_INT_ARRAY)
-      buf_printf(b, "{ sp_int _e = sp_IntArray_get(_t%d, _t%d); if (_e == SP_INT_NIL) putchar('\\n');"
-                    " else printf(\"%%lld\\n\", (long long)_e); } }\n", ta, ti);
+      buf_printf(b, "{ sp_oint _e = sp_IntArray_oget(_t%d, _t%d); if (_e.nil) putchar('\\n');"
+                    " else printf(\"%%lld\\n\", (long long)_e.v); } }\n", ta, ti);
     else if (t == TY_FLOAT_ARRAY)
-      buf_printf(b, "{ const char *_fs = sp_float_opt_to_s(sp_FloatArray_get(_t%d, _t%d)); sp_puts_line(_fs); } }\n",
+      buf_printf(b, "{ const char *_fs = sp_float_opt_to_s(sp_FloatArray_oget(_t%d, _t%d)); sp_puts_line(_fs); } }\n",
                  ta, ti);
     else /* str */
       buf_printf(b, "{ const char *_ps = sp_StrArray_get(_t%d, _t%d); sp_puts_str_line(_ps); } }\n", ta, ti);
@@ -420,15 +420,15 @@ void emit_p_one(Compiler *c, int arg, Buf *b, int indent) {
   }
   emit_indent(b, indent);
   if (t == TY_INT) {
-    /* p of a nullable int at the sentinel prints "nil" -- a value position
-       that reads the sentinel itself, not a strict Integer slot that refuses
-       it (#4896), so the nilable emitter is the right one here. */
+    /* p of a nullable int holding nil prints "nil" -- a value position
+       that reads the nil itself, not a strict Integer slot that refuses
+       it (#4896), so the oint form is the right one here. */
     int tv = ++g_tmp;
-    buf_printf(b, "{ sp_int _t%d = ", tv); emit_int_expr_nilable(c, arg, b);
-    buf_printf(b, "; if (_t%d == SP_INT_NIL) fputs(\"nil\\n\", stdout); else printf(\"%%lld\\n\", (long long)_t%d); }\n", tv, tv);
+    buf_printf(b, "{ sp_oint _t%d = ", tv); emit_oint_expr(c, arg, TY_INT, b);
+    buf_printf(b, "; if (_t%d.nil) fputs(\"nil\\n\", stdout); else printf(\"%%lld\\n\", (long long)_t%d.v); }\n", tv, tv);
   }
   else if (t == TY_FLOAT) {
-    buf_puts(b, "{ const char *_fs = sp_float_opt_inspect("); emit_expr(c, arg, b);
+    buf_puts(b, "{ const char *_fs = sp_float_opt_inspect("); emit_oint_expr(c, arg, TY_FLOAT, b);
     buf_puts(b, "); sp_puts_line(_fs); }\n");
   }
   else if (t == TY_STRING) {
@@ -2728,8 +2728,7 @@ void emit_cond(Compiler *c, int id, Buf *b) {
       t == TY_METHOD || t == TY_IO || t == TY_ARGF || t == TY_ENUMERATOR || t == TY_OPENSTRUCT) {
     buf_puts(b, "(("); emit_expr(c, id, b); buf_puts(b, ") != 0)"); return;
   }
-  if (t == TY_INT)   { buf_puts(b, "(("); emit_expr(c, id, b); buf_puts(b, ") != SP_INT_NIL)"); return; }
-  if (t == TY_FLOAT) { buf_puts(b, "(!sp_float_is_nil("); emit_expr(c, id, b); buf_puts(b, "))"); return; }
+  if (oint_kind(t)) { emit_oint_truthy(c, id, t, b); return; }
   /* a nilable symbol slot holds (sp_sym)-1 for nil (default_value), so
      truthiness must test the sentinel -- `if @exit_triggered` with
      `@exit_triggered = nil` read always-true and ended doom's level on
@@ -5784,8 +5783,8 @@ static int emit_when_scalar_class(TyKind pt, const char *cn, int t, Buf *b) {
   int nilcls = sp_streq(cn, "NilClass");
   int univ = is_object_root(cn);
   if (yes < 0 || (!nilcls && (!yes || univ))) return 0;
-  if (pt == TY_INT) buf_printf(b, "(_t%d %s SP_INT_NIL)", t, nilcls ? "==" : "!=");
-  else if (pt == TY_FLOAT) buf_printf(b, "(%ssp_float_is_nil(_t%d))", nilcls ? "" : "!", t);
+  /* an Integer or Float scrutinee's temp is its sp_oint (emit_case_scrutinee) */
+  if (oint_kind(pt)) buf_printf(b, "(%s_t%d.nil)", nilcls ? "" : "!", t);
   else buf_printf(b, "(_t%d %s NULL)", t, nilcls ? "==" : "!=");
   return 1;
 }
@@ -5796,8 +5795,7 @@ static int emit_when_typed_test(Compiler *c, int cond, int t, TyKind pt, Buf *b)
      compared as a number, nil read as 0 and matched a 0. A String
      scrutinee holds nil as NULL. */
   if (nt_kind(c->nt, cond) == NK_NilNode && (pt == TY_INT || pt == TY_FLOAT || pt == TY_STRING)) {
-    if (pt == TY_INT) buf_printf(b, "(_t%d == SP_INT_NIL)", t);
-    else if (pt == TY_FLOAT) buf_printf(b, "sp_float_is_nil(_t%d)", t);
+    if (oint_kind(pt)) buf_printf(b, "(_t%d.nil)", t);
     else buf_printf(b, "(_t%d == NULL)", t);
   }
   else if (reidx >= 0 && pt == TY_STRING) {
