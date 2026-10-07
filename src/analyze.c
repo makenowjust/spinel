@@ -28509,6 +28509,22 @@ static void mark_nullable_int_locals(Compiler *c) {
       if (ci->cvar_types[cv] != TY_INT && ci->cvar_types[cv] != TY_FLOAT) continue;
       if (nullable_int_value(c, v)) { ci->cvar_nullable_int[cv] = 1; changed = 1; }
     }
+    /* `@@x ||= v` reads the slot before any write set it: that read is nil,
+       so the slot holds a nil (the `||=` / `&&=` test is on it) */
+    NT_FOREACH_KIND(nt, NK_ClassVariableOrWriteNode, id) {
+      ClassInfo *ci = NULL;
+      int cv = cvar_slot(c, id, &ci);
+      if (cv < 0 || ci->cvar_nullable_int[cv]) continue;
+      if (ci->cvar_types[cv] != TY_INT && ci->cvar_types[cv] != TY_FLOAT) continue;
+      ci->cvar_nullable_int[cv] = 1; changed = 1;
+    }
+    NT_FOREACH_KIND(nt, NK_ClassVariableAndWriteNode, id) {
+      ClassInfo *ci = NULL;
+      int cv = cvar_slot(c, id, &ci);
+      if (cv < 0 || ci->cvar_nullable_int[cv]) continue;
+      if (ci->cvar_types[cv] != TY_INT && ci->cvar_types[cv] != TY_FLOAT) continue;
+      ci->cvar_nullable_int[cv] = 1; changed = 1;
+    }
     /* A PARAMETER bound from such a value carries the sentinel into the callee,
        where boxing it (`other.inspect`, `x == other`) has the same problem the
        local marking exists to prevent. */

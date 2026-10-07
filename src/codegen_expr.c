@@ -623,7 +623,7 @@ static int fold_int_const_name(Compiler *c, const char *name, long long *out, in
    (e.g. loop bounds in optcarrot) regresses layout-sensitive hot loops. */
 void emit_int_divisor(Compiler *c, int node, Buf *b) {
   long long v;
-  if (fold_int_node(c, node, &v, 0)) { buf_printf(b, "%lldLL", v); return; }
+  if (fold_int_node(c, node, &v, 0)) { emit_int_lit(b, v); return; }
   /* The callers hand this straight to sp_imod, whose divisor is an sp_int.
      A boxed operand is an sp_RbVal struct, so emitting it raw did not
      produce a wrong number -- it produced C that does not compile, and
@@ -4224,7 +4224,7 @@ static void emit_expr_node(Compiler *c, int id, Buf *b) {
       buf_printf(b, "sp_bigl_get(%d)", bigl_intern(bigval));
       return;
     }
-    buf_printf(b, "%lldLL", nt_int(nt, id, "value", 0)); return;
+    emit_int_lit(b, nt_int(nt, id, "value", 0)); return;
   }
   if (sp_streq(ty, "FloatNode")) { const char *v = nt_content(nt, id); buf_puts(b, v ? v : "0.0"); return; }
   if (sp_streq(ty, "ImaginaryNode")) {
@@ -4484,6 +4484,23 @@ static void emit_expr_node(Compiler *c, int id, Buf *b) {
         buf_printf(b, " if (%ssp_poly_truthy(_t%d)) { ", is_or2 ? "!" : "", tc2);
         emit_guarded_poly_slot_assign(c, iv, tc2, b);
         buf_printf(b, "; sp_%sHash_set(_t%d, _t%d, _t%d); } _t%d; })", hn, ta2, tb2, tc2, tc2);
+      }
+      else if (oint_kind(vt)) {
+        /* an Integer or Float slot is read with its nil (a miss, a nil
+           default) and tested on it; the store takes the plain value (a nil
+           value widened the hash to poly), and the expression answers the
+           slot: its oint where the consumer takes one, else the value */
+        buf_printf(b, "%s _t%d = sp_%sHash_oget(_t%d, _t%d);", oint_ctype(vt), tc2, hn, ta2, tb2);
+        buf_printf(b, " if (%s_t%d.nil) { _t%d = %s(", is_or2 ? "" : "!", tc2, tc2, oint_of(vt));
+        { Buf rvb; memset(&rvb, 0, sizeof rvb);
+          Buf *svp = g_pre; g_pre = b;
+          emit_expr(c, iv, &rvb);
+          g_pre = svp;
+          buf_puts(b, rvb.p ? rvb.p : "0");
+          free(rvb.p); }
+        buf_printf(b, "); sp_%sHash_set(_t%d, _t%d, _t%d.v); } ", hn, ta2, tb2, tc2);
+        if (node_is_oint(c, id)) buf_printf(b, "_t%d; })", tc2);
+        else buf_printf(b, "%s(_t%d); })", oint_arg(vt), tc2);
       }
       else {
         buf_printf(b, "%s _t%d = sp_%sHash_get(_t%d, _t%d);", c_type_name(vt), tc2, hn, ta2, tb2);

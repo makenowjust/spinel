@@ -11791,6 +11791,8 @@ static int emit_ivar_cvar_write_stmt(Compiler *c, int id, Buf *b, int indent, co
     emit_slot_truthy(ot, ref, b);
     buf_printf(b, is_or ? ") { %s = " : " { %s = ", ref);
     if (ot == TY_POLY) emit_boxed(c, v, b);
+    /* an oint static takes the value with its nil */
+    else if (oint_kind(ot) && cvar_is_oint(c, sc, h.idx)) emit_oint_expr(c, v, ot, b);
     else emit_coerce(c, v, ot, CO_HOLD, "a class variable's `||=` or `&&=`", b);
     buf_puts(b, "; ");
     emit_cvar_set_flag(c, sc, nm, 0, b);
@@ -13748,6 +13750,13 @@ void emit_stmt_tail_inner(Compiler *c, int id, Buf *b, int indent) {
       buf_printf(b, "%s;\n", bx9.p ? bx9.p : "sp_box_nil()");
       free(bx9.p);
     }
+    /* the slot's form against the result's: an oint slot into a plain
+       result unwraps (a nil there is the analysis's miss, raised, not 0), a
+       plain slot into an oint result wraps */
+    else if (oint_kind(lt9) && lv9 && slot_is_oint(lv9) && !(g_result_var ? g_result_oint : g_ret_oint))
+      buf_printf(b, "%s(%s);\n", oint_arg(lt9), lref9);
+    else if (oint_kind(lt9) && lv9 && !slot_is_oint(lv9) && (g_result_var ? g_result_oint : g_ret_oint))
+      buf_printf(b, "%s(%s);\n", oint_of(lt9), lref9);
     else buf_printf(b, "%s;\n", lref9);
     return;
   }
@@ -13779,10 +13788,17 @@ void emit_stmt_tail_inner(Compiler *c, int id, Buf *b, int indent) {
     emit_indent(b, indent); emit_tail_lead(b);
     if (want_poly9 && gt9 != TY_POLY) {
       Buf bx9; memset(&bx9, 0, sizeof bx9);
-      emit_boxed_text(c, gt9, gref9, &bx9);
+      /* an oint static boxes as that oint */
+      if (oint_kind(gt9) && gvar_is_oint(c, h9.lv)) buf_printf(&bx9, "%s(%s)", oint_box(gt9), gref9);
+      else emit_boxed_text(c, gt9, gref9, &bx9);
       buf_printf(b, "%s;\n", bx9.p ? bx9.p : "sp_box_nil()");
       free(bx9.p);
     }
+    /* the static's form against the result's, as the local arm above */
+    else if (oint_kind(gt9) && gvar_is_oint(c, h9.lv) && !(g_result_var ? g_result_oint : g_ret_oint))
+      buf_printf(b, "%s(%s);\n", oint_arg(gt9), gref9);
+    else if (oint_kind(gt9) && !gvar_is_oint(c, h9.lv) && (g_result_var ? g_result_oint : g_ret_oint))
+      buf_printf(b, "%s(%s);\n", oint_of(gt9), gref9);
     else buf_printf(b, "%s;\n", gref9);
     return;
   }

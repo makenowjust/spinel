@@ -2172,6 +2172,15 @@ static void emit_cell_decl(Compiler *c, Scope *s, LocalVar *lv, Buf *b) {
          bits through the int slot: *_cell_x is then a real sp_float lvalue, so
          the ordinary read / write / compound-assign paths work unchanged. The
          cell holds no GC pointer, so no cell scan is needed. */
+      /* an Integer or Float slot holding its nil beside the value: a cell of the oint */
+      if (oint_kind(lv->type) && slot_is_oint(lv)) {
+        const char *ot = oint_ctype(lv->type);
+        buf_printf(b, "    %s *_cell_%s = (%s *)sp_gc_alloc(sizeof(%s), NULL, NULL);\n", ot, lv->name, ot, ot);
+        buf_printf(b, "    SP_GC_ROOT(_cell_%s);\n", lv->name);
+        if (lv->is_param) buf_printf(b, "    *_cell_%s = lv_%s;\n", lv->name, lv->name);
+        else buf_printf(b, "    *_cell_%s = %s;\n", lv->name, oint_nil(lv->type));
+        return;
+      }
       if (lv->type == TY_FLOAT) {
         buf_printf(b, "    sp_float *_cell_%s = (sp_float *)sp_gc_alloc(sizeof(sp_float), NULL, NULL);\n", lv->name);
         buf_printf(b, "    SP_GC_ROOT(_cell_%s);\n", lv->name);

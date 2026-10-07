@@ -11198,7 +11198,11 @@ int emit_range_call(Compiler *c, int id, Buf *b) {
                         " sp_IntArray_push(_t%d, _t%d.first + _i%d * _t%d); _t%d; })",
                      tc, t, ti, t, tf, tf, tn, tf, tc, tf, tf, t, tf, ti, tf);
         }
-        else buf_printf(b, "(_t%d.first)", t);
+        else {
+          /* #begin: nil for a beginless range, with its nil where the
+             consumer takes the oint (node_is_oint) */
+          oint_open(c, id, TY_INT, b); buf_printf(b, "sp_range_begin_o(_t%d)", t); oint_close(c, id, b);
+        }
       }
       else if (sp_streq(name, "max")) {  /* largest enumerated element (direction-aware), nil when empty */
         oint_open(c, id, TY_INT, b); buf_printf(b, "sp_range_max_v(_t%d)", t); oint_close(c, id, b);
@@ -11224,8 +11228,11 @@ int emit_range_call(Compiler *c, int id, Buf *b) {
       }
       else if (is_range_end_reader(name)) {
         /* #last enumerates, so an endless range has none (#3668) */
-        if (argc == 0 && sp_streq(name, "last"))
+        if (argc == 0 && sp_streq(name, "last")) {
+          oint_lift_open(c, id, TY_INT, b);
           buf_printf(b, "sp_range_last_i(_t%d)", t);
+          oint_lift_close(c, id, b);
+        }
         else if (argc == 1 && sp_streq(name, "last")) {
           /* last(n): collect up to n elements ending at last */
           int tf = ++g_tmp, tn = ++g_tmp, ts = ++g_tmp, te = ++g_tmp;

@@ -2003,6 +2003,8 @@ void ivar_nilbit_clear(Compiler *c, int cid, int iv, const char *obj, char *out,
    slot is an oint (a field with a nil bit, an oint static) */
 int ivar_node_slot(Compiler *c, int node, int *cid, int *iv);
 int ivar_read_slot_is_oint(Compiler *c, int node);
+/* an Integer literal as a C constant (INT64_MIN spelled as an expression) */
+void emit_int_lit(Buf *b, long long v);
 /* a global's / class-level ivar's / cvar's static is an sp_oint */
 int gvar_is_oint(Compiler *c, const LocalVar *g);
 int civ_is_oint(Compiler *c, int cid, int iv);

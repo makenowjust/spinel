@@ -6696,7 +6696,8 @@ static int pd_hoist(Compiler *c, int id, const char *name, Buf *b, size_t from, 
   }
   /* the site: the result temp from the call */
   b->len = from; b->p[from] = 0;
-  emit_ctype(c, rct, b);
+  /* the temp takes the plan's own slot type: its oint where the plan answers one */
+  if (g_pd_ret_ctype) buf_puts(b, g_pd_ret_ctype); else emit_ctype(c, rct, b);
   buf_printf(b, " _t%d = sp_pd_%d(", tr, fn);
   for (int a = 0; a < np; a++) buf_printf(b, "%s_t%d", a ? ", " : "", pid[a]);
   buf_puts(b, ");");

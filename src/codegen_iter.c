@@ -2668,7 +2668,9 @@ void emit_block_binds(Compiler *c, int blk, const int *yargs, int yc,
     else {
       LocalVar *bl = scope_local(bsc, bp);
       TyKind bt = bl ? bl->type : TY_INT;
-      buf_puts(b, bt == TY_RANGE ? "(sp_Range){0}" : default_value_from_compiler(c, bt));
+      /* a parameter the yield leaves out is nil: an oint slot holds that */
+      if (bl && oint_kind(bt) && slot_is_oint(bl)) buf_puts(b, oint_nil(bt));
+      else buf_puts(b, bt == TY_RANGE ? "(sp_Range){0}" : default_value_from_compiler(c, bt));
     }
     buf_puts(b, as_expr ? "; " : ";\n");
   }
@@ -3069,6 +3071,7 @@ void emit_block_invoke(Compiler *c, int args_node, Buf *b, int indent, int as_ex
       Buf *svp3 = g_pre; int svi3 = g_indent; g_pre = b; g_indent = 0;
       if (void_tail) emit_expr(c, tl3, &tb);
       else if (g_ie_res_poly) emit_boxed(c, tl3, &tb);
+      else if (g_ie_next_oint) emit_oint_expr(c, tl3, nx_bt, &tb);   /* the next-var is the oint */
       else emit_expr_slot(c, tl3, nx_bt, &tb);
       g_pre = svp3; g_indent = svi3;
       if (void_tail) buf_puts(b, "(void)(");
@@ -5352,7 +5355,7 @@ static int iter_range_upto_arms(Compiler *c, int id, Buf *b, int indent, const N
        enumerated from nil, as the literal `(..3).each` above refuses; it
        walked up from INTPTR_MIN, whose first value read back as nil */
     emit_indent(b, indent);
-    buf_printf(b, "if (_t%d.first == INTPTR_MIN && _t%d > 0) sp_range_nil_begin_raise();\n", t, ts);
+    buf_printf(b, "if (_t%d.nobeg && _t%d > 0) sp_range_nil_begin_raise();\n", t, ts);
     if (clv && clv->type == TY_POLY) {
       int tc = ++g_tmp;
       emit_indent(b, indent);

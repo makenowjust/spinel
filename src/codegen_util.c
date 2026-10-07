@@ -1700,7 +1700,12 @@ static int subtree_has_param_named(const NodeTable *nt, int id, const char *nm) 
    is inlined inside a proc function (#4127). */
 static void emit_fresh_cell(Compiler *c, LocalVar *lv, const char *cellv, Buf *b, int indent) {
   emit_indent(b, indent);
-  if (lv->type == TY_FLOAT) {
+  /* an Integer or Float slot holding its nil beside the value: a cell of the oint */
+  if (oint_kind(lv->type) && slot_is_oint(lv)) {
+    const char *ot = oint_ctype(lv->type);
+    buf_printf(b, "%s = (%s *)sp_gc_alloc(sizeof(%s), NULL, NULL); *%s = %s;\n", cellv, ot, ot, cellv, oint_nil(lv->type));
+  }
+  else if (lv->type == TY_FLOAT) {
     buf_printf(b, "%s = (sp_float *)sp_gc_alloc(sizeof(sp_float), NULL, NULL); *%s = 0.0;\n", cellv, cellv);
   }
   else if (lv->type == TY_POLY) {
@@ -4975,6 +4980,14 @@ int ivar_node_slot(Compiler *c, int node, int *cid, int *iv) {
   *cid = h.cid; *iv = h.idx;
   return h.cls_slot ? 2 : 1;
 }
+/* An Integer literal as a C constant. INT64_MIN has no literal of its own:
+   `-9223372036854775808LL` negates a constant too wide for long long (C reads
+   it unsigned, a -Werror), so it is spelled as the expression. */
+void emit_int_lit(Buf *b, long long v) {
+  if (v == INT64_MIN) buf_puts(b, "(-9223372036854775807LL - 1)");
+  else buf_printf(b, "%lldLL", v);
+}
+
 int ivar_read_slot_is_oint(Compiler *c, int node) {
   int cid, iv;
   int kind = ivar_node_slot(c, node, &cid, &iv);
@@ -5044,9 +5057,34 @@ int node_is_oint(Compiler *c, int node) {
   case NK_GlobalVariableReadNode:
     return nullable_int_value(c, node);
   case NK_InstanceVariableWriteNode:
-    /* `@x = v` as an expression answers the slot it wrote: its oint where
-       the field carries a nil bit (or the static is an oint) */
+  case NK_InstanceVariableOrWriteNode:
+  case NK_InstanceVariableAndWriteNode:
+  case NK_InstanceVariableOperatorWriteNode:
+    /* `@x = v` (`||=`, `&&=`, `op=`) as an expression answers the slot it
+       wrote: its oint where the field carries a nil bit (or the static is
+       an oint) */
     return ivar_read_slot_is_oint(c, node);
+  case NK_GlobalVariableWriteNode:
+  case NK_GlobalVariableOrWriteNode:
+  case NK_GlobalVariableAndWriteNode:
+  case NK_GlobalVariableOperatorWriteNode: {
+    /* a global's write answers its static: the oint where that is one */
+    const char *gn = nt_str(nt, node, "name");
+    LocalVar *g = gn ? comp_gvar(c, gn) : NULL;
+    return g && gvar_is_oint(c, g);
+  }
+  case NK_ClassVariableWriteNode:
+  case NK_ClassVariableOrWriteNode:
+  case NK_ClassVariableAndWriteNode:
+  case NK_ClassVariableOperatorWriteNode: {
+    HolderRef h;
+    if (!holder_of_node_in(c, node, g_class_body_id, &h)) return 0;
+    return cvar_is_oint(c, h.cid, h.idx);
+  }
+  case NK_IndexOrWriteNode:
+  case NK_IndexAndWriteNode:
+    /* `h[k] ||= v`: the slot read with its nil (the `&&=` arm keeps it) */
+    return nullable_int_value(c, node);
   case NK_ParenthesesNode: {
     /* `(expr)` is its expression's form */
     int u = unwrap_parens(c, node);
@@ -5149,10 +5187,27 @@ int node_is_oint(Compiler *c, int node) {
       if (a2a && a2n >= 2 && nt_kind(nt, a2a[a2n - 1]) == NK_KeywordHashNode) return 1;
     }
     /* a class's own methods (File.delete, IO::Buffer.size_of) are no container's */
-    if (r >= 0 && (nt_kind(nt, r) == NK_ConstantReadNode || nt_kind(nt, r) == NK_ConstantPathNode)) return 0;
+    if (r >= 0 && (nt_kind(nt, r) == NK_ConstantReadNode || nt_kind(nt, r) == NK_ConstantPathNode) &&
+        !oint_kind(rt) && rt != TY_COMPLEX && rt != TY_RATIONAL && rt != TY_BIGINT)   /* a number constant (Float::INFINITY) is a value */
+      return 0;
     /* the runtime functions that answer an sp_oint (RUNTIME-API.md) */
     if ((sp_streq(nm, "bsearch") || sp_streq(nm, "bsearch_index")) && blk >= 0) return 1;
-    if ((sp_streq(nm, "nonzero?") && oint_kind(rt)) || (sp_streq(nm, "infinite?") && rt == TY_FLOAT)) return 1;
+    if ((sp_streq(nm, "nonzero?") && oint_kind(rt)) ||
+        (sp_streq(nm, "infinite?") && (rt == TY_FLOAT || rt == TY_INT || rt == TY_COMPLEX || rt == TY_RATIONAL || rt == TY_BIGINT)))
+      return 1;
+    /* a Method object's call runs its target: the target's own answer */
+    if (r >= 0 && rt == TY_METHOD && is_method_invoke(nm)) {
+      int mn = method_recv_node(c, r);
+      int target = mn >= 0 ? method_obj_target_mi(c, mn) : -1;
+      /* the direct arms (a self-less target called by name, a bound target
+         called through emit_bound_method_call) answer the target's own
+         form; the fn-cast arm answers the plain value */
+      int recvless = mn >= 0 && nt_ref(nt, mn, "receiver") < 0;
+      int selfless = recvless && !(target >= 0 && c->scopes[target].class_id >= 0 && !c->scopes[target].is_cmethod);
+      if (target >= 0 && (selfless || !method_call_param_shift(c, mn, target)))
+        return method_ret_is_oint(&c->scopes[target]);
+      return 0;
+    }
     /* a search with its needle; without one the call is an arity error, no nil */
     if (rt == TY_STRING && an2 >= 1 && (sp_streq(nm, "index") || sp_streq(nm, "rindex") ||
                                         sp_streq(nm, "byteindex") || sp_streq(nm, "byterindex"))) return 1;
