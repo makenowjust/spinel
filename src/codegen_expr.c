@@ -4500,7 +4500,7 @@ static void emit_expr_node(Compiler *c, int id, Buf *b) {
       buf_printf(b, "; %s _t%d = sp_%sArray_oget(_t%d, _t%d);", oint_ctype(et), tc2, k, ta2, tb2);
       buf_printf(b, " if (%s_t%d.nil) { ", is_or2 ? "" : "!", tc2);
       emit_guarded_oint_slot_assign(c, iv, et, tc2, b);
-      buf_printf(b, "; sp_%sArray_oset(_t%d, _t%d, _t%d); } _t%d.v; })", k, ta2, tb2, tc2, tc2);
+      buf_printf(b, "; sp_%sArray_oset(_t%d, _t%d, _t%d); } _t%d%s; })", k, ta2, tb2, tc2, tc2, node_is_oint(c, id) ? "" : ".v");
     }
     else if (irr.elem == TY_STRING) {
       buf_printf(b, "({ sp_StrArray *_t%d = ", ta2); emit_expr(c, ir, b);

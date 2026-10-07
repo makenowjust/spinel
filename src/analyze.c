@@ -25789,7 +25789,8 @@ int nullable_scalar_nil_only_call(Compiler *c, int id) {
    statements of class k's initialize, or of the initialize it inherits. */
 int ivar_assigned_in_initialize(Compiler *c, int k, const char *ivn) {
   const NodeTable *nt = c->nt;
-  int mi = comp_method_in_chain(c, k, "initialize", NULL);
+  int defcls = -1;
+  int mi = comp_method_in_chain(c, k, "initialize", &defcls);
   if (mi < 0 || !ivn) return 0;
   int body = c->scopes[mi].body;
   if (body < 0) return 0;
@@ -25802,6 +25803,10 @@ int ivar_assigned_in_initialize(Compiler *c, int k, const char *ivn) {
       const char *wn = nt_str(nt, x, "name");
       if (wn && sp_streq(wn, ivn)) return 1;
     }
+    /* a `super` statement runs the parent's initialize, every path of it */
+    if ((nt_kind(nt, w) == NK_SuperNode || nt_kind(nt, w) == NK_ForwardingSuperNode) &&
+        defcls >= 0 && c->classes[defcls].parent >= 0 && c->classes[defcls].parent != defcls &&
+        ivar_assigned_in_initialize(c, c->classes[defcls].parent, ivn)) return 1;
     if (nt_kind(nt, w) == NK_MultiWriteNode) {
       int ln = 0; const int *ls = nt_arr(nt, w, "lefts", &ln);
       for (int j = 0; j < ln; j++)

@@ -9272,7 +9272,17 @@ void emit_boxed_writer_arms(Compiler *c, const char *base, const char *nm,
       emit_frozen_obj_guard(c, k, opn, b);
       free(opn); }
     buf_printf(b, "((sp_%s *)%s)->iv_%s = ", c->classes[k].c_name, objp, iv_c(base));
-    if (ivt == TY_POLY && at != TY_POLY) emit_boxed_text(c, at, src, b);
+    /* a field with a nil bit: the bit in step with the value written */
+    if (oint_kind(ivt) && iv >= 0 && ivar_has_nilbit(c, k, iv) &&
+        (at == ivt || at == TY_POLY || at == TY_NIL)) {
+      char ot[300], pfx[300];
+      if (at == TY_POLY) snprintf(ot, sizeof ot, "%s(%s)", oint_unbox(ivt), src);
+      else if (at == TY_NIL) snprintf(ot, sizeof ot, "%s", oint_nil(ivt));
+      else snprintf(ot, sizeof ot, "%s(%s)", oint_of(ivt), src);
+      snprintf(pfx, sizeof pfx, "((sp_%s *)%s)->", c->classes[k].c_name, objp);
+      emit_ivar_text_nilbit(c, k, iv, pfx, ot, b);
+    }
+    else if (ivt == TY_POLY && at != TY_POLY) emit_boxed_text(c, at, src, b);
     else if (at == TY_POLY && ivt != TY_POLY) emit_unbox_text(c, ivt, src, b);
     else { emit_obj_upcast_prefix(c, ivt, at, b); buf_puts(b, src); }
     buf_puts(b, "; break;");

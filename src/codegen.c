@@ -12413,7 +12413,9 @@ static void emit_obj_hashkey_dispatch(Compiler *c, Buf *b) {
     const char *dcn = c->classes[defcls].c_name;
     const char *slf = c->classes[defcls].is_value_type ? "*" : "";
     buf_printf(b, "    case %d: ", comp_class_index(c, c->classes[k].name));
-    if (m->ret == TY_INT)
+    if (m->ret == TY_INT && method_ret_is_oint(m))   /* a nil hash: TypeError */
+      buf_printf(b, "return sp_oint_arg(sp_%s_%s(%s(sp_%s *)p));\n", dcn, mc(m->name), slf, dcn);
+    else if (m->ret == TY_INT)
       buf_printf(b, "return (sp_int)sp_%s_%s(%s(sp_%s *)p);\n", dcn, mc(m->name), slf, dcn);
     else
       buf_printf(b, "return sp_rbval_hash_key(sp_%s_%s(%s(sp_%s *)p));\n", dcn, mc(m->name), slf, dcn);

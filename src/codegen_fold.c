@@ -5325,7 +5325,9 @@ int emit_collect_expr(Compiler *c, int id, Buf *b) {
   }
   else if (p0) {
     emit_indent(g_pre, bodyIndent);
-    buf_printf(g_pre, "lv_%s = sp_%sArray_get(_t%d, _t%d);\n", p0, k, trecv, ti);
+    /* a param that holds its nil takes the element with it */
+    int o0 = clv0 && oint_kind(clv0->type) && slot_is_oint(clv0) && !sp_streq(k, "Poly");
+    buf_printf(g_pre, "lv_%s = sp_%sArray_%s(_t%d, _t%d);\n", p0, k, o0 ? "oget" : "get", trecv, ti);
   }
   /* a `*rest` param: splat-only wraps the whole element; alongside required
      params it binds empty (scalar elements never distribute) */
@@ -10761,6 +10763,38 @@ int dispatch_arms_disagree(Compiler *c, int cid, const char *name) {
 
 /* One arm of a per-arm dispatch: the call of `kmi` (defined in class `kd`) with
    its own argument list, assigned to the result temp. */
+/* the dispatch switch being emitted holds an Integer / Float answer that
+   can be nil (node_is_oint of the call) as the oint */
+static int g_disp_ro = 0;
+/* `_t<rtmp> = <arm call>` for an arm whose method is `s`, in the switch's
+   form: an arm answering the oint is unwrapped into a plain switch, a plain
+   arm lifted into an oint one; a void arm answers nil */
+static void emit_disp_arm_assign(Compiler *c, const Scope *s, const char *call, TyKind ret,
+                                 TyKind disp_ret, int rtmp, Buf *b) {
+  TyKind arm_ret = (TyKind)s->ret;
+  int arm_o = oint_kind(arm_ret) && method_ret_is_oint(s);
+  /* a void dispatch's int temp is a dummy: an arm answering a value
+     (a proc-form clone's box) is run for its effect */
+  if (method_is_void(s) || ret == TY_VOID || ret == TY_NIL) {
+    buf_printf(b, "(void)(%s); _t%d = %s; ", call, rtmp, g_disp_ro ? oint_nil(disp_ret) : default_value_from_compiler(c, disp_ret));
+    return;
+  }
+  buf_printf(b, "_t%d = ", rtmp);
+  if (arm_ret != ret && ret == TY_POLY) {
+    if (arm_o) buf_printf(b, "%s(%s)", oint_box(arm_ret), call);
+    else emit_boxed_text(c, arm_ret, call, b);
+  }
+  /* a proc-form clone answers boxed, whatever slot the switch fills */
+  else if (arm_ret == TY_POLY && disp_ret != TY_POLY) {
+    if (g_disp_ro) buf_printf(b, "%s(%s)", oint_unbox(disp_ret), call);
+    else emit_unbox_text(c, disp_ret, call, b);
+  }
+  else if (g_disp_ro && !arm_o) buf_printf(b, "%s(%s)", oint_of(disp_ret), call);
+  else if (!g_disp_ro && arm_o) buf_printf(b, "%s(%s)", oint_arg(arm_ret), call);
+  else buf_puts(b, call);
+  buf_puts(b, "; ");
+}
+
 static void emit_dispatch_arm_call(Compiler *c, int kd, int kmi, const char *selfptr,
                                    int argsNode, int blk_tmp, TyKind ret, TyKind disp_ret,
                                    int rtmp, Buf *b) {
@@ -10786,21 +10820,7 @@ static void emit_dispatch_arm_call(Compiler *c, int kd, int kmi, const char *sel
   buf_puts(&call, ")");
   buf_puts(b, "{ ");
   if (apre.p) buf_puts(b, apre.p);
-  TyKind arm_ret = (TyKind)s->ret;
-  if (method_is_void(s))
-    buf_printf(b, "%s; _t%d = %s; ", call.p, rtmp, default_value_from_compiler(c, disp_ret));
-  else if (arm_ret != ret && ret == TY_POLY) {
-    buf_printf(b, "_t%d = ", rtmp);
-    emit_boxed_text(c, arm_ret, call.p, b);
-    buf_puts(b, "; ");
-  }
-  /* a proc-form clone answers boxed, whatever slot the switch fills */
-  else if (arm_ret == TY_POLY && disp_ret != TY_POLY) {
-    buf_printf(b, "_t%d = ", rtmp);
-    emit_unbox_text(c, disp_ret, call.p, b);
-    buf_puts(b, "; ");
-  }
-  else buf_printf(b, "_t%d = %s; ", rtmp, call.p);
+  emit_disp_arm_assign(c, s, call.p, ret, disp_ret, rtmp, b);
   buf_puts(b, "break; }");
   free(apre.p); free(call.p);
 }
@@ -10902,7 +10922,7 @@ static void emit_dispatch_per_arm(Compiler *c, int cid, const char *name, const 
   if (want_blk && blk_node >= 0) blk_tmp = emit_blk_proc_tmp(c, blk_node);
   int rtmp = ++g_tmp;
   buf_puts(b, "({ ");
-  emit_ctype(c, disp_ret, b);
+  if (g_disp_ro) buf_puts(b, oint_ctype(disp_ret)); else emit_ctype(c, disp_ret, b);
   buf_printf(b, " _t%d; switch (", rtmp);
   emit_obj_dispatch_key(c, cid, selfptr, b);
   buf_puts(b, ") {");
@@ -10922,7 +10942,7 @@ static void emit_dispatch_per_arm(Compiler *c, int cid, const char *name, const 
     emit_dispatch_arm_call(c, defcls, dmi, selfptr, argsNode, blk_tmp, ret, disp_ret, rtmp, b);
   else
     buf_printf(b, "_t%d = %s; break;", rtmp,
-               ret == TY_POLY ? "sp_box_nil()" : default_value_from_compiler(c, disp_ret));
+               ret == TY_POLY ? "sp_box_nil()" : g_disp_ro ? oint_nil(disp_ret) : default_value_from_compiler(c, disp_ret));
   buf_printf(b, " } _t%d; })", rtmp);
 }
 
@@ -11040,8 +11060,16 @@ static int reopen_takes_boxed_self(Compiler *c, int cid) {
                 sp_streq(cn, "Hash") || sp_streq(cn, "Numeric"));
 }
 
+static void emit_dispatch_in(Compiler *c, int cid, const char *name,
+                             const char *selfptr, int argsNode, int blk_node, Buf *b);
 void emit_dispatch(Compiler *c, int cid, const char *name,
                           const char *selfptr, int argsNode, int blk_node, Buf *b) {
+  int sv_disp_ro = g_disp_ro;
+  emit_dispatch_in(c, cid, name, selfptr, argsNode, blk_node, b);
+  g_disp_ro = sv_disp_ro;
+}
+static void emit_dispatch_in(Compiler *c, int cid, const char *name,
+                             const char *selfptr, int argsNode, int blk_node, Buf *b) {
   const NodeTable *nt = c->nt;
   int defcls = cid;
   /* the target is the plan of the call being emitted (g_nd_call_id) when
@@ -11175,6 +11203,9 @@ void emit_dispatch(Compiler *c, int cid, const char *name,
   int virtual = (is_scalar_ret(ret) || ret_is_void) && form >= CP_SWITCH;
   nd_stamp(g_nd_call_id, virtual ? ND_SWITCH : ND_DIRECT);
   if (!virtual && m) nd_callee(c, g_nd_call_id, mi, defcls, 0);
+  g_disp_ro = virtual && !ret_is_void && oint_kind(disp_ret) && g_nd_call_id >= 0 &&
+              nt_str(nt, g_nd_call_id, "name") && sp_streq(nt_str(nt, g_nd_call_id, "name"), name) &&
+              node_is_oint(c, g_nd_call_id);
   if (virtual && form == CP_PER_ARM) {
     emit_dispatch_per_arm(c, cid, name, selfptr, argsNode, blk_node, mi, defcls, ret, disp_ret, b);
     return;
@@ -11560,7 +11591,7 @@ else {
   /* runtime dispatch on cls_id (GCC statement-expression) */
   int rtmp = ++g_tmp;
   buf_puts(b, "({ ");
-  emit_ctype(c, disp_ret, b);
+  if (g_disp_ro) buf_puts(b, oint_ctype(disp_ret)); else emit_ctype(c, disp_ret, b);
   buf_printf(b, " _t%d; switch (", rtmp);
   emit_obj_dispatch_key(c, cid, selfptr, b);
   buf_puts(b, ") {");
@@ -11575,35 +11606,16 @@ else {
        loops in codegen_call.c (issue #1583). */
     if (!scope_has_callable_symbol(c, kmi)) continue;
     nd_callee(c, g_nd_call_id, kmi, kd, 1);
-    TyKind arm_ret = (TyKind)c->scopes[kmi].ret;
     const char *kfn = mc(c->scopes[kmi].name);
-    if (method_is_void(&c->scopes[kmi])) {
-      /* override emitted as a void C function (method_is_void: VOID/NIL/UNKNOWN
-         ret, or initialize) -- call it, assign nil/zero to the result temp */
-      buf_printf(b, " case %d: sp_%s_%s((sp_%s *)%s", k,
-                 c->classes[kd].c_name, kfn, c->classes[kd].c_name, selfptr);
-      for (int a = 0; a < np; a++) emit_arm_arg(c, &c->scopes[kmi], a, atmp[a], atmp_ty[a], b);
-      buf_printf(b, "); _t%d = %s; break;", rtmp, default_value_from_compiler(c, disp_ret));
-    }
-    else if (arm_ret != ret && ret == TY_POLY) {
-      /* arm returns a concrete type but switch expects sp_RbVal: box it */
-      buf_printf(b, " case %d: { ", k);
-      Buf _bx; memset(&_bx, 0, sizeof _bx);
-      buf_printf(&_bx, "sp_%s_%s((sp_%s *)%s",
-                 c->classes[kd].c_name, kfn, c->classes[kd].c_name, selfptr);
-      for (int a = 0; a < np; a++) emit_arm_arg(c, &c->scopes[kmi], a, atmp[a], atmp_ty[a], &_bx);
-      buf_puts(&_bx, ")");
-      buf_printf(b, "_t%d = ", rtmp);
-      emit_boxed_text(c, arm_ret, _bx.p ? _bx.p : "0", b);
-      free(_bx.p);
-      buf_puts(b, "; break; }");
-    }
-    else {
-      buf_printf(b, " case %d: _t%d = sp_%s_%s((sp_%s *)%s", k, rtmp,
-                 c->classes[kd].c_name, kfn, c->classes[kd].c_name, selfptr);
-      for (int a = 0; a < np; a++) emit_arm_arg(c, &c->scopes[kmi], a, atmp[a], atmp_ty[a], b);
-      buf_puts(b, "); break;");
-    }
+    Buf _ac; memset(&_ac, 0, sizeof _ac);
+    buf_printf(&_ac, "sp_%s_%s((sp_%s *)%s",
+               c->classes[kd].c_name, kfn, c->classes[kd].c_name, selfptr);
+    for (int a = 0; a < np; a++) emit_arm_arg(c, &c->scopes[kmi], a, atmp[a], atmp_ty[a], &_ac);
+    buf_puts(&_ac, ")");
+    buf_printf(b, " case %d: { ", k);
+    emit_disp_arm_assign(c, &c->scopes[kmi], _ac.p, ret, disp_ret, rtmp, b);
+    buf_puts(b, "break; }");
+    free(_ac.p);
   }
   /* When the method is defined only in descendants (m == NULL), the base class
      has no implementation. The default arm is unreachable (self is always a
@@ -11611,35 +11623,21 @@ else {
      call to a nonexistent sp_<base>_<name>. */
   if (!m) {
     buf_printf(b, " default: _t%d = %s; break; } _t%d; })", rtmp,
-               ret == TY_POLY ? "sp_box_nil()" : default_value_from_compiler(c, disp_ret), rtmp);
+               ret == TY_POLY ? "sp_box_nil()" : g_disp_ro ? oint_nil(disp_ret) : default_value_from_compiler(c, disp_ret), rtmp);
     free(atmp); free(atmp_ty); arg_layout_free(&L);
     return;
   }
   /* default arm uses the base-class (defcls) implementation */
-  TyKind def_ret = (TyKind)m->ret;
-  if (method_is_void(m)) {
-    buf_printf(b, " default: sp_%s_%s((sp_%s *)%s",
+  {
+    Buf _dc; memset(&_dc, 0, sizeof _dc);
+    buf_printf(&_dc, "sp_%s_%s((sp_%s *)%s",
                c->classes[defcls].c_name, mc(mname), c->classes[defcls].c_name, selfptr);
-    for (int a = 0; a < np; a++) buf_printf(b, ", _t%d", atmp[a]);
-    buf_printf(b, "); _t%d = %s; break;", rtmp, default_value_from_compiler(c, disp_ret));
-  }
-  else if (def_ret != ret && ret == TY_POLY) {
-    buf_printf(b, " default: { ");
-    Buf _bx; memset(&_bx, 0, sizeof _bx);
-    buf_printf(&_bx, "sp_%s_%s((sp_%s *)%s",
-               c->classes[defcls].c_name, mc(mname), c->classes[defcls].c_name, selfptr);
-    for (int a = 0; a < np; a++) buf_printf(&_bx, ", _t%d", atmp[a]);
-    buf_puts(&_bx, ")");
-    buf_printf(b, "_t%d = ", rtmp);
-    emit_boxed_text(c, def_ret, _bx.p ? _bx.p : "0", b);
-    free(_bx.p);
-    buf_puts(b, "; break; }");
-  }
-  else {
-    buf_printf(b, " default: _t%d = sp_%s_%s((sp_%s *)%s", rtmp,
-               c->classes[defcls].c_name, mc(mname), c->classes[defcls].c_name, selfptr);
-    for (int a = 0; a < np; a++) buf_printf(b, ", _t%d", atmp[a]);
-    buf_puts(b, "); break;");
+    for (int a = 0; a < np; a++) buf_printf(&_dc, ", _t%d", atmp[a]);
+    buf_puts(&_dc, ")");
+    buf_puts(b, " default: { ");
+    emit_disp_arm_assign(c, m, _dc.p, ret, disp_ret, rtmp, b);
+    buf_puts(b, "break; }");
+    free(_dc.p);
   }
   buf_printf(b, " } _t%d; })", rtmp);
   free(atmp); free(atmp_ty); arg_layout_free(&L);

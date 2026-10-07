@@ -16338,7 +16338,7 @@ int emit_arg_type_guards(Compiler *c, int id, Buf *b) {
     {
       if (badc) {
         TyKind rty5 = repr_of(c, id).as_ty;
-        const char *dv5 = default_value_from_compiler(c, rty5);
+        const char *dv5 = oint_kind(rty5) && node_is_oint(c, id) ? oint_nil(rty5) : default_value_from_compiler(c, rty5);
         /* A mutator checks frozen BEFORE it coerces its arguments, so a frozen
            receiver raises FrozenError however ill-typed the index is
            (core/array/element_set_spec: `a[:foo] = 1` on a frozen array). */

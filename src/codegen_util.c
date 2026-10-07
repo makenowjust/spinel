@@ -4904,11 +4904,60 @@ void emit_slot_ctype(Compiler *c, const LocalVar *lv, Buf *b) {
    own index, which a subclass shares with its parent (inherit_members keeps
    the prefix), so the words sit at the same offset in every struct of a
    hierarchy and hold the largest ivar count in it. */
+static int class_root(Compiler *c, int cid);
+static int ivar_has_nilbit_own(Compiler *c, int cid, int iv);
+/* A field is one slot down its class family (a subclass lays the parent's
+   fields first): a nil bit any class of the family keeps for it, every
+   class keeps, so a parent's method that writes the field clears the bit a
+   subclass's constructor seeded */
 int ivar_has_nilbit(Compiler *c, int cid, int iv) {
   if (cid < 0 || cid >= c->nclasses) return 0;
   ClassInfo *ci = &c->classes[cid];
   if (iv < 0 || iv >= ci->nivars || !oint_kind(ci->ivar_types[iv])) return 0;
+  if (ivar_has_nilbit_own(c, cid, iv)) return 1;
+  int root = class_root(c, cid);
+  for (int k = 0; k < c->nclasses; k++) {
+    if (k == cid) continue;
+    ClassInfo *ck = &c->classes[k];
+    if (iv >= ck->nivars || !ck->ivars[iv] || !ci->ivars[iv] || strcmp(ck->ivars[iv], ci->ivars[iv]) != 0) continue;
+    if (class_root(c, k) != root) continue;
+    if (ivar_has_nilbit_own(c, k, iv)) return 1;
+  }
+  return 0;
+}
+/* Class#allocate runs no initialize, so every field of the instance it
+   makes starts nil: the classes some `allocate` can make (a constant
+   receiver names its class and the subclasses; any other receiver, every
+   class). Memo per node table: -1 none, -2 every class, else a bitmap. */
+static int class_is_allocated(Compiler *c, int cid) {
+  static const NodeTable *memo_nt = NULL;
+  static int memo_n = 0, any = 0;
+  static unsigned char *named = NULL;
+  const NodeTable *nt = c->nt;
+  if (memo_nt != nt || memo_n != c->nclasses) {
+    memo_nt = nt; memo_n = c->nclasses; any = 0;
+    free(named);
+    named = (unsigned char *)calloc((size_t)(memo_n > 0 ? memo_n : 1), 1);
+    if (!named) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+    NT_FOREACH_KIND(nt, NK_CallNode, u) {
+      const char *nm = nt_str(nt, u, "name");
+      if (!nm || !sp_streq(nm, "allocate")) continue;
+      int r = nt_ref(nt, u, "receiver");
+      int rc = r >= 0 && nt_kind(nt, r) == NK_ConstantReadNode ? comp_class_index(c, nt_str(nt, r, "name")) : -1;
+      if (rc >= 0) named[rc] = 1; else any = 1;
+    }
+  }
+  if (any) return 1;
+  for (int k = cid, hop = 0; k >= 0 && hop < 64; k = c->classes[k].parent, hop++)
+    if (named[k]) return 1;
+  return 0;
+}
+static int ivar_has_nilbit_own(Compiler *c, int cid, int iv) {
+  if (cid < 0 || cid >= c->nclasses) return 0;
+  ClassInfo *ci = &c->classes[cid];
+  if (iv < 0 || iv >= ci->nivars || !oint_kind(ci->ivar_types[iv])) return 0;
   if (ci->ivar_nullable_int && ci->ivar_nullable_int[iv]) return 1;
+  if (class_is_allocated(c, cid)) return 1;
   /* a Struct / Data member is assigned by the generated constructor */
   if ((ci->is_struct || ci->is_data) && iv < ci->nmembers) return 0;
   return !ivar_assigned_in_initialize(c, cid, ci->ivars[iv]);
