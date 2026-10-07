@@ -87,9 +87,21 @@ static int emit_op_template(Compiler *c, const BopCtx *x, Buf *b) {
       p++;
     }
     else if (p[0] == '$' && p[1] == 'N') {
-      if (!o && x->rtext && !node_has_oint_form(c, x->recv)) {
+      /* a receiver already rendered (rtext) is reused, never emitted again:
+         its hoisted preludes and side effects ran once. An unwrapped oint
+         (`sp_oint_arg(<x>)`) is <x> itself; a plain value is lifted. */
+      if (!o && x->rtext) {
+        const char *rt = x->rtext, *ua = oint_arg(x->rt);
+        size_t ul = strlen(ua), rl = strlen(rt);
         Buf ob; memset(&ob, 0, sizeof ob);
-        buf_printf(&ob, "%s(%s)", oint_of(x->rt), x->rtext);
+        int bal = 0, outer = rl > ul + 1 && strncmp(rt, ua, ul) == 0 && rt[ul] == '(' && rt[rl - 1] == ')';
+        /* the parenthesis after the name must close at the very end */
+        for (size_t q = ul; outer && q < rl; q++) {
+          if (rt[q] == '(') bal++;
+          else if (rt[q] == ')' && --bal == 0 && q != rl - 1) outer = 0;
+        }
+        if (outer) buf_printf(&ob, "%.*s", (int)(rl - ul - 2), rt + ul + 1);
+        else buf_printf(&ob, "%s(%s)", oint_of(x->rt), rt);
         o = ob.p ? ob.p : strdup("");
         buf_puts(b, o);
       }
