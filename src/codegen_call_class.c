@@ -2953,66 +2953,11 @@ int emit_call_class_method_arms(Compiler *c, int id, Buf *b, const NodeTable *nt
            inside a `def self.default`/`self.initial` factory emitted an empty
            `sp_Klass_new()`, dropping every argument. */
         if (ncls->is_struct && initm < 0) {
+          /* the same construction as the receiver path (`Klass.new(...)`):
+             its early checks, keyword hash, `**` merge and member coercions,
+             and the nil bit of a member the argument leaves nil */
           int sargc; const int *sargv = call_args(nt, id, &sargc);
-          int kwh = (sargc == 1 && nt_type(nt, sargv[0]) &&
-                     sp_streq(nt_type(nt, sargv[0]), "KeywordHashNode")) ? sargv[0] : -1;
-          /* a call CRuby refuses raises its ArgumentError, and a positional
-             `*` spreads across the members, as in the receiver path: these
-             took the arguments as they stood, dropping a key that names no
-             member and an argument past the last, and leaving nil a Data
-             member none names */
-          int nunk, late;
-          if (emit_struct_new_early(c, new_cls, sargc, sargv,
-                                    ncls->kw_init == -1 && !kwh_has_splat(nt, kwh) ? -1 : kwh,
-                                    &nunk, &late, b)) return 1;
-          /* a keyword_init: false Struct takes the keywords as one positional
-             Hash, its first member: with a `**` they merge into it, nil when
-             none came, as in the receiver path */
-          int kwf_mh = -1;
-          if (kwh >= 0 && ncls->kw_init == -1) {
-            TyKind mty;
-            if (kwh_has_splat(nt, kwh)) kwf_mh = emit_ds_hash_merge(c, kwh, 1, &mty);
-            kwh = -1;
-          }
-          /* keywords beside a `**`, or binding late, merge into one hash the
-             members read and the run-time check judges, as in the receiver
-             path */
-          int kw_ht = -1;
-          if (kwh >= 0 && (kwh_has_splat(nt, kwh) || late)) {
-            kw_ht = emit_struct_kw_hash(c, kwh);
-            emit_struct_kw_check(c, ncls, kw_ht, -1);
-          }
-          buf_printf(b, "sp_%s_new(", ncls->c_name);
-          for (int a = 0; a < ncls->nmembers; a++) {
-            if (a) buf_puts(b, ", ");
-            int vnode = -1;
-            if (kwh >= 0) vnode = struct_kwarg_value(c, kwh, ncls->ivars[a] + 1);
-            else if (a < sargc) vnode = sargv[a];
-            if (kwf_mh >= 0) {
-              char hv[160];
-              snprintf(hv, sizeof hv, "(sp_PolyPolyHash_length(_t%d) ? sp_box_obj(_t%d, SP_BUILTIN_POLY_POLY_HASH) : sp_box_nil())",
-                       kwf_mh, kwf_mh);
-              if (a == 0) emit_unbox_text(c, ncls->ivar_types[a], hv, b);
-              else buf_puts(b, default_value_from_compiler(c, ncls->ivar_types[a]));
-            }
-            else if (kw_ht >= 0) emit_struct_kw_member(c, ncls, a, kw_ht, b);
-            else if (vnode >= 0) {
-              if (ncls->ivar_types[a] == TY_POLY && repr_of(c, vnode).kind != RK_BOXED) emit_boxed(c, vnode, b);
-              /* and the reverse: a poly value into a concrete member slot
-                 (#4348), the same coercion the receiver path does */
-              else if (ncls->ivar_types[a] != TY_POLY && ncls->ivar_types[a] != TY_UNKNOWN &&
-                       repr_of(c, vnode).kind == RK_BOXED) {
-                Buf pv2; memset(&pv2, 0, sizeof pv2);
-                emit_expr(c, vnode, &pv2);
-                emit_unbox_text(c, ncls->ivar_types[a], pv2.p ? pv2.p : "sp_box_nil()", b);
-                free(pv2.p);
-              }
-              else emit_expr(c, vnode, b);
-            }
-            else buf_puts(b, default_value_from_compiler(c, ncls->ivar_types[a]));
-          }
-          buf_puts(b, ")");
-          return 1;
+          if (emit_struct_new_call(c, id, new_cls, sargc, sargv, b)) return 1;
         }
         /* yielding initialize: inline its body at the call site exactly as
            the Klass.new receiver path does -- the emitted constructor only
