@@ -162,9 +162,6 @@ void sp_IntArray_splice(sp_IntArray*a,sp_int start,sp_int len,const sp_int*src,s
   sp_pl_free(sb);sp_pl_free(tb);
 }
 /* the splice of a whole typed array, whose nil elements come along */
-/* sp_IntArray_oget / sp_FloatArray_oget past their inline fast path */
-SP_NOINLINE sp_oint sp_IntArray_oget_slow(sp_IntArray*a,sp_int i){if(!a)return sp_oint_nil();if(i<0)i+=a->len;if(i<0||i>=a->len)return sp_oint_nil();sp_int pi=a->start+i;if(a->nilbits&&sp_nilbit_get(a->nilbits,pi))return sp_oint_nil();return sp_oint_of(a->data[pi]);}
-SP_NOINLINE sp_ofloat sp_FloatArray_oget_slow(sp_FloatArray*a,sp_int i){if(!a)return sp_ofloat_nil();if(i<0)i+=a->len;if(i<0||i>=a->len)return sp_ofloat_nil();if(a->nilbits&&sp_nilbit_get(a->nilbits,i))return sp_ofloat_nil();return sp_ofloat_of(a->data[i]);}
 void sp_IntArray_splice_o(sp_IntArray*a,sp_int start,sp_int len,sp_IntArray*src){
   /* a source with no bits is the plain splice, which roots what it needs */
   if(!src||!src->nilbits){sp_IntArray_splice(a,start,len,src?src->data+src->start:NULL,src?src->len:0);return;}
