@@ -1310,8 +1310,12 @@ int emit_call_or_write_via_methods(Compiler *c, int id, int is_or, Buf *b) {
   buf_puts(b, ") ? ");
   /* the expression's own form: the reader's oint where the node answers one
      (`&&=` on a nil attribute is nil), its plain value otherwise */
-  int wo = ro && node_is_oint(c, id);
-  { char sv[32]; snprintf(sv, sizeof sv, ro && !wo ? "_t%d.v" : "_t%d", tv);
+  int wo = oint_kind(want) && node_is_oint(c, id);
+  { char sv[48];
+    if (ro && !wo) snprintf(sv, sizeof sv, "_t%d.v", tv);
+    /* a plain reader under a node that answers the oint: lifted */
+    else if (!ro && wo && rdt == want) snprintf(sv, sizeof sv, "%s(_t%d)", oint_of(want), tv);
+    else snprintf(sv, sizeof sv, "_t%d", tv);
     if (rdt == want) buf_puts(b, sv);
     else if (want == TY_POLY) emit_boxed_text(c, rdt, sv, b);
     /* nil-preserving: the reader can answer nil, and this arm is exactly the

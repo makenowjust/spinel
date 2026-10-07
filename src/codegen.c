@@ -11995,6 +11995,11 @@ static int user_dispatch_arg(Compiler *c, Scope *m, int pi, const char *v,
              c->classes[pcls].is_value_type ? "*" : "", c->classes[pcls].name, v);
   }
   else if (pt == TY_POLY) snprintf(arg, asz, "%s", v);
+  /* a parameter slot that holds its nil takes nil too, as its oint */
+  else if (oint_kind(pt) && m->pnames && m->pnames[pi] && slot_is_oint(scope_local(m, m->pnames[pi]))) {
+    snprintf(guard, gsz, "(%s.tag == %s || %s.tag == SP_TAG_NIL)", v, pt == TY_INT ? "SP_TAG_INT" : "SP_TAG_FLT", v);
+    snprintf(arg, asz, "%s(%s)", oint_unbox(pt), v);
+  }
   else if (pt == TY_INT) { snprintf(guard, gsz, "%s.tag == SP_TAG_INT", v); snprintf(arg, asz, "%s.v.i", v); }
   else if (pt == TY_FLOAT) { snprintf(guard, gsz, "%s.tag == SP_TAG_FLT", v); snprintf(arg, asz, "%s.v.f", v); }
   else if (pt == TY_STRING) { snprintf(guard, gsz, "%s.tag == SP_TAG_STR", v); snprintf(arg, asz, "%s.v.s", v); }
