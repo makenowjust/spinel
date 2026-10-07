@@ -24,7 +24,7 @@ t("a")        { a }
 t("pop empty") { a.pop }
 t("shift empty") { a.shift }
 b = Array.new(3)
-b[1] = m
+b[1] = 5
 t("min nil")  { b.min }
 t("max nil")  { b.max }
 t("compact min") { b.compact.min }

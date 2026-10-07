@@ -25,6 +25,6 @@ p m.eql?(nil)
 p m.equal?(nil)
 p(m || 0)
 p(m && 1)
-p m&.abs2 == nil ? "nil" : "value"
+p m&.succ == nil ? "nil" : "value"
 p [m].inspect
 p m.frozen?
