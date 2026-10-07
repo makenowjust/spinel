@@ -1377,7 +1377,13 @@ int emit_inline_call_x(Compiler *c, int id, Buf *b, int indent, int as_expr) {
       emit_indent(b, din); buf_printf(b, "_yret%d: ;\n", tag);
     }
     g_result_var = sv_rv; g_result_poly = sp; g_result_ty = sv_rty; g_result_oint = sv_ro; g_ret_oint = sv_rro;
-    emit_indent(b, din); buf_printf(b, "_t%d;\n", rtag);
+    /* the frame answers in the call's form (node_is_oint), whatever form
+       the callee's slot took */
+    int co = oint_kind(rt) && node_is_oint(c, id);
+    emit_indent(b, din);
+    if (ro && !co) buf_printf(b, "%s(_t%d);\n", oint_arg(rt), rtag);
+    else if (!ro && co) buf_printf(b, "%s(_t%d);\n", oint_of(rt), rtag);
+    else buf_printf(b, "_t%d;\n", rtag);
   }
   else {
     if (m_has_ret) {

@@ -2248,6 +2248,10 @@ static int emit_ivar_cvar_gvar_expr(Compiler *c, int id, Buf *b, const NodeTable
          class method reading its class's ivar): the static is the oint */
       else if (is_static && sk != 2 && oint_kind(repr_of(c, id).as_ty) && !want_o)
         buf_printf(b, "%s.v", ref.p ? ref.p : "");
+      /* a field with no nil bit read where its oint is wanted (an
+         instance_eval tail typed for any receiver): the value, never nil */
+      else if (want_o && !is_static && sk == 1 && oint_kind(it))
+        buf_printf(b, "%s(%s)", oint_of(it), ref.p ? ref.p : "");
       else buf_puts(b, ref.p ? ref.p : "");
     }
     free(ref.p);

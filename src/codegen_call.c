@@ -14228,7 +14228,10 @@ void emit_brk_wrapped_call(Compiler *c, int id, Buf *b) {
     emit_call(c, id, &inner);   /* emits the loop into g_pre, result expr into inner */
   }
   Buf boxed; memset(&boxed, 0, sizeof boxed);
-  if (inner.p && inner.p[0]) emit_boxed_text(c, normal_ty, inner.p, &boxed);
+  /* a call answering its oint (node_is_oint) boxes with its nil */
+  if (inner.p && inner.p[0] && !stmt_form && !enum_walk && oint_kind(normal_ty) && node_is_oint(c, id))
+    buf_printf(&boxed, "%s(%s)", oint_box(normal_ty), inner.p);
+  else if (inner.p && inner.p[0]) emit_boxed_text(c, normal_ty, inner.p, &boxed);
   if (!enum_walk) {
     emit_indent(g_pre, g_indent);
     buf_printf(g_pre, "_t%d = %s;\n", tR, boxed.p && boxed.p[0] ? boxed.p : "sp_box_nil()");
@@ -17639,7 +17642,9 @@ int emit_unresolved_call(Compiler *c, int id, Buf *b) {
       if (want == TY_POLY && got != TY_POLY && got != TY_UNKNOWN && got != TY_VOID) {
         Buf fb; memset(&fb, 0, sizeof fb);
         emit_call(c, id, &fb);
-        emit_boxed_text(c, got, fb.p ? fb.p : "0", b);
+        /* under the face the call answers its oint where it can be nil */
+        if (oint_kind(got) && node_is_oint(c, id)) buf_printf(b, "%s(%s)", oint_box(got), fb.p ? fb.p : oint_nil(got));
+        else emit_boxed_text(c, got, fb.p ? fb.p : "0", b);
         free(fb.p);
       }
       else emit_call(c, id, b);
