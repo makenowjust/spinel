@@ -5098,7 +5098,8 @@ static int emit_hash_merge_misfit(Compiler *c, int id, TyKind rt, Buf *b) {
 }
 
 /* A read of an Integer-keyed typed hash whose key can be nil (a nil
-   literal, a nullable Integer): no key equals nil, so a nil key misses --
+   literal, a nullable Integer) or of another class (a boxed key that is not
+   an Integer): no key equals it, so the read misses --
    `[]` answers the default, key? false, fetch(k, d) its default, values_at
    a nil element -- where the plain key spelling unwrapped it and raised.
    The key is bound once; the ordinary emission of the call reads its value
@@ -5129,7 +5130,9 @@ static int emit_hash_nilkey_read(Compiler *c, int id, const char *name, int recv
   if (kbox && kt != TY_NIL) {
     buf_printf(b, "({ sp_RbVal _t%d = ", tk); emit_boxed(c, key, b);
     buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); sp_%sHash *_t%d = ", tk, hn, tr); emit_expr(c, recv, b);
-    buf_printf(b, "; SP_GC_ROOT(_t%d); _t%d.tag == SP_TAG_NIL ? ", tr, tk);
+    /* a boxed key of any class but Integer (nil, a Float, a String) is not
+       in an Integer-keyed table: the miss; a store keeps its A5 refusal */
+    buf_printf(b, "; SP_GC_ROOT(_t%d); _t%d.tag != SP_TAG_INT ? ", tr, tk);
   }
   else {
     buf_printf(b, "({ sp_oint _t%d = ", tk);
