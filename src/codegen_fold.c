@@ -6567,6 +6567,23 @@ int ran_first_handle(int node) {
 static void emit_arg_or_default_fill(Compiler *c, Scope *m, int idx, int provided, Buf *out) {
   LocalVar *p = scope_local(m, m->pnames[idx]);
   TyKind pt = p ? p->type : TY_INT;
+  /* The boxed receiver of a builtin written in Ruby (`v.digits` is
+     `__int_digits(v, 10)`; promote boxes it): a nil one raises CRuby's
+     NoMethodError naming the method ahead of the body, whose first
+     operation would name itself. A specialization's `__N` suffix is no
+     part of the Ruby name. */
+  if (provided >= 0 && idx == 0 && pt == TY_POLY && m->pnames[0] && sp_streq(m->pnames[0], "__self") &&
+      m->name && (!strncmp(m->name, "__int_", 6) || !strncmp(m->name, "__flt_", 6) || !strncmp(m->name, "__cmp_", 6)) &&
+      repr_of(c, provided).kind == RK_BOXED) {
+    const char *rn = m->name + 6;
+    size_t rl = strlen(rn);
+    while (rl > 0 && rn[rl - 1] >= '0' && rn[rl - 1] <= '9') rl--;
+    if (rl >= 2 && rl < strlen(rn) && rn[rl - 1] == '_' && rn[rl - 2] == '_') rl -= 2; else rl = strlen(rn);
+    int tn = ++g_tmp;
+    buf_printf(out, "({ sp_RbVal _t%d = ", tn); emit_expr(c, provided, out);
+    buf_printf(out, "; if (_t%d.tag == SP_TAG_NIL) sp_nil_recv(\"%.*s\"); _t%d; })", tn, (int)rl, rn, tn);
+    return;
+  }
   /* An omitted `*rest` is an empty Array, not a NULL the body reads as nil:
      a dispatch arm that calls with no arguments (the boxed `call` switch)
      fills every parameter through here. */
@@ -7026,21 +7043,26 @@ static void emit_arg_or_default_fill(Compiler *c, Scope *m, int idx, int provide
            takes the argument's oint form (nil, boxed, plain, a raise token);
            a nil into a plain slot raises the operand TypeError (a plain emit
            rendered nil as 0 and the callee saw an integer, #2438) */
+        int self_rb = idx == 0 && m->pnames[0] && sp_streq(m->pnames[0], "__self") && m->name &&
+                      (!strncmp(m->name, "__int_", 6) || !strncmp(m->name, "__flt_", 6) || !strncmp(m->name, "__cmp_", 6));
+        /* the Ruby name of a builtin written in Ruby (`v.digits` is
+           `__int_digits(v, 10)`; a specialization's `__N` suffix is no part of it) */
+        const char *rn = self_rb ? m->name + 6 : "?";
+        size_t rl = strlen(rn);
+        if (self_rb) {
+          while (rl > 0 && rn[rl - 1] >= '0' && rn[rl - 1] <= '9') rl--;
+          if (rl >= 2 && rl < strlen(rn) && rn[rl - 1] == '_' && rn[rl - 2] == '_') rl -= 2; else rl = strlen(rn);
+        }
         if (oint_kind(pt) && idx == 0 && m->pnames[0] && sp_streq(m->pnames[0], "__self")) {
-          /* the receiver of a builtin written in Ruby (`v.digits` is
-             `__int_digits(v, 10)`): a nil receiver is CRuby's NoMethodError
-             naming the method, raised here where the oint is unwrapped */
+          /* its receiver: a nil one is CRuby's NoMethodError naming the
+             method, raised here where the oint is unwrapped */
           if (node_may_be_nil(c, provided)) {
-            const char *rn = m->name ? m->name : "?";
-            if (!strncmp(rn, "__int_", 6) || !strncmp(rn, "__flt_", 6) || !strncmp(rn, "__cmp_", 6)) rn += 6;
-            /* a specialization's `__N` suffix is no part of the Ruby name */
-            size_t rl = strlen(rn);
-            while (rl > 0 && rn[rl - 1] >= '0' && rn[rl - 1] <= '9') rl--;
-            if (rl >= 2 && rl < strlen(rn) && rn[rl - 1] == '_' && rn[rl - 2] == '_') rl -= 2; else rl = strlen(rn);
+            if (!self_rb) { rn = m->name ? m->name : "?"; rl = strlen(rn); }
             buf_printf(out, "%s(", oint_val(pt)); emit_oint_expr(c, provided, pt, out); buf_printf(out, ", \"%.*s\")", (int)rl, rn);
           }
           else emit_expr(c, provided, out);
         }
+
         else if (oint_kind(pt) && slot_is_oint(p))
           emit_oint_expr(c, provided, pt, out);
         else if (oint_kind(pt) && node_may_be_nil(c, provided)) {

@@ -11033,6 +11033,9 @@ int emit_range_call(Compiler *c, int id, Buf *b) {
           sp_streq(name, "size") && argc == 0) {
         int excl9 = (int)(nt_int(nt, rn9, "flags", 0) & 4) ? 1 : 0;
         int tb9 = ++g_tmp, te9 = ++g_tmp;
+        /* promote types a Range size poly (it can pass the word) */
+        int bx9 = repr_of(c, id).kind == RK_BOXED;
+        if (bx9) buf_puts(b, "sp_box_int(");
         buf_printf(b, "({ sp_int _t%d = ", tb9);
         emit_int_expr(c, nt_ref(nt, rn9, "left"), b);
         buf_printf(b, "; double _t%d = ", te9);
@@ -11040,6 +11043,7 @@ int emit_range_call(Compiler *c, int id, Buf *b) {
         buf_printf(b, "; double _d = _t%d - (double)_t%d;"
                       " _d < 0 ? 0 : (%d && _t%d == floor(_t%d)) ? (sp_int)_d : (sp_int)floor(_d) + 1; })",
                    te9, tb9, excl9, te9, te9);
+        if (bx9) buf_puts(b, ")");
         return 1;
       }
       /* String-endpoint range accessors: the int-backed sp_Range stores the
@@ -11098,7 +11102,7 @@ int emit_range_call(Compiler *c, int id, Buf *b) {
       if (rn9 >= 0 && nt_type(nt, rn9) && sp_streq(nt_type(nt, rn9), "RangeNode") &&
           (nt_ref(nt, rn9, "left") < 0 || nt_kind(nt, nt_ref(nt, rn9, "left")) == NK_NilNode) &&
           sp_streq(name, "count") && argc == 0 && nt_ref(nt, id, "block") < 0) {
-        buf_puts(b, "(HUGE_VAL)");
+        buf_puts(b, repr_of(c, id).kind == RK_BOXED ? "sp_box_float(HUGE_VAL)" : "(HUGE_VAL)");
         return 1;
       }
       if (rn9 >= 0 && nt_type(nt, rn9) && sp_streq(nt_type(nt, rn9), "RangeNode") &&
@@ -11109,7 +11113,7 @@ int emit_range_call(Compiler *c, int id, Buf *b) {
            answers Infinity (#3668) */
         if ((is_size_or_count(name)) && argc == 0 &&
             nt_ref(nt, id, "block") < 0) {
-          buf_puts(b, "(HUGE_VAL)");
+          buf_puts(b, repr_of(c, id).kind == RK_BOXED ? "sp_box_float(HUGE_VAL)" : "(HUGE_VAL)");
           return 1;
         }
         if ((is_first_or_take(name)) && argc == 1) {
