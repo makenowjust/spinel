@@ -1084,6 +1084,62 @@ int emit_call_compare_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
   return 0;
 }
 
+/* `x + y` on a boxed x where the program reopens Integer or Float with
+   that operator (`class Integer; alias_method :+, :plus_tenfold; end`): a
+   value of the reopened class calls the program's method, any other the
+   runtime helper, which knows only the builtin operator. Answers 0 when no
+   Integer / Float reopening defines the name. */
+static int emit_poly_reopened_binop(Compiler *c, int id, const char *name, int recv, int arg, Buf *b) {
+  const char *pfn = sp_streq(name, "+") ? "sp_poly_add" : sp_streq(name, "-") ? "sp_poly_sub" :
+                    sp_streq(name, "*") ? "sp_poly_mul" : sp_streq(name, "/") ? "sp_poly_div" :
+                    sp_streq(name, "%") ? "sp_poly_mod" : NULL;
+  if (!pfn) return 0;
+  int mis[2] = { -1, -1 };
+  const char *cn[2] = { "Integer", "Float" };
+  for (int i = 0; i < 2; i++) {
+    int k = comp_class_index(c, cn[i]);
+    if (k < 0 || !class_is_prim_reopen(c, k)) continue;
+    int def = -1, mi = comp_method_in_chain(c, k, name, &def);
+    if (mi < 0 || def != k || c->scopes[mi].nparams != 1 || c->scopes[mi].rest_idx >= 0) continue;
+    mis[i] = mi;
+  }
+  if (mis[0] < 0 && mis[1] < 0) return 0;
+  int ta = ++g_tmp, tb = ++g_tmp, tr = ++g_tmp;
+  buf_printf(b, "({ sp_RbVal _t%d = ", ta); emit_boxed(c, recv, b);
+  buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); sp_RbVal _t%d = ", ta, tb); emit_boxed(c, arg, b);
+  buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); sp_RbVal _t%d; ", tb, tr);
+  for (int i = 0; i < 2; i++) {
+    if (mis[i] < 0) continue;
+    Scope *ks = &c->scopes[mis[i]];
+    buf_printf(b, "if (_t%d.tag == %s) { ", ta, i == 0 ? "SP_TAG_INT" : "SP_TAG_FLT");
+    Buf cb; memset(&cb, 0, sizeof cb);
+    emit_method_cname(c, ks, &cb);
+    buf_printf(&cb, "(_t%d.v.%s, ", ta, i == 0 ? "i" : "f");
+    LocalVar *pv = ks->pnames && ks->pnames[0] ? scope_local(ks, ks->pnames[0]) : NULL;
+    TyKind pt = pv ? pv->type : TY_POLY;
+    char tbn[24]; snprintf(tbn, sizeof tbn, "_t%d", tb);
+    if (pt == TY_POLY || pt == TY_UNKNOWN) buf_puts(&cb, tbn);
+    else if (oint_kind(pt) && slot_is_oint(pv)) buf_printf(&cb, "%s(%s)", oint_unbox(pt), tbn);
+    else emit_unbox_text(c, pt, tbn, &cb);
+    buf_puts(&cb, ")");
+    buf_printf(b, "_t%d = ", tr);
+    if (method_is_void(ks)) buf_printf(b, "(%s, sp_box_nil())", cb.p ? cb.p : "");
+    else if ((TyKind)ks->ret == TY_POLY) buf_puts(b, cb.p ? cb.p : "");
+    else emit_boxed_ret_call(c, ks, cb.p ? cb.p : "", b);
+    free(cb.p);
+    buf_puts(b, "; } else ");
+  }
+  buf_printf(b, "_t%d = %s(_t%d, _t%d); ", tr, pfn, ta, tb);
+  /* the consumer's form: the boxed value, or unboxed into its slot */
+  TyKind want = repr_of(c, id).as_ty;
+  char trn[24]; snprintf(trn, sizeof trn, "_t%d", tr);
+  if (want == TY_POLY || want == TY_UNKNOWN) buf_puts(b, trn);
+  else if (oint_kind(want) && node_is_oint(c, id)) buf_printf(b, "%s(%s)", oint_unbox(want), trn);
+  else emit_unbox_text(c, want, trn, b);
+  buf_puts(b, "; })");
+  return 1;
+}
+
 /* String concatenation, unary -@ +@ ~ !, element stores and the arithmetic on a poly operand */
 int emit_call_operator_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv, int argc, const int *argv, TyKind rt, TyKind a0) {
   /* String#concat with no arguments returns the receiver unchanged (#2309):
@@ -1167,9 +1223,15 @@ int emit_call_operator_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
         oint_open(c, id, rt, b); emit_oint_expr(c, recv, rt, b); oint_close(c, id, b);
       }
       /* a nullable Integer or Float slot's nil has no -@ */
-      else if (name[0] == '-' && (rt == TY_FLOAT || rt == TY_INT) && cmp_operand_may_be_nil(c, recv)) {
+      /* an Integer's -@ is the mode's checked negation: -(-2**63) leaves
+         the word (RangeError in raise mode) */
+      else if (name[0] == '-' && rt == TY_INT && cmp_operand_may_be_nil(c, recv)) {
+        buf_puts(b, "sp_int_neg("); emit_scalar_operand_op(c, recv, name, b); buf_puts(b, ")");
+      }
+      else if (name[0] == '-' && rt == TY_FLOAT && cmp_operand_may_be_nil(c, recv)) {
         buf_printf(b, "(%c", name[0]); emit_scalar_operand_op(c, recv, name, b); buf_puts(b, ")");
       }
+      else if (name[0] == '-' && rt == TY_INT) buf_printf(b, "sp_int_neg(%s)", ut);
       else buf_printf(b, "(%c%s%s)", name[0], ut[0] == name[0] ? " " : "", ut);
       free(ub.p); }
     return 1;
@@ -1390,6 +1452,7 @@ int emit_call_operator_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
          has no array case and answered "no implicit conversion of Array into
          Array" on two real Arrays (#3475) */
       !((ty_is_array(rt) || rt == TY_POLY_ARRAY) && sp_streq(name, "-"))) {
+    if (rt == TY_POLY && emit_poly_reopened_binop(c, id, name, recv, argv[0], b)) return 1;
     const char *pfn = NULL;
     if (sp_streq(name, "+")) pfn = "sp_poly_add";
     else if (sp_streq(name, "-")) pfn = "sp_poly_sub";

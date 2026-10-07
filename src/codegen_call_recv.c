@@ -11158,6 +11158,12 @@ int emit_range_call(Compiler *c, int id, Buf *b) {
     }
     if (sp_streq(name, "each") && block < 0) {  /* external enumerator, or to_a materialize */
       int t = ++g_tmp;
+      /* an endless range is walked as it is read: the step-1 Enumerator */
+      if (comp_ntype(c, id) == TY_ENUMERATOR && range_lit_endless(c, recv)) {
+        buf_printf(b, "({ sp_Range _t%d = ", t); emit_expr(c, recv, b);
+        buf_printf(b, "; sp_range_endless_step(sp_box_int(_t%d.first), sp_box_int(1)); })", t);
+        return 1;
+      }
       Buf rb = expr_buf(c, recv);
       if (comp_ntype(c, id) == TY_ENUMERATOR) {
         /* pass the boxed range itself: sp_enum_items_from expands the members
