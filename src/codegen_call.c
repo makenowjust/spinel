@@ -13536,9 +13536,19 @@ static int emit_array_arith_call(Compiler *c, int id, Buf *b) {
       /* the repeated elements carry the receiver's nils, unless it is a
          literal that cannot hold one (`[0] * 8192`) */
       char nf[64] = "";
-      if ((rt == TY_INT_ARRAY || rt == TY_FLOAT_ARRAY) && !typed_array_lit_flag_free(c, recv))
-        snprintf(nf, sizeof nf, " sp_%sArray_nil_from(_t%d, _t%d);", k, tr, ta);
-      if (has_start) {
+      if ((rt == TY_INT_ARRAY || rt == TY_FLOAT_ARRAY) && !typed_array_lit_flag_free(c, recv)) {
+        /* each element copied with its nil */
+        buf_printf(b, "; if (_t%d < 0) sp_raise_cls(\"ArgumentError\", \"negative argument\");"
+                      " sp_%sArray *_t%d = sp_%sArray_new(); SP_GC_ROOT(_t%d);"
+                      " for (sp_int _t%d = 0; _t%d < _t%d; _t%d++)"
+                      " for (sp_int _t%d = 0; _t%d < _t%d->len; _t%d++)"
+                      " sp_%sArray_push_o(_t%d, sp_%sArray_oget(_t%d, _t%d)); _t%d; })",
+                   tn, k, tr, k, tr,
+                   ti, ti, tn, ti,
+                   tj, tj, ta, tj,
+                   k, tr, k, ta, tj, tr);
+      }
+      else if (has_start) {
         buf_printf(b, "; if (_t%d < 0) sp_raise_cls(\"ArgumentError\", \"negative argument\");"
                       " sp_%sArray *_t%d = sp_%sArray_new(); SP_GC_ROOT(_t%d);"
                       " for (sp_int _t%d = 0; _t%d < _t%d; _t%d++)"
