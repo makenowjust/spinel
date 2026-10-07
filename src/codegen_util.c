@@ -5398,6 +5398,24 @@ static int class_chain_depth(Compiler *c, int cid, int k) {
   return 1 << 20;
 }
 
+/* A call on an object of class `cid` dispatches to `mi` or to a subclass's
+   own `nm`: can one of them answer nil -- its answer is an oint, or it
+   answers nil itself (`def nop = nil` beside an override answering 7)? The
+   dispatch switch then holds the oint (g_disp_ro). */
+static int dispatch_answers_nil(Compiler *c, int cid, const char *nm, int mi) {
+  if (method_ret_is_oint(&c->scopes[mi])) return 1;
+  int any_nil = c->scopes[mi].ret == TY_NIL || c->scopes[mi].ret == TY_VOID, overridden = 0;
+  int nd = 0; const int *ds = comp_descendants(c, cid, &nd);
+  for (int k = 0; k < nd; k++) {
+    int odef = -1, omi = comp_method_in_chain(c, ds[k], nm, &odef);
+    if (omi < 0 || omi == mi || odef != ds[k]) continue;
+    overridden = 1;
+    if (method_ret_is_oint(&c->scopes[omi])) return 1;
+    if (c->scopes[omi].ret == TY_NIL || c->scopes[omi].ret == TY_VOID) any_nil = 1;
+  }
+  return overridden && any_nil;
+}
+
 int node_is_oint(Compiler *c, int node) {
   const NodeTable *nt = c->nt;
   if (node < 0) return 0;
@@ -5556,6 +5574,14 @@ int node_is_oint(Compiler *c, int node) {
     /* a method whose return widened past the call's (a yielding method
        answering its block, typed per call site): the call's own analysis */
     if (mi >= 0 && (c->scopes[mi].ret == TY_POLY || c->scopes[mi].ret == TY_UNKNOWN)) return nullable_int_value(c, node);
+    /* the dispatch to a subclass's override, on an object receiver or on
+       an instance method's self */
+    if (mi >= 0 && oint_kind(comp_ntype(c, node))) {
+      int dcid = -1;
+      if (r >= 0 && ty_is_object(rt)) dcid = ty_object_class(rt);
+      else if (r < 0) { Scope *self = comp_scope_of(c, node); if (self && !self->is_cmethod) dcid = self->class_id; }
+      if (dcid >= 0 && dispatch_answers_nil(c, dcid, nm, mi)) return 1;
+    }
     if (mi >= 0) return method_ret_is_oint(&c->scopes[mi]);
     /* `<=>` answers nil for an incomparable operand: the analysis's answer
        where both sides are of one comparable kind (numbers, Strings,

@@ -11418,7 +11418,7 @@ static void emit_dispatch_in(Compiler *c, int cid, const char *name,
   int virtual = (is_scalar_ret(ret) || ret_is_void) && form >= CP_SWITCH;
   nd_stamp(g_nd_call_id, virtual ? ND_SWITCH : ND_DIRECT);
   if (!virtual && m) nd_callee(c, g_nd_call_id, mi, defcls, 0);
-  g_disp_ro = virtual && !ret_is_void && oint_kind(disp_ret) && g_nd_call_id >= 0 &&
+  g_disp_ro = virtual && oint_kind(disp_ret) && g_nd_call_id >= 0 &&
               nt_str(nt, g_nd_call_id, "name") && sp_streq(nt_str(nt, g_nd_call_id, "name"), name) &&
               node_is_oint(c, g_nd_call_id);
   if (virtual && form == CP_PER_ARM) {

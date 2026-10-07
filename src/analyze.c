@@ -28873,6 +28873,14 @@ static void wnh_note(int body) {
    statement list's last value (a method's or block's answer), a `return`,
    another variable's write, an argument of a call other than an output one?
    Its type then reaches slots the late widening cannot retype. */
+static int wnh_last_stmt(Compiler *c, int id) {
+  const NodeTable *nt = c->nt;
+  NT_FOREACH_KIND(nt, NK_StatementsNode, st) {
+    int n = 0; const int *b = nt_arr(nt, st, "body", &n);
+    for (int k = 0; k < n; k++) if (b[k] == id) return k == n - 1;
+  }
+  return 1;   /* not a statement: its value is used */
+}
 static int wnh_local_escapes(Compiler *c, Scope *sc, const char *name) {
   const NodeTable *nt = c->nt;
   NT_FOREACH_KIND(nt, NK_StatementsNode, st) {
@@ -28889,7 +28897,10 @@ static int wnh_local_escapes(Compiler *c, Scope *sc, const char *name) {
       if (wk[q] == NK_ReturnNode || wk[q] == NK_CallNode) {
         if (wk[q] == NK_CallNode) {
           const char *cn = nt_str(nt, w, "name");
-          if (cn && (sp_streq(cn, "p") || sp_streq(cn, "puts") || sp_streq(cn, "print") || sp_streq(cn, "pp"))) continue;
+          if (cn && (sp_streq(cn, "puts") || sp_streq(cn, "print"))) continue;
+          /* `p` and `pp` answer their argument: a statement's, but not a
+             method's or block's answer (its last statement) */
+          if (cn && (sp_streq(cn, "p") || sp_streq(cn, "pp")) && !wnh_last_stmt(c, w)) continue;
         }
         int a = nt_ref(nt, w, "arguments");
         av = a >= 0 ? nt_arr(nt, a, "arguments", &an) : NULL;
