@@ -5145,6 +5145,8 @@ int node_is_oint(Compiler *c, int node) {
     TyKind rt = r >= 0 ? comp_ntype(c, r) : TY_UNKNOWN;
     int a2 = nt_ref(nt, node, "arguments"), an2 = 0;
     if (a2 >= 0) nt_arr(nt, a2, "arguments", &an2);
+    /* unary `+` hands an Integer / Float its operand: the operand's form */
+    if (sp_streq(nm, "+@") && an2 == 0 && r >= 0 && oint_kind(rt)) return node_is_oint(c, r);
     /* a proc's result comes back boxed and is unboxed with its nil */
     if (is_call_or_yield(nm) && r >= 0 && rt == TY_PROC) return 1;
     /* `o.instance_eval { ... }` spliced over an object answers its body's
@@ -5252,6 +5254,27 @@ int node_is_oint(Compiler *c, int node) {
       int a2v = nt_ref(nt, node, "arguments"), a2n = 0;
       const int *a2a = a2v >= 0 ? nt_arr(nt, a2v, "arguments", &a2n) : NULL;
       if (a2a && a2n >= 2 && nt_kind(nt, a2a[a2n - 1]) == NK_KeywordHashNode) return 1;
+    }
+    /* a class-level attribute reader over an oint static (`Cfg.level`, or
+       `level` in the class's own class method) answers the static */
+    {
+      int sgc = -1;
+      if (r >= 0 && (nt_kind(nt, r) == NK_ConstantReadNode || nt_kind(nt, r) == NK_ConstantPathNode))
+        sgc = comp_class_index(c, nt_str(nt, r, "name"));
+      else if (r < 0 || nt_kind(nt, r) == NK_SelfNode) {
+        Scope *ss = comp_scope_of(c, node);
+        if (ss && ss->is_cmethod) sgc = ss->class_id;
+      }
+      if (sgc >= 0 && an2 == 0 && comp_method_in_chain(c, sgc, nm, NULL) < 0) {
+        ClassInfo *sgi = &c->classes[sgc];
+        const char *rn = comp_resolve_alias(c, sgc, nm);
+        if (!rn) rn = nm;
+        if (comp_is_sg_reader(sgi, rn) && comp_is_sg_civ(sgi, rn)) {
+          char ivb[300]; snprintf(ivb, sizeof ivb, "@%s", rn);
+          int iv = comp_ivar_index(sgi, ivb);
+          return iv >= 0 && civ_is_oint(c, sgc, iv);
+        }
+      }
     }
     /* a class's own methods (File.delete, IO::Buffer.size_of) are no container's */
     if (r >= 0 && (nt_kind(nt, r) == NK_ConstantReadNode || nt_kind(nt, r) == NK_ConstantPathNode) &&

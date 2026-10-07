@@ -11164,10 +11164,14 @@ static int emit_multi_write_stmt(Compiler *c, int id, Buf *b, int indent, const 
       emit_indent(b, indent);
       LocalVar *rjlv = rnm_j ? scope_local(comp_scope_of(c, id), rnm_j) : NULL;
       int rjpoly = rjlv && rjlv->type == TY_POLY;
+      /* a local that holds its nil takes the element's oint (or nil) */
+      int rjo = rjlv && oint_kind(rjlv->type) && slot_is_oint(rjlv);
       if (ridx >= 0 && ridx < en) {
         buf_printf(b, "lv_%s = ", rename_local(rnm_j));
         TyKind valt = repr_of(c, els[ridx]).as_ty;
+        char rex[32]; snprintf(rex, sizeof rex, "_t%d", tmps[ridx]);
         if (rjpoly && valt != TY_POLY) emit_boxed_tmp(c, valt, tmps[ridx], b);
+        else if (rjo) masgn_conv_o(c, rjlv->type, tmpts ? tmpts[ridx] : valt, masgn_nil_el(c, els[ridx]) ? NULL : rex, b);
         else buf_printf(b, "_t%d", tmps[ridx]);
         buf_puts(b, ";\n");
       }
@@ -11175,6 +11179,7 @@ static int emit_multi_write_stmt(Compiler *c, int id, Buf *b, int indent, const 
         buf_printf(b, "lv_%s = ", rename_local(rnm_j));
         TyKind tt = repr_of(c, rights[j]).as_ty;
         if (rjpoly) emit_boxed_src(c, tt, default_value_from_compiler(c, tt), b);
+        else if (rjo) buf_puts(b, oint_nil(rjlv->type));
         else buf_puts(b, default_value_from_compiler(c, tt));
         buf_puts(b, ";\n");
       }

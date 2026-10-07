@@ -23322,6 +23322,16 @@ int emit_sg_accessor(Compiler *c, int ci, const char *cn, const char *name,
       char ivn[256]; snprintf(ivn, sizeof ivn, "@%s", base);
       int ivi = comp_ivar_index(cls, ivn);
       TyKind ivt = ivi >= 0 ? cls->ivar_types[ivi] : TY_POLY;
+      /* an oint static takes the value with its nil, and the write answers
+         the static's form where the value can be nil (node_is_oint of the
+         setter is the value's), its value otherwise */
+      if (ivi >= 0 && oint_kind(ivt) && civ_is_oint(c, ci, ivi)) {
+        buf_printf(b, "((civ_%s_%s = ", cn, iv_c(base));
+        if (argc < 1) buf_puts(b, oint_nil(ivt)); else emit_oint_expr(c, argv[0], ivt, b);
+        if (argc >= 1 && !nullable_int_value(c, argv[0])) buf_printf(b, "), civ_%s_%s.v)", cn, iv_c(base));
+        else buf_printf(b, "), civ_%s_%s)", cn, iv_c(base));
+        return 1;
+      }
       buf_printf(b, "(civ_%s_%s = ", cn, iv_c(base));
       if (argc < 1) buf_puts(b, ivt == TY_POLY ? "sp_box_nil()" : "0");
       else if (ivt == TY_POLY) emit_boxed(c, argv[0], b);
