@@ -1381,11 +1381,13 @@ static int emit_array_op_assign_value(Compiler *c, const char *ref, TyKind t,
 /* The scalar twin: the statement form, then the slot, in a statement
    expression, so a global or class variable takes the overflow-checked
    helpers in value position too. */
+/* `id`: the op-write node, whose value is the slot's oint where the write
+   can be nil and the slot's value where it is plain */
 static int emit_scalar_op_assign_value(Compiler *c, const char *ref, TyKind t,
-                                       const char *op, int v, int lhs_nil, Buf *b) {
+                                       const char *op, int v, int lhs_nil, int id, Buf *b) {
   Buf ab; memset(&ab, 0, sizeof ab);
   int ok = emit_scalar_op_assign(c, ref, t, op, v, 1, lhs_nil, &ab);
-  if (ok) buf_printf(b, "({ %s%s; })", ab.p, ref);
+  if (ok) buf_printf(b, lhs_nil && oint_kind(t) && !node_is_oint(c, id) ? "({ %s%s.v; })" : "({ %s%s; })", ab.p, ref);
   free(ab.p);
   return ok;
 }
@@ -2289,7 +2291,7 @@ static int emit_ivar_cvar_gvar_expr(Compiler *c, int id, Buf *b, const NodeTable
     }
     else if (emit_array_op_assign_value(c, gref, lv->type, op, v, b)) { }
     else if (emit_poly_op_assign_value(c, gref, lv->type, op, v, b)) { }
-    else if (emit_scalar_op_assign_value(c, gref, lv->type, op, v, gvar_is_oint(c, lv), b)) { }
+    else if (emit_scalar_op_assign_value(c, gref, lv->type, op, v, gvar_is_oint(c, lv), id, b)) { }
     else {
       buf_printf(b, "(gv_%s %s= ", rn, op ? op : "+");
       emit_coerce(c, v, lv->type, CO_HOLD, "the operand of an `op=`", b); buf_puts(b, ")");
@@ -2312,7 +2314,9 @@ static int emit_ivar_cvar_gvar_expr(Compiler *c, int id, Buf *b, const NodeTable
       emit_strbuf_slot_read(c, id, repr_of(c, id), sref, b);
       buf_puts(b, "; })");
     }
-    else buf_printf(b, "gv_%s; })", rn);
+    /* the write's value: an oint global's oint where the write can be nil,
+       its value otherwise */
+    else buf_printf(b, gvar_is_oint(c, lv) && !node_is_oint(c, id) ? "gv_%s.v; })" : "gv_%s; })", rn);
     return 1;
   }
   if (sp_streq(ty, "GlobalVariableOrWriteNode") || sp_streq(ty, "GlobalVariableAndWriteNode")) {
@@ -2346,7 +2350,7 @@ static int emit_ivar_cvar_gvar_expr(Compiler *c, int id, Buf *b, const NodeTable
     }
     else if (emit_array_op_assign_value(c, ref, ct, op, v, b)) { }
     else if (emit_poly_op_assign_value(c, ref, ct, op, v, b)) { }
-    else if (emit_scalar_op_assign_value(c, ref, ct, op, v, cvar_is_oint(c, cid, idx), b)) { }
+    else if (emit_scalar_op_assign_value(c, ref, ct, op, v, cvar_is_oint(c, cid, idx), id, b)) { }
     else {
       buf_printf(b, "(%s %s= ", ref, op ? op : "+");
       emit_coerce(c, v, ct, CO_HOLD, "the operand of an `op=`", b); buf_puts(b, ")");
@@ -4587,10 +4591,12 @@ static void emit_expr_node(Compiler *c, int id, Buf *b) {
         else { buf_puts(b, default_value_from_compiler(c, yt)); buf_puts(b, ")"); } }
       return;
     }
+    g_yield_want_oint = oint_kind(repr_of(c, id).as_ty) && node_is_oint(c, id);
     emit_block_invoke(c, nt_ref(nt, id, "arguments"), b, 0, 1, repr_of(c, id).as_ty);
     return;
   }
   if (is_block_call(c, id)) {           /* block.call used for its value */
+    g_yield_want_oint = oint_kind(repr_of(c, id).as_ty) && node_is_oint(c, id);
     emit_block_invoke(c, nt_ref(nt, id, "arguments"), b, 0, 1, repr_of(c, id).as_ty);
     return;
   }

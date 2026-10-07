@@ -2019,6 +2019,10 @@ extern int g_want_oint;
 /* the leaf slot read emit_expr is rendering is wanted as its own oint
    (codegen_expr.c) */
 extern int g_oint_read;
+/* the yield in value position wants its oint (codegen_iter.c); the `next`
+   slot of the block being spliced is an oint */
+extern int g_yield_want_oint;
+extern int g_ie_next_oint;
 /* A slot of kind t known to hold nil, read where a value of that kind is
    wanted: the kind's nil for the kinds that have one (NULL, a boxed nil),
    and for an Integer or Float, whose plain scalar has no nil, the TypeError

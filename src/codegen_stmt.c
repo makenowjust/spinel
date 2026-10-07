@@ -1845,6 +1845,9 @@ void emit_assign(Compiler *c, int id, Buf *b, int indent) {
   else if (lv && lv->type == TY_POLY_ARRAY && repr_of(c, v).kind == RK_BOXED) {
     buf_puts(b, "sp_poly_to_poly_array("); emit_expr(c, v, b); buf_puts(b, ")");
   }
+  /* an Integer or Float slot that holds its nil takes the value's oint form
+     (a boxed value unboxed with its nil, a nil, a plain value wrapped) */
+  else if (lv && slot_is_oint(lv)) emit_oint_expr(c, v, lv->type, b);
   /* scalar/string slot with a poly RHS (`x = (a + b) * 2` over poly a/b, a
      string local read back from a poly call): unbox into the slot. */
   else if (lv && emit_poly_rhs_coerced(c, lv->type, v, b)) { }
@@ -1862,8 +1865,6 @@ void emit_assign(Compiler *c, int id, Buf *b, int indent) {
        yield is unresolvable, into an sp_int k). A non-token RHS emits raw. */
     emit_unresolved_coerced(c, v, lv->type, b);
   }
-  /* an Integer or Float slot that holds its nil takes the value's oint form */
-  else if (lv && slot_is_oint(lv)) emit_oint_expr(c, v, lv->type, b);
   else if (lv) emit_coerce(c, v, lv->type, CO_HOLD, "a local variable write", b);
   else emit_expr(c, v, b);
   buf_puts(b, ";\n");
@@ -9336,6 +9337,15 @@ static void masgn_guard_line(Buf *fb, Buf *b, int indent) {
 }
 /* `val`, a C value of type `vt`, as a slot of type `st` holds it; a NULL
    `val` is Ruby nil. */
+/* the same into an Integer / Float slot that holds its nil: its oint */
+static void masgn_conv_o(Compiler *c, TyKind st, TyKind vt, const char *val, Buf *b) {
+  if (!val) buf_puts(b, oint_nil(st));
+  else if (vt == TY_POLY || vt == TY_UNKNOWN) buf_printf(b, "%s(%s)", oint_unbox(st), val);
+  else if (vt == TY_NIL || vt == TY_VOID) buf_printf(b, "((void)(%s), %s)", val, oint_nil(st));
+  else if (st == TY_FLOAT && vt == TY_INT) buf_printf(b, "sp_ofloat_of((sp_float)(%s))", val);
+  else buf_printf(b, "%s(%s)", oint_of(st), val);
+  (void)c;
+}
 static void masgn_conv(Compiler *c, int id, TyKind st, TyKind vt, const char *val, Buf *b) {
   if (!val) { buf_puts(b, nil_sentinel(st == TY_UNKNOWN ? TY_POLY : st)); return; }
   if (st == TY_POLY && vt != TY_POLY) emit_boxed_src(c, vt, val, b);
@@ -9412,7 +9422,16 @@ static int masgn_store(Compiler *c, int id, int tgt, const char *val, TyKind vt,
     int ix = comp_ivar_index(&c->classes[cid], nm);
     emit_indent(b, indent);
     buf_printf(b, "%s = ", lhs);
-    masgn_conv(c, id, ix >= 0 ? c->classes[cid].ivar_types[ix] : TY_UNKNOWN, vt, val, b);
+    if (ix >= 0 && ivar_has_nilbit(c, cid, ix)) {
+      /* the field's nil bit kept in step with the element's nil */
+      Buf ot; memset(&ot, 0, sizeof ot);
+      masgn_conv_o(c, c->classes[cid].ivar_types[ix], vt, val, &ot);
+      size_t pn = strlen(lhs) - strlen(iv_c(nm + 1)) - 3;
+      char ipfx[320]; snprintf(ipfx, sizeof ipfx, "%.*s", (int)pn, lhs);
+      emit_ivar_text_nilbit(c, cid, ix, ipfx, ot.p ? ot.p : "", b);
+      free(ot.p);
+    }
+    else masgn_conv(c, id, ix >= 0 ? c->classes[cid].ivar_types[ix] : TY_UNKNOWN, vt, val, b);
     buf_puts(b, ";\n");
     return 1;
   }
@@ -9422,7 +9441,8 @@ static int masgn_store(Compiler *c, int id, int tgt, const char *val, TyKind vt,
     if (!gv) { unsupported(c, id, "multiple assignment global target"); return 1; }
     emit_indent(b, indent);
     buf_printf(b, "gv_%s = ", gn);
-    masgn_conv(c, id, gv->type, vt, val, b);
+    if (gvar_is_oint(c, gv)) masgn_conv_o(c, gv->type, vt, val, b);
+    else masgn_conv(c, id, gv->type, vt, val, b);
     buf_puts(b, ";\n");
     return 1;
   }
@@ -9435,7 +9455,8 @@ static int masgn_store(Compiler *c, int id, int tgt, const char *val, TyKind vt,
     emit_indent(b, indent);
     emit_cvar_set_flag(c, cid, nm, 0, b);
     buf_printf(b, "cvar_%s_%s = ", c->classes[cid].name, nm + 2);
-    masgn_conv(c, id, c->classes[cid].cvar_types[cx], vt, val, b);
+    if (cvar_is_oint(c, cid, cx)) masgn_conv_o(c, c->classes[cid].cvar_types[cx], vt, val, b);
+    else masgn_conv(c, id, c->classes[cid].cvar_types[cx], vt, val, b);
     buf_puts(b, ";\n");
     return 1;
   }
@@ -9588,7 +9609,8 @@ static void emit_massign_poly_target(Compiler *c, int id, int tgt, const char *v
     LocalVar *lv = scope_local(comp_scope_of(c, tgt), lnm);
     emit_indent(b, indent);
     emit_local_ref(c, tgt, lnm, b); buf_puts(b, " = ");
-    masgn_conv(c, id, lv ? lv->type : TY_POLY, TY_POLY, val, b);
+    if (lv && slot_is_oint(lv)) masgn_conv_o(c, lv->type, TY_POLY, val, b);
+    else masgn_conv(c, id, lv ? lv->type : TY_POLY, TY_POLY, val, b);
     buf_puts(b, ";\n");
     return;
   }
@@ -10644,6 +10666,11 @@ static int emit_multi_write_stmt(Compiler *c, int id, Buf *b, int indent, const 
       else if (ltt == TY_STRBUF && valt == TY_POLY) buf_printf(b, "sp_poly_as_strbuf(_t%d)", tmps[i]);
       /* a boxed element into a typed local: unboxed, as a plain write does
          (`mk, x = 0, nl` with nl only ever nil) */
+      else if (llv && slot_is_oint(llv)) {
+        /* a local that holds its nil takes the element as its oint */
+        char tv[24]; snprintf(tv, sizeof tv, "_t%d", tmps[i]);
+        masgn_conv_o(c, ltt, valt, tv, b);
+      }
       else if (valt == TY_POLY && ltt != TY_POLY && ltt != TY_UNKNOWN) {
         char tv[24]; snprintf(tv, sizeof tv, "_t%d", tmps[i]);
         masgn_conv(c, lefts[i], ltt, valt, tv, b);
@@ -12223,6 +12250,12 @@ static int emit_attr_global_const_write_stmt(Compiler *c, int id, Buf *b, int in
       }
       return 1;
     }
+    /* a global that holds its nil takes the value's oint form */
+    if (isg && gvar_is_oint(c, lv)) {
+      emit_oint_expr(c, v, lv->type, b);
+      buf_puts(b, ";\n");
+      return 1;
+    }
     int vlit = empty_literal_node(c, v);
     /* `X = [].freeze`: the strip above found the literal so the slot's kind
        builds it; the freeze it stripped still has to happen (#3828). */
@@ -13101,6 +13134,7 @@ void emit_stmt_inner(Compiler *c, int id, Buf *b, int indent) {
         TyKind at9 = g_ie_next_ty == TY_POLY_ARRAY ? comp_ntype(c, nv[0]) : TY_UNKNOWN;
         const char *apf9 = at9 != TY_POLY_ARRAY ? array_to_poly_fn(at9) : NULL;
         if (g_ie_res_poly) emit_boxed(c, nv[0], b);
+        else if (g_ie_next_oint) emit_oint_expr(c, nv[0], g_ie_next_ty, b);
         else if (g_ie_next_ty == TY_INT || g_ie_next_ty == TY_FLOAT) emit_expr_slot(c, nv[0], g_ie_next_ty, b);
         else if (apf9) { buf_printf(b, "%s(", apf9); emit_expr(c, nv[0], b); buf_puts(b, ")"); }
         else emit_expr(c, nv[0], b);
@@ -15396,6 +15430,9 @@ static int emit_array_mutate_stmt_body(Compiler *c, int id, Buf *b, int indent) 
       /* a poly-array element must be boxed; emit_boxed also fixes a yield whose
          node type widened to poly but whose per-site value is concrete (#2454). */
       if (et == TY_POLY) emit_boxed(c, argv[a], b);
+      /* an Integer or Float that can be nil is pushed with it (the _nilable
+         push takes the oint); a boxed value converts to the element */
+      else if (oint_kind(et) && *nil_store_sfx(c, k, argv[a])) emit_elem_store_value(c, k, argv[a], b);
       else if (vt == TY_POLY && et == TY_STRING) { buf_puts(b, "sp_poly_elem_s("); emit_expr(c, argv[a], b); buf_puts(b, ")"); }
       else if (vt == TY_POLY && et == TY_INT) { buf_puts(b, "sp_poly_elem_i("); emit_expr(c, argv[a], b); buf_puts(b, ")"); }
       else if (vt == TY_POLY && et == TY_FLOAT) { buf_puts(b, "sp_poly_elem_f("); emit_expr(c, argv[a], b); buf_puts(b, ")"); }

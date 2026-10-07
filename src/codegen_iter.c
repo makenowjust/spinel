@@ -1341,11 +1341,15 @@ int emit_inline_call_x(Compiler *c, int id, Buf *b, int indent, int as_expr) {
     if (fwd_yield_proc) g_yield_slot_ty = rt;  /* value-position yield unboxes to this */
     int rtag = ++g_tmp;
     char rvbuf[32]; snprintf(rvbuf, sizeof rvbuf, "_t%d", rtag);
-    emit_indent(b, din); emit_ctype(c, rt, b);
+    /* the callee's nullable Integer / Float answer is its oint */
+    int ro = oint_kind(rt) && method_ret_is_oint(m);
+    emit_indent(b, din); emit_res_ctype(c, rt, ro, b);
     /* a value-type object is a struct, whose zero is `{0}`, not NULL */
-    buf_printf(b, " _t%d = %s;\n", rtag, comp_ty_value_obj(c, rt) ? "{0}" : default_value_from_compiler(c, rt));
+    buf_printf(b, " _t%d = %s;\n", rtag, ro ? oint_nil(rt) : comp_ty_value_obj(c, rt) ? "{0}" : default_value_from_compiler(c, rt));
     const char *sv_rv = g_result_var; g_result_var = rvbuf;
     int sp = g_result_poly; g_result_poly = (rt == TY_POLY);
+    int sv_ro = g_result_oint; g_result_oint = ro;
+    int sv_rro = g_ret_oint; g_ret_oint = ro;
     /* g_result_ty is the slot type a tail statement reads to pick its own
        nil sentinel (a bare `nil` feeding a nullable Integer/Float slot,
        #4692-class): every OTHER place that sets g_result_var (begin/rescue)
@@ -1372,7 +1376,7 @@ int emit_inline_call_x(Compiler *c, int id, Buf *b, int indent, int as_expr) {
       emit_indent(b, din); buf_puts(b, "}\n");
       emit_indent(b, din); buf_printf(b, "_yret%d: ;\n", tag);
     }
-    g_result_var = sv_rv; g_result_poly = sp; g_result_ty = sv_rty;
+    g_result_var = sv_rv; g_result_poly = sp; g_result_ty = sv_rty; g_result_oint = sv_ro; g_ret_oint = sv_rro;
     emit_indent(b, din); buf_printf(b, "_t%d;\n", rtag);
   }
   else {
@@ -1611,6 +1615,16 @@ static int ykw_out_of_order(Compiler *c, int blk, int ykw) {
   return 0;
 }
 
+static void emit_block_arg_coerced(Compiler *c, int node, TyKind ot, Buf *b);
+/* the same into parameter slot `lv`: one that holds its nil takes the oint */
+static void emit_block_arg_coerced_lv(Compiler *c, int node, LocalVar *lv, TyKind ot, Buf *b) {
+  if (lv && slot_is_oint(lv)) emit_oint_expr(c, node, lv->type, b);
+  else emit_block_arg_coerced(c, node, ot, b);
+}
+/* the yield being emitted in value position is wanted as an oint (set by
+   the yield emitter, consumed by emit_block_invoke) */
+int g_yield_want_oint = 0;
+int g_ie_next_oint = 0;
 static void emit_block_arg_coerced(Compiler *c, int node, TyKind ot, Buf *b) {
   TyKind at = repr_of(c, node).as_ty;
   /* an empty `{}` / `[]` stays untyped, and emit_boxed gives it the poly form */
@@ -2242,7 +2256,7 @@ static void emit_block_binds_gathered(Compiler *c, int blk, int t, TyKind at, in
     else if (oint_kind(et) && slot_is_oint(ol)) buf_printf(b, "%s(%s)", oint_of(ot), eb.p ? eb.p : "0");
     else buf_puts(b, eb.p ? eb.p : "");
     buf_puts(b, " : ");
-    if (dv >= 0) { bi_block_side(bi); emit_block_arg_coerced(c, dv, ot, b); bi_method_side(bi); }
+    if (dv >= 0) { bi_block_side(bi); emit_block_arg_coerced_lv(c, dv, ol, ot, b); bi_method_side(bi); }
     else buf_puts(b, odflt);
     buf_puts(b, ")");
     free(eb.p);
@@ -2648,7 +2662,7 @@ void emit_block_binds(Compiler *c, int blk, const int *yargs, int yc,
          variable holds none (the handle is NULL for a nil) */
       else if (bl && bl->type == TY_POLY && emit_handle_var_ref(c, yargs[k], &hb))
         buf_printf(b, "sp_box_nullable_obj(%s, SP_BUILTIN_STRBUF)", hb.p);
-      else emit_block_arg_coerced(c, yargs[k], bl ? bl->type : TY_UNKNOWN, b);
+      else emit_block_arg_coerced_lv(c, yargs[k], bl, bl ? bl->type : TY_UNKNOWN, b);
       free(hb.p);
     }
     else {
@@ -2714,10 +2728,10 @@ void emit_block_binds(Compiler *c, int blk, const int *yargs, int yc,
       /* an optional that is the shared handle takes a handle yielded to it
          itself (yield_splice_handles), as a required one does */
       if (!(repr_of_slot(c, ol).handle && emit_handle_var_ref(c, yargs[yi], b)))
-        emit_block_arg_coerced(c, yargs[yi], ot, b);
+        emit_block_arg_coerced_lv(c, yargs[yi], ol, ot, b);
     }
     else if (dv >= 0) {
-      bi_block_side(bi); emit_block_arg_coerced(c, dv, ot, b); bi_method_side(bi);
+      bi_block_side(bi); emit_block_arg_coerced_lv(c, dv, ol, ot, b); bi_method_side(bi);
     }
     else {
       buf_puts(b, odflt);
@@ -2808,6 +2822,8 @@ void emit_block_invoke(Compiler *c, int args_node, Buf *b, int indent, int as_ex
      tail is concrete (a yield-result union of an rbs-seeded Hash and a class
      instance reached the boxed slot without a box, #3278). */
   int want_poly = as_expr && want_ty == TY_POLY;
+  /* the yield's value is wanted as an oint (an Integer / Float that can be nil) */
+  int ywo = g_yield_want_oint && as_expr && oint_kind(want_ty); g_yield_want_oint = 0;
   const NodeTable *nt = c->nt;
   int blk = g_block_id;
   int bbody = nt_ref(nt, blk, "body");
@@ -2987,7 +3003,9 @@ void emit_block_invoke(Compiler *c, int args_node, Buf *b, int indent, int as_ex
       g_ie_res_poly = (nx_bt == TY_POLY || (want_poly && ty_is_object(nx_bt)));
       /* a `next nil` into an Integer or Float slot is the sentinel */
       g_ie_next_ty = (nx_bt == TY_INT || nx_bt == TY_FLOAT) ? nx_bt : TY_UNKNOWN;
+      g_ie_next_oint = ywo && oint_kind(nx_bt);
       if (g_ie_res_poly) buf_printf(b, "sp_RbVal _t%d = sp_box_nil(); ", nx_tmp);
+      else if (g_ie_next_oint) buf_printf(b, "%s _t%d = %s; ", oint_ctype(nx_bt), nx_tmp, oint_nil(nx_bt));
       else if (nx_bt == TY_INT || nx_bt == TY_BOOL || nx_bt == TY_SYMBOL)
         buf_printf(b, "sp_int _t%d = 0; ", nx_tmp);
       else if (proc_slot_is_ptr(nx_bt)) {
@@ -3002,7 +3020,7 @@ void emit_block_invoke(Compiler *c, int args_node, Buf *b, int indent, int as_ex
       buf_puts(b, "do { ");
     }
     else {
-      g_ie_next_var = NULL; g_ie_res_poly = 0; g_ie_next_ty = TY_UNKNOWN;
+      g_ie_next_var = NULL; g_ie_res_poly = 0; g_ie_next_ty = TY_UNKNOWN; g_ie_next_oint = 0;
       emit_indent(b, indent); buf_puts(b, "do {\n");
     }
   }
@@ -3113,6 +3131,7 @@ void emit_block_invoke(Compiler *c, int args_node, Buf *b, int indent, int as_ex
     { Buf tb; memset(&tb, 0, sizeof tb);
       Buf *svp3 = g_pre; int svi3 = g_indent; g_pre = b; g_indent = 0;
       if (want_poly && ty_is_object(comp_ntype(c, bd3[bn3 - 1]))) emit_boxed(c, bd3[bn3 - 1], &tb);
+      else if (ywo) emit_oint_expr(c, bd3[bn3 - 1], want_ty, &tb);
       else emit_expr(c, bd3[bn3 - 1], &tb);
       g_pre = svp3; g_indent = svi3;
       if (tb.p) buf_puts(b, tb.p);
@@ -3175,6 +3194,23 @@ void emit_block_invoke(Compiler *c, int args_node, Buf *b, int indent, int as_ex
     { Buf tb; memset(&tb, 0, sizeof tb);
       Buf *svp3 = g_pre; int svi3 = g_indent; g_pre = b; g_indent = 0;
       emit_unresolved_coerced(c, bd3[bn3 - 1], want_ty, &tb);
+      g_pre = svp3; g_indent = svi3;
+      if (tb.p) buf_puts(b, tb.p);
+      free(tb.p); }
+    buf_puts(b, "; ");
+  }
+  else if (as_expr && !nx_own && bn3 > 0 && ywo && !nx_tail_stmt &&
+           nt_kind(nt, bd3[bn3 - 1]) != NK_ReturnNode && nt_kind(nt, bd3[bn3 - 1]) != NK_NextNode) {
+    /* a bare tail wanted as the yield's oint: its oint form is the value */
+    if (block_of_body(c, bbody) >= 0) emit_block_locals_reset(c, block_of_body(c, bbody), b, 0);
+    for (int k3 = 0; k3 < bn3 - 1; k3++) {
+      if (rd_lbl && k3 == rd_head) buf_printf(b, "_redo_%d: ; ", rd_lbl);
+      emit_stmt(c, bd3[k3], b, 0);
+    }
+    if (rd_lbl && rd_head >= bn3 - 1) buf_printf(b, "_redo_%d: ; ", rd_lbl);
+    { Buf tb; memset(&tb, 0, sizeof tb);
+      Buf *svp3 = g_pre; int svi3 = g_indent; g_pre = b; g_indent = 0;
+      emit_oint_expr(c, bd3[bn3 - 1], want_ty, &tb);
       g_pre = svp3; g_indent = svi3;
       if (tb.p) buf_puts(b, tb.p);
       free(tb.p); }

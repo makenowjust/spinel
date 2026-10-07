@@ -5024,7 +5024,6 @@ int node_is_oint(Compiler *c, int node) {
   case NK_GlobalVariableReadNode:
     return nullable_int_value(c, node);
   case NK_CallNode: {
-    if (nullable_int_value(c, node)) return 1;
     /* `r&.m`: nil when r is -- except on the safe-navigation emitter's
        re-entry for the same node (g_sn_skip), which emits the plain call on
        the guarded receiver and wraps it itself */
@@ -5034,25 +5033,49 @@ int node_is_oint(Compiler *c, int node) {
     if (!nm) return 0;
     int blk = nt_ref(nt, node, "block");
     int r = nt_ref(nt, node, "receiver");
+    TyKind rt = r >= 0 ? comp_ntype(c, r) : TY_UNKNOWN;
+    int a2 = nt_ref(nt, node, "arguments"), an2 = 0;
+    if (a2 >= 0) nt_arr(nt, a2, "arguments", &an2);
     /* a proc's result comes back boxed and is unboxed with its nil */
-    if (is_call_or_yield(nm) && r >= 0 && comp_ntype(c, r) == TY_PROC) return 1;
+    if (is_call_or_yield(nm) && r >= 0 && rt == TY_PROC) return 1;
+    /* a method the program defines, resolved as the call emitter resolves
+       it: its C function answers an oint iff method_ret_is_oint */
+    int mi = -1;
+    if (r < 0) mi = comp_self_call_mi(c, node, nm);
+    else if (ty_is_object(rt)) {
+      int cid = ty_object_class(rt);
+      /* an attr reader over an ivar with a nil bit answers the ivar's oint */
+      if (an2 == 0 && blk < 0 && reader_ivar_has_nilbit(c, cid, nm)) return 1;
+      mi = comp_method_in_chain(c, cid, nm, NULL);
+    }
+    else if (nt_kind(nt, r) == NK_ConstantReadNode) {
+      int rci = comp_class_index(c, nt_str(nt, r, "name"));
+      if (rci >= 0) mi = comp_cmethod_in_chain(c, rci, nm, NULL);
+    }
+    if (mi >= 0) return method_ret_is_oint(&c->scopes[mi]);
+    /* a receiver that stayed poly: the dispatch answers an oint when a
+       target can answer nil (the analysis's dispatch set) */
+    if (rt == TY_POLY || (r < 0 && !ty_is_object(rt))) {
+      if (nullable_int_value(c, node)) return 1;
+    }
+    /* a class's own methods (File.delete) are no container's */
+    if (r >= 0 && nt_kind(nt, r) == NK_ConstantReadNode) return 0;
     /* the runtime functions that answer an sp_oint (RUNTIME-API.md) */
     if ((sp_streq(nm, "bsearch") || sp_streq(nm, "bsearch_index")) && blk >= 0) return 1;
     if (sp_streq(nm, "nonzero?") || sp_streq(nm, "infinite?") || sp_streq(nm, "getbyte")) return 1;
     if (sp_streq(nm, "index") || sp_streq(nm, "rindex") || sp_streq(nm, "delete_at") ||
         sp_streq(nm, "byteindex") || sp_streq(nm, "byterindex") ||
         sp_streq(nm, "pop") || sp_streq(nm, "shift") || sp_streq(nm, "delete")) return 1;
-    if (is_range_bound_reader(nm) && r >= 0) {
-      TyKind rrt = comp_ntype(c, r);
-      if (rrt == TY_MATCHDATA || rrt == TY_RANGE || rrt == TY_FLOAT_RANGE) return 1;
-    }
-    /* an attr reader over an ivar with a nil bit answers the ivar's oint */
-    if (r >= 0 && blk < 0) {
-      int a2 = nt_ref(nt, node, "arguments"), an2 = 0;
-      if (a2 >= 0) nt_arr(nt, a2, "arguments", &an2);
-      TyKind rt2 = comp_ntype(c, r);
-      if (an2 == 0 && ty_is_object(rt2) && reader_ivar_has_nilbit(c, ty_object_class(rt2), nm)) return 1;
-    }
+    if (is_range_bound_reader(nm) && r >= 0 &&
+        (rt == TY_MATCHDATA || rt == TY_RANGE || rt == TY_FLOAT_RANGE)) return 1;
+    /* an element read that can miss, a fold or a search over a container
+       that can hold nil: the analysis's answer, for a container receiver */
+    if (r >= 0 && (ty_is_array(rt) || ty_is_hash(rt) || rt == TY_RANGE) &&
+        (sp_streq(nm, "[]") || sp_streq(nm, "at") || sp_streq(nm, "fetch") || sp_streq(nm, "dig") ||
+         sp_streq(nm, "first") || sp_streq(nm, "last") || sp_streq(nm, "min") || sp_streq(nm, "max") ||
+         sp_streq(nm, "sum") || sp_streq(nm, "sample") || sp_streq(nm, "find_index") ||
+         is_find_alias(nm) || is_reduce_alias(nm)))
+      return nullable_int_value(c, node);
     return 0;
   }
   default:

@@ -11685,6 +11685,9 @@ static int emit_new_call_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, 
       int an_next = bn > 0 && bb && subtree_has_own_next(nt, bbody);
       const char *sv_anx = g_ie_next_var; int sv_anp = g_ie_res_poly; TyKind sv_ant = g_ie_next_ty;
       char anbuf[32]; int anv = 0;
+      /* an Integer or Float tail that can be nil is pushed with its nil: the
+         slot (and the `next` slot) is its oint */
+      int tail_o = bn > 0 && bb && (sp_streq(k, "Int") || sp_streq(k, "Float")) && nil_store_sfx(c, k, bb[bn - 1])[0];
       if (an_next) {
         anv = ++g_tmp;
         snprintf(anbuf, sizeof anbuf, "_t%d", anv);
@@ -11692,7 +11695,8 @@ static int emit_new_call_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, 
         emit_indent(g_pre, g_indent);
         if (sp_streq(k, "Ptr")) { et = TY_UNKNOWN; buf_printf(g_pre, "void *_t%d = NULL;\n", anv); }
         else if (et == TY_POLY) buf_printf(g_pre, "sp_RbVal _t%d = sp_box_nil();\n", anv);
-        else { emit_ctype(c, et, g_pre); buf_printf(g_pre, " _t%d = %s;\n", anv, (et == TY_INT || et == TY_FLOAT) ? nil_value(et) : default_value_from_compiler(c, et)); }
+        else if (tail_o) buf_printf(g_pre, "%s _t%d = %s;\n", oint_ctype(et), anv, oint_nil(et));
+        else { emit_ctype(c, et, g_pre); buf_printf(g_pre, " _t%d = %s;\n", anv, default_value_from_compiler(c, et)); }
         emit_indent(g_pre, g_indent); buf_puts(g_pre, "do {\n");
         g_indent++;
         g_ie_next_var = anbuf; g_ie_res_poly = et == TY_POLY;
@@ -11712,6 +11716,7 @@ static int emit_new_call_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, 
            which wraps the plain string it evaluates to in a fresh handle */
         int tail_strbuf = sp_streq(k, "Poly") && repr_of(c, bb[bn - 1]).as_ty == TY_STRBUF;
         if (tail_strbuf) emit_boxed(c, bb[bn - 1], &vb);
+        else if (tail_o) emit_oint_expr(c, bb[bn - 1], elem_t, &vb);
         else emit_expr(c, bb[bn - 1], &vb);
         if (an_next) {
           /* the tail lands in the slot too; the push below reads the slot */

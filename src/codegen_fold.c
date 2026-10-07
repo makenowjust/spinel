@@ -6892,14 +6892,15 @@ static void emit_arg_or_default_fill(Compiler *c, Scope *m, int idx, int provide
            coerce, else the generated C assigns sp_RbVal to a const char* /
            sp_int / sp_float / sp_<Class>* slot. */
         const char *ptn = c_type_name(pt);
-        /* a literal/derived nil argument into a number param: the slot's
-           oint when it holds its nil beside the value, exactly like a nil
-           DEFAULT does below; a plain slot raises the operand TypeError (a
-           plain emit rendered nil as 0 and the callee saw an integer, #2438) */
-        if (at == TY_NIL && oint_kind(pt)) {
+        /* an Integer or Float parameter that holds its nil beside the value
+           takes the argument's oint form (nil, boxed, plain, a raise token);
+           a nil into a plain slot raises the operand TypeError (a plain emit
+           rendered nil as 0 and the callee saw an integer, #2438) */
+        if (oint_kind(pt) && slot_is_oint(p))
+          emit_oint_expr(c, provided, pt, out);
+        else if (at == TY_NIL && oint_kind(pt)) {
           buf_puts(out, "((void)("); emit_expr(c, provided, out);
-          if (slot_is_oint(p)) buf_printf(out, "), %s)", oint_nil(pt));
-          else buf_printf(out, "), %s(%s))", oint_arg(pt), oint_nil(pt));
+          buf_printf(out, "), %s(%s))", oint_arg(pt), oint_nil(pt));
         }
         else if (at == TY_NIL && pt == TY_STRING) { buf_puts(out, "((void)("); emit_expr(c, provided, out); buf_puts(out, "), NULL)"); }
         else if (at == TY_POLY && pt == TY_STRING) { buf_puts(out, "sp_poly_to_s_or_nil("); emit_expr(c, provided, out); buf_puts(out, ")"); }
