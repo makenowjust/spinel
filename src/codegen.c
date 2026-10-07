@@ -8904,7 +8904,9 @@ void emit_class_new(Compiler *c, ClassInfo *ci, Buf *b) {
         for (int i = 0; i < si->nparams; i++) {
           if (i) buf_puts(b, ", ");
           TyKind pt = scope_param_type(si, i);
-          emit_ctype(c, pt, b);
+          /* as the prototype declares it (an oint slot included) */
+          LocalVar *pl = scope_local(si, si->pnames[i]);
+          if (pl && pl->type != TY_UNKNOWN) emit_slot_ctype(c, pl, b); else emit_ctype(c, pt, b);
           buf_printf(b, " lv_%s", si->pnames[i]);
         }
       }
@@ -11429,6 +11431,22 @@ static void emit_reopen_self_boxed(Compiler *c, int cls, Buf *b) {
 }
 
 
+/* `super(...)` into a Struct / Data member with a nil bit: the value with
+   its nil, into the field and its bit (the store's left side is written) */
+static int super_member_nilbit(Compiler *c, ClassInfo *cls, int a, int v, Buf *b) {
+  int scid = (int)(cls - c->classes);
+  TyKind ivt = cls->ivar_types[a];
+  if (!oint_kind(ivt) || !ivar_has_nilbit(c, scid, a) || v < 0) return 0;
+  TyKind vt = comp_ntype(c, v);
+  if (vt != ivt && vt != TY_POLY && vt != TY_NIL) return 0;
+  Buf ob; memset(&ob, 0, sizeof ob);
+  if (vt == TY_POLY) { buf_printf(&ob, "%s(", oint_unbox(ivt)); emit_expr(c, v, &ob); buf_puts(&ob, ")"); }
+  else emit_oint_expr(c, v, ivt, &ob);
+  char pfx[160]; snprintf(pfx, sizeof pfx, "%s->", g_self);
+  emit_ivar_text_nilbit(c, scid, a, pfx, ob.p ? ob.p : oint_nil(ivt), b);
+  free(ob.p);
+  return 1;
+}
 void emit_super(Compiler *c, int id, Buf *b) {
   if (g_plan_check) ucall_emitted(id);
   { Scope *ss = comp_scope_of(c, id);
@@ -11691,7 +11709,17 @@ void emit_super(Compiler *c, int id, Buf *b) {
           LocalVar *pv = scope_local(s, s->pnames[pk]);
           TyKind at = pv && pv->type != TY_UNKNOWN ? pv->type : TY_POLY;
           Buf src; memset(&src, 0, sizeof src); emit_scope_local_ref(c, s, s->pnames[pk], &src);
-          if (ivt == TY_POLY && oint_kind(at) && slot_is_oint(pv)) buf_printf(b, "%s(%s)", oint_box(at), src.p);
+          int scid = (int)(cls - c->classes);
+          /* a member with a nil bit takes the parameter's nil into it */
+          if (oint_kind(ivt) && ivar_has_nilbit(c, scid, a) && (at == ivt || at == TY_POLY)) {
+            char ot[300], pfx[160];
+            if (at == TY_POLY) snprintf(ot, sizeof ot, "%s(%s)", oint_unbox(ivt), src.p);
+            else if (pv && slot_is_oint(pv)) snprintf(ot, sizeof ot, "%s", src.p);
+            else snprintf(ot, sizeof ot, "%s(%s)", oint_of(ivt), src.p);
+            snprintf(pfx, sizeof pfx, "%s->", g_self);
+            emit_ivar_text_nilbit(c, scid, a, pfx, ot, b);
+          }
+          else if (ivt == TY_POLY && oint_kind(at) && slot_is_oint(pv)) buf_printf(b, "%s(%s)", oint_box(at), src.p);
           else if (ivt == TY_POLY && at == TY_FLOAT) buf_printf(b, "sp_box_float(%s)", src.p);
           /* a parameter the initialize appends to is the handle (#6179); a
              String member holds its bytes, copied, since the handle's next
@@ -11717,6 +11745,7 @@ void emit_super(Compiler *c, int id, Buf *b) {
             else
               buf_printf(b, "%s)", default_value_from_compiler(c, ivt));
           }
+          else if (super_member_nilbit(c, cls, a, vnode, b)) {}
           else {
             int at_boxed = repr_of(c, vnode).kind == RK_BOXED;
             if (ivt == TY_STRBUF && struct_super_handle_arg(c, vnode, b)) {}
@@ -11728,6 +11757,7 @@ void emit_super(Compiler *c, int id, Buf *b) {
             else emit_expr(c, vnode, b);
           }
         }
+        else if (super_member_nilbit(c, cls, a, sargv[a], b)) {}
         else {
           int at_boxed = repr_of(c, sargv[a]).kind == RK_BOXED;
           if (ivt == TY_STRBUF && struct_super_handle_arg(c, sargv[a], b)) {}

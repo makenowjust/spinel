@@ -29212,6 +29212,29 @@ static void mark_nullable_int_locals(Compiler *c) {
       if (ci->ivar_types[iv] != TY_INT && ci->ivar_types[iv] != TY_FLOAT) continue;
       if (nullable_int_value(c, av[0])) { ci->ivar_nullable_int[iv] = 1; changed = 1; }
     }
+    /* A Struct's or Data's custom initialize forwarding its parameters
+       through `super`: a parameter that can hold nil (a `song: nil`
+       default) reaches the member of its name, or of its position */
+    for (int si = 1; si < c->nscopes; si++) {
+      Scope *is = &c->scopes[si];
+      if (!is->name || !sp_streq(is->name, "initialize") || is->is_cmethod || is->class_id < 0) continue;
+      int k = is->class_id, sc = -1;
+      for (int hop = 0; k >= 0 && hop < 64; k = c->classes[k].parent, hop++)
+        if (c->classes[k].is_struct || c->classes[k].is_data) { sc = k; break; }
+      if (sc < 0) continue;
+      ClassInfo *sci = &c->classes[sc];
+      for (int pi = 0; pi < is->nparams; pi++) {
+        const char *pn = is->pnames ? is->pnames[pi] : NULL;
+        LocalVar *pv = pn ? scope_local(is, pn) : NULL;
+        if (!pv || !pv->nullable_int) continue;
+        char ivb[300]; snprintf(ivb, sizeof ivb, "@%s", pn);
+        int m = comp_ivar_index(sci, ivb);
+        if (m < 0 || m >= sci->nmembers) m = pi < sci->nmembers ? pi : -1;
+        if (m < 0 || sci->ivar_nullable_int[m]) continue;
+        if (sci->ivar_types[m] != TY_INT && sci->ivar_types[m] != TY_FLOAT) continue;
+        sci->ivar_nullable_int[m] = 1; changed = 1;
+      }
+    }
     /* `s[:x] = v` / `s["x"] = v` / `s[0] = v` on a Struct (or a boxed value
        that can be one): the member takes v, nil included */
     NT_FOREACH_KIND(nt, NK_CallNode, id) {
