@@ -2029,9 +2029,9 @@ int emit_slice_when_chunk_inspect_expr(Compiler *c, int id, Buf *b) {
     emit_indent(g_pre, g_indent);
     buf_printf(g_pre, "for (sp_int _t%d = 0; _t%d < sp_IntArray_length(_t%d); _t%d++) {\n", ti, ti, ta, ti);
     emit_indent(g_pre, g_indent + 1);
-    buf_printf(g_pre, "lv_%s = sp_IntArray_get(_t%d, _t%d);\n", p0, ta, ti);
+    buf_printf(g_pre, "lv_%s = sp_IntArray_%s(_t%d, _t%d);\n", p0, bp_getter(c, block, BP0(c, block), "Int"), ta, ti);
     emit_indent(g_pre, g_indent + 1);
-    buf_printf(g_pre, "sp_IntArray_push_nilable(_t%d, lv_%s);\n", tcur, p0);
+    buf_printf(g_pre, "sp_IntArray_push_o(_t%d, sp_IntArray_oget(_t%d, _t%d));\n", tcur, ta, ti);   /* the element with its nil */
     emit_indent(g_pre, g_indent + 1);
     buf_printf(g_pre, "if (_t%d + 1 < sp_IntArray_length(_t%d)) {\n", ti, ta);
     emit_indent(g_pre, g_indent + 2);
@@ -2084,7 +2084,7 @@ int emit_slice_when_chunk_inspect_expr(Compiler *c, int id, Buf *b) {
   emit_indent(g_pre, g_indent);
   buf_printf(g_pre, "for (sp_int _t%d = 0; _t%d < sp_IntArray_length(_t%d); _t%d++) {\n", ti, ti, ta, ti);
   emit_indent(g_pre, g_indent + 1);
-  buf_printf(g_pre, "lv_%s = sp_IntArray_get(_t%d, _t%d);\n", p0, ta, ti);
+  buf_printf(g_pre, "lv_%s = sp_IntArray_%s(_t%d, _t%d);\n", p0, bp_getter(c, block, BP0(c, block), "Int"), ta, ti);
   /* emit key expression */
   Scope *bsc = comp_scope_of(c, block);
   LocalVar *lv0 = bsc ? scope_local(bsc, p0n) : NULL;
@@ -2108,7 +2108,7 @@ int emit_slice_when_chunk_inspect_expr(Compiler *c, int id, Buf *b) {
   buf_printf(g_pre, "_t%d = _tkey_%d;\n", tpk, ta);
   emit_indent(g_pre, g_indent + 1); buf_puts(g_pre, "}\n");
   emit_indent(g_pre, g_indent + 1);
-  buf_printf(g_pre, "sp_IntArray_push_nilable(_t%d, lv_%s);\n", tcur, p0);
+  buf_printf(g_pre, "sp_IntArray_push_o(_t%d, sp_IntArray_oget(_t%d, _t%d));\n", tcur, ta, ti);   /* the element with its nil */
   emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n");
   /* build inspect string */
   emit_indent(g_pre, g_indent);
@@ -2302,7 +2302,7 @@ int emit_chunk_first_class_expr(Compiler *c, int id, Buf *b) {
   emit_indent(g_pre, g_indent);
   buf_printf(g_pre, "for (sp_int _t%d = 0; _t%d < sp_IntArray_length(_t%d); _t%d++) {\n", ti, ti, ta, ti);
   emit_indent(g_pre, g_indent + 1);
-  buf_printf(g_pre, "lv_%s = sp_IntArray_get(_t%d, _t%d);\n", p0, ta, ti);
+  buf_printf(g_pre, "lv_%s = sp_IntArray_%s(_t%d, _t%d);\n", p0, bp_getter(c, block, BP0(c, block), "Int"), ta, ti);
   Scope *bsc = comp_scope_of(c, block);
   LocalVar *lv0 = bsc ? scope_local(bsc, p0n) : NULL;
   TyKind pt0 = lv0 ? lv0->type : TY_UNKNOWN;
@@ -2331,7 +2331,7 @@ int emit_chunk_first_class_expr(Compiler *c, int id, Buf *b) {
   buf_printf(g_pre, "_t%d = _tkey_%d; _t%d = 1;\n", tpk, ta, thas);
   emit_indent(g_pre, g_indent + 1); buf_puts(g_pre, "}\n");
   emit_indent(g_pre, g_indent + 1);
-  buf_printf(g_pre, "sp_IntArray_push_nilable(_t%d, lv_%s);\n", tcur, p0);
+  buf_printf(g_pre, "sp_IntArray_push_o(_t%d, sp_IntArray_oget(_t%d, _t%d));\n", tcur, ta, ti);   /* the element with its nil */
   emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n");
   buf_printf(b, "_t%d", tout);
   return 1;
@@ -2439,9 +2439,9 @@ int emit_chunk_while_expr(Compiler *c, int id, Buf *b) {
   emit_indent(g_pre, g_indent);
   buf_printf(g_pre, "for (sp_int _t%d = 0; _t%d < sp_IntArray_length(_t%d); _t%d++) {\n", ti, ti, ta, ti);
   emit_indent(g_pre, g_indent + 1);
-  buf_printf(g_pre, "lv_%s = sp_IntArray_get(_t%d, _t%d);\n", p0, ta, ti);
+  buf_printf(g_pre, "lv_%s = sp_IntArray_%s(_t%d, _t%d);\n", p0, bp_getter(c, block, BP0(c, block), "Int"), ta, ti);
   emit_indent(g_pre, g_indent + 1);
-  buf_printf(g_pre, "sp_IntArray_push_nilable(_t%d, lv_%s);\n", tcur, p0);
+  buf_printf(g_pre, "sp_IntArray_push_o(_t%d, sp_IntArray_oget(_t%d, _t%d));\n", tcur, ta, ti);   /* the element with its nil */
   emit_indent(g_pre, g_indent + 1);
   buf_printf(g_pre, "if (_t%d + 1 < sp_IntArray_length(_t%d)) {\n", ti, ta);
   emit_indent(g_pre, g_indent + 2);
