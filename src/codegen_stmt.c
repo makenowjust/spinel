@@ -4631,8 +4631,11 @@ static void emit_boxed_src(Compiler *c, TyKind t, const char *src, Buf *b) {
   buf_puts(b, bx.p ? bx.p : "sp_box_nil()"); free(bx.p);
 }
 
+static int masgn_oint_temp(const char *val);
 static void emit_boxed_tmp(Compiler *c, TyKind t, int tmp, Buf *b) {
   char expr[32]; snprintf(expr, sizeof expr, "_t%d", tmp);
+  /* a multi-assign element held with its nil beside it boxes as that oint */
+  if (oint_kind(t) && masgn_oint_temp(expr) >= 0) { buf_printf(b, "%s(_t%do)", oint_box(t), tmp); return; }
   emit_boxed_src(c, t, expr, b);
 }
 
