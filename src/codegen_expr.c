@@ -1262,11 +1262,15 @@ int emit_call_or_write_via_methods(Compiler *c, int id, int is_or, Buf *b) {
   if (vt == TY_UNKNOWN || vt == TY_VOID || vt == TY_NIL) vt = want;
 
   int tr = ++g_tmp, tv = ++g_tmp, tw = ++g_tmp;
+  /* a reader written out that answers its nil beside the value: the temp is
+     that oint, the test its flag; a plain number reader is never nil */
+  int ro = rk == SP_MEMBER_METHOD && oint_kind(rdt) && method_ret_is_oint(&c->scopes[rmi]);
   buf_puts(b, "({ ");
   emit_ctype(c, rt, b); buf_printf(b, " _t%d = ", tr); emit_expr(c, recv, b); buf_puts(b, "; ");
   if (!comp_ty_value_obj(c, rt)) buf_printf(b, "SP_GC_ROOT(_t%d); ", tr);
   /* the reader, once */
-  emit_ctype(c, rdt, b); buf_printf(b, " _t%d = ", tv);
+  if (ro) buf_puts(b, oint_ctype(rdt)); else emit_ctype(c, rdt, b);
+  buf_printf(b, " _t%d = ", tv);
   if (rk == SP_MEMBER_METHOD) {
     Buf rb; memset(&rb, 0, sizeof rb);
     emit_method_cname(c, &c->scopes[rmi], &rb);
@@ -1285,9 +1289,14 @@ int emit_call_or_write_via_methods(Compiler *c, int id, int is_or, Buf *b) {
   /* the test, then either the reader's answer or the assignment's value.
      `||=` assigns when the reader is falsy, `&&=` when it is truthy. */
   buf_puts(b, "(");
-  emit_slot_nil_test(c, rdt, tv, is_or ? 0 : 1, b);
+  if (ro) emit_slot_nil_test(c, rdt, tv, is_or ? 0 : 1, b);
+  else if (oint_kind(rdt)) buf_puts(b, is_or ? "0" : "1");   /* a plain number is never nil */
+  else emit_slot_nil_test(c, rdt, tv, is_or ? 0 : 1, b);
   buf_puts(b, ") ? ");
-  { char sv[32]; snprintf(sv, sizeof sv, "_t%d", tv);
+  /* the expression's own form: the reader's oint where the node answers one
+     (`&&=` on a nil attribute is nil), its plain value otherwise */
+  int wo = ro && node_is_oint(c, id);
+  { char sv[32]; snprintf(sv, sizeof sv, ro && !wo ? "_t%d.v" : "_t%d", tv);
     if (rdt == want) buf_puts(b, sv);
     else if (want == TY_POLY) emit_boxed_text(c, rdt, sv, b);
     /* nil-preserving: the reader can answer nil, and this arm is exactly the
@@ -1326,9 +1335,11 @@ int emit_call_or_write_via_methods(Compiler *c, int id, int is_or, Buf *b) {
   }
   buf_puts(b, "); ");
   { char sw[32]; snprintf(sw, sizeof sw, "_t%d", tw);
+    if (wo) buf_printf(b, "%s(", oint_of(want));
     if (vt == want) buf_puts(b, sw);
     else if (want == TY_POLY) emit_boxed_text(c, vt, sw, b);
     else emit_unbox_text(c, want, sw, b);
+    if (wo) buf_puts(b, ")");
   }
   buf_puts(b, "; }); })");
   return 1;
@@ -1434,19 +1445,31 @@ void emit_expr(Compiler *c, int id, Buf *b) {
   g_oint_read = (is_o || leaf_o) &&
                 (ok == NK_LocalVariableReadNode || ok == NK_InstanceVariableReadNode ||
                  ok == NK_ClassVariableReadNode || ok == NK_GlobalVariableReadNode);
-  if (is_o && !want_o) buf_printf(b, "%s(", oint_arg(ot));
-  else if (want_o && !is_o && !leaf_o) buf_printf(b, "%s(", oint_of(oint_kind(ot) ? ot : TY_INT));
+  int wrap_arg = is_o && !want_o, wrap_of = want_o && !is_o && !leaf_o;
+  /* a wrapper pending: the node is rendered aside first, since a text that
+     diverges (a raise token answering the plain default) takes no wrapper */
+  Buf side; memset(&side, 0, sizeof side);
+  Buf *ob = (wrap_arg || wrap_of) ? &side : b;
   /* an Array subclass instance read where an Array is wanted -- a splat, a
      destructuring, a `for` collection, an element write that is no call --
      is typed as its Array (an_ary_viewed): the same pointer, cast to the
      Array it starts with (#7449) */
   if (an_ary_viewed(c, id) && array_new_copies(comp_ntype(c, id))) {
-    buf_printf(b, "((%s)(", c_type_name(comp_ntype(c, id)));
-    emit_expr_node(c, id, b);
-    buf_puts(b, "))");
+    buf_printf(ob, "((%s)(", c_type_name(comp_ntype(c, id)));
+    emit_expr_node(c, id, ob);
+    buf_puts(ob, "))");
   }
-  else emit_expr_node(c, id, b);
-  if ((is_o && !want_o) || (want_o && !is_o && !leaf_o)) buf_puts(b, ")");
+  else emit_expr_node(c, id, ob);
+  if (ob == &side) {
+    int diverges = side.p && text_diverges(side.p);
+    if (wrap_arg && !diverges) buf_printf(b, "%s(", oint_arg(ot));
+    else if (wrap_of && !diverges) buf_printf(b, "%s(", oint_of(oint_kind(ot) ? ot : TY_INT));
+    buf_puts(b, side.p ? side.p : "");
+    if (!diverges) buf_puts(b, ")");
+    /* a diverging text read as an oint: the plain default it carries, wrapped */
+    else if (wrap_of) { /* the value never reads: its C type is the plain scalar, which sp_oint_of takes */ }
+    free(side.p);
+  }
   g_oint_read = 0;
   g_expr_depth--;
 }

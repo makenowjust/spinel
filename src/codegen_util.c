@@ -5016,6 +5016,14 @@ static int reader_ivar_has_nilbit(Compiler *c, int cid, const char *nm) {
   return iv >= 0 && ivar_has_nilbit(c, k, iv);
 }
 
+/* the number of parent hops from class cid up to class k (a large value
+   when k is not an ancestor) */
+static int class_chain_depth(Compiler *c, int cid, int k) {
+  int d = 0;
+  for (int x = cid; x >= 0 && x < c->nclasses; x = c->classes[x].parent, d++) if (x == k) return d;
+  return 1 << 20;
+}
+
 int node_is_oint(Compiler *c, int node) {
   const NodeTable *nt = c->nt;
   if (node < 0) return 0;
@@ -5035,6 +5043,26 @@ int node_is_oint(Compiler *c, int node) {
   case NK_ClassVariableReadNode:
   case NK_GlobalVariableReadNode:
     return nullable_int_value(c, node);
+  case NK_ParenthesesNode: {
+    /* `(expr)` is its expression's form */
+    int u = unwrap_parens(c, node);
+    return u != node && u >= 0 ? node_is_oint(c, u) : nullable_int_value(c, node);
+  }
+  case NK_CallOrWriteNode:
+  case NK_CallAndWriteNode: {
+    /* `o.x ||= v` / `o.x &&= v` answers what the reader answers on the arm
+       that does not assign: the reader's oint when the reader has one (a
+       method written out answering its nil, an attr reader over a nil bit) */
+    int r = nt_ref(nt, node, "receiver");
+    const char *nm = nt_str(nt, node, "name");
+    TyKind rt = r >= 0 ? comp_ntype(c, r) : TY_UNKNOWN;
+    if (r < 0 || !nm || !ty_is_object(rt)) return nullable_int_value(c, node);
+    int cid = ty_object_class(rt), rmi = -1;
+    int rk = comp_resolve_member(c, cid, nm, 0, NULL, &rmi);
+    if (rk == SP_MEMBER_METHOD && rmi >= 0) return method_ret_is_oint(&c->scopes[rmi]);
+    if (rk == SP_MEMBER_ATTR) return reader_ivar_has_nilbit(c, cid, nm);
+    return nullable_int_value(c, node);
+  }
   case NK_CallNode: {
     /* `r&.m`: nil when r is -- except on the safe-navigation emitter's
        re-entry for the same node (g_sn_skip), which emits the plain call on
@@ -5056,12 +5084,15 @@ int node_is_oint(Compiler *c, int node) {
     if (r < 0) mi = comp_self_call_mi(c, node, nm);
     else if (ty_is_object(rt)) {
       int cid = ty_object_class(rt);
+      int mdef = -1, rdef = -1;
+      mi = comp_method_in_chain(c, cid, nm, &mdef);
       /* an attr reader is its ivar's read: the ivar's oint when the ivar
          carries a nil bit, the plain field otherwise (whatever the reader's
-         own return mark says: the field has no other form) */
-      if (an2 == 0 && blk < 0 && comp_reader_in_chain(c, cid, nm, NULL))
+         own return mark says: the field has no other form) -- unless a
+         method written out nearer in the chain overrides the reader */
+      if (an2 == 0 && blk < 0 && comp_reader_in_chain(c, cid, nm, &rdef) &&
+          (mi < 0 || class_chain_depth(c, cid, rdef < 0 ? cid : rdef) <= class_chain_depth(c, cid, mdef < 0 ? cid : mdef)))
         return reader_ivar_has_nilbit(c, cid, nm);
-      mi = comp_method_in_chain(c, cid, nm, NULL);
     }
     else if (nt_kind(nt, r) == NK_ConstantReadNode) {
       int rci = comp_class_index(c, nt_str(nt, r, "name"));

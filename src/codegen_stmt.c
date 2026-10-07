@@ -7252,7 +7252,7 @@ void emit_for(Compiler *c, int id, Buf *b, int indent) {
        truncated to 2 and stopped at 1) */
     emit_indent(b, indent); buf_puts(b, rty == TY_FLOAT ? "{ sp_float " : "{ sp_int ");
     buf_printf(b, "_t%d = ", thi);
-    if (rty == TY_NIL) buf_puts(b, "(sp_int)INTPTR_MAX");   /* `lo..nil`: endless */
+    if (rty == TY_NIL) buf_puts(b, "SP_RANGE_NO_END");   /* `lo..nil`: endless */
     else {
       if (rconv) buf_puts(b, rconv);
       if (hi_o) emit_oint_expr(c, rref, TY_INT, b); else emit_expr(c, rref, b);
@@ -7309,7 +7309,7 @@ void emit_for(Compiler *c, int id, Buf *b, int indent) {
     emit_indent(b, indent);
     buf_printf(b, "{ sp_Range _t%d = ", tr); emit_expr(c, coll, b); buf_puts(b, ";\n");
     emit_indent(b, indent + 1);
-    buf_printf(b, "if (_t%d.first == INTPTR_MIN) sp_raise_cls(\"TypeError\", \"can't iterate from NilClass\");\n", tr);
+    buf_printf(b, "if (_t%d.nobeg) sp_raise_cls(\"TypeError\", \"can't iterate from NilClass\");\n", tr);
     emit_indent(b, indent + 1);
     buf_printf(b, "sp_int _t%d = sp_range_step(_t%d); sp_int _t%d = _t%d.last - (_t%d.excl ? (_t%d > 0 ? 1 : -1) : 0);\n",
                ts, tr, te, tr, tr, ts);
@@ -7842,6 +7842,11 @@ static void emit_tail_value(Compiler *c, int node, Buf *b) {
       return;
     }
   }
+  /* a slot holding its nil beside the value takes the value's oint form */
+  if (g_result_var ? g_result_oint : g_ret_oint) {
+    emit_oint_expr(c, node, g_result_var ? g_result_ty : g_ret_type, b);
+    return;
+  }
   Buf tmp; memset(&tmp, 0, sizeof tmp);
   emit_expr(c, node, &tmp);
   const char *txt = tmp.p ? tmp.p : "";
@@ -7917,6 +7922,7 @@ static void emit_return_deferred(Compiler *c, const int *a, int n, Buf *b, int i
       buf_printf(b, "_retv%d = ", ctx->lid);
       /* the FRAME's slot type, not g_ret_type: see EnsureCtx.retv_ty */
       if (ctx->retv_ty == TY_POLY && repr_of(c, a[0]).kind != RK_BOXED) emit_boxed(c, a[0], b);
+      else if (oint_kind(ctx->retv_ty) && ctx->retv_o) emit_oint_expr(c, a[0], ctx->retv_ty, b);
       else emit_coerce(c, a[0], ctx->retv_ty, CO_HOLD, "a return through ensure", b);
       buf_puts(b, "; ");
     }
@@ -8592,7 +8598,8 @@ static void emit_ensure_return(Compiler *c, int eid, int has_retval, Buf *b, int
   else if (has_retval && g_in_proc_body && !g_c_ret_void) {
     char rv[32]; snprintf(rv, sizeof rv, "_retv%d", eid);
     buf_printf(b, "if (_retf%d) { _sp_proc_poly_ret = ", eid);
-    emit_boxed_text(c, g_ret_type, rv, b);
+    if (oint_kind(g_ret_type) && g_ret_oint) buf_printf(b, "%s(%s)", oint_box(g_ret_type), rv);
+    else emit_boxed_text(c, g_ret_type, rv, b);
     buf_puts(b, "; return 0; }\n");
   }
   else emit_retf_return(eid, has_retval, b);
@@ -8663,13 +8670,18 @@ void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar) 
     emit_indent(b, indent); buf_printf(b, "const char *_exccls%d = NULL;\n", eid);
     emit_indent(b, indent); buf_printf(b, "void *_excobj%d = NULL;\n", eid);
     if (has_retval) {
-      emit_indent(b, indent); emit_ctype(c, g_ret_type, b);
+      emit_indent(b, indent);
+      /* a number slot holding its nil beside the value is the oint */
+      if (oint_kind(g_ret_type) && g_ret_oint) buf_printf(b, "%s _retv%d = %s;", oint_ctype(g_ret_type), eid, oint_nil(g_ret_type));
+      else {
+      emit_ctype(c, g_ret_type, b);
       /* a by-value object class is a bare struct: default_value's NULL is
          ill-typed C there */
       if (ty_is_object(g_ret_type) && comp_ty_value_obj(c, g_ret_type))
         buf_printf(b, " _retv%d = (sp_%s){0};", eid, c->classes[ty_object_class(g_ret_type)].c_name);
       else
         buf_printf(b, " _retv%d = %s;", eid, default_value_from_compiler(c, g_ret_type));
+      }
       /* the deferred value waits in the slot while the ensure body runs,
          which may allocate */
       if (ty_gc_rootable(c, g_ret_type)) {
@@ -8678,7 +8690,7 @@ void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar) 
       }
       buf_puts(b, "\n");
     }
-    g_ensure_stack[g_ensure_depth++] = (EnsureCtx){ eid, has_retval, g_exc_frame_depth, g_ret_type };
+    g_ensure_stack[g_ensure_depth++] = (EnsureCtx){ eid, has_retval, g_exc_frame_depth, g_ret_type, g_ret_oint };
 
     /* retry in the rescue restarts the body; the ensure runs only when the
        begin finally exits (matching CRuby, where an aborted attempt does not
@@ -15087,11 +15099,11 @@ static int str_mutate_append_bang_arms(Compiler *c, int id, Buf *b, int indent, 
           int tr2 = ++g_tmp;
           buf_printf(b, "{ sp_Range _t%d = sp_range_ix(", tr2); emit_expr(c, argv[0], b); buf_puts(b, ")");
           buf_printf(b, "; sp_int _t%d = (sp_int)sp_str_length(", tn2); emit_expr(c, recv, b);
-          /* a beginless Range (first INTPTR_MIN) starts at 0, and an endless
-             one (last INTPTR_MAX) runs to the end: `last + 1` overflowed */
-          buf_printf(b, "); sp_int _t%d = _t%d.first == INTPTR_MIN ? 0 : _t%d.first < 0 ? _t%d.first + _t%d : _t%d.first;",
+          /* a beginless Range starts at 0, and an endless one runs to the
+             end: `last + 1` overflowed */
+          buf_printf(b, "); sp_int _t%d = _t%d.nobeg ? 0 : _t%d.first < 0 ? _t%d.first + _t%d : _t%d.first;",
                      ti2, tr2, tr2, tr2, tn2, tr2);
-          buf_printf(b, " sp_int _t%d = _t%d.last == INTPTR_MAX ? _t%d - _t%d :"
+          buf_printf(b, " sp_int _t%d = _t%d.noend ? _t%d - _t%d :"
                         " (_t%d.last < 0 ? _t%d.last + _t%d : _t%d.last) - _t%d + (_t%d.excl ? 0 : 1);",
                      tl2, tr2, tn2, ti2, tr2, tr2, tn2, tr2, ti2, tr2);
           buf_printf(b, " if (_t%d < 0) _t%d = 0;", tl2, tl2);

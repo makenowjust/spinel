@@ -4734,10 +4734,12 @@ int emit_array_filter_loop(Compiler *c, int recv, int block, TyKind rt, const ch
     emit_indent(b, indent); buf_printf(b, "const char *_exccls%d = NULL;\n", eid);
     emit_indent(b, indent); buf_printf(b, "void *_excobj%d = NULL;\n", eid);
     if (has_retval) {
-      emit_indent(b, indent); emit_ctype(c, g_ret_type, b);
-      buf_printf(b, " _retv%d = %s;\n", eid, default_value_from_compiler(c, g_ret_type));
+      emit_indent(b, indent);
+      /* a number slot holding its nil beside the value is the oint */
+      if (oint_kind(g_ret_type) && g_ret_oint) buf_printf(b, "%s _retv%d = %s;\n", oint_ctype(g_ret_type), eid, oint_nil(g_ret_type));
+      else { emit_ctype(c, g_ret_type, b); buf_printf(b, " _retv%d = %s;\n", eid, default_value_from_compiler(c, g_ret_type)); }
     }
-    g_ensure_stack[g_ensure_depth++] = (EnsureCtx){ eid, has_retval, g_exc_frame_depth, g_ret_type };
+    g_ensure_stack[g_ensure_depth++] = (EnsureCtx){ eid, has_retval, g_exc_frame_depth, g_ret_type, g_ret_oint };
     emit_indent(b, indent); buf_puts(b, "sp_exc_check_depth();\n");
     emit_indent(b, indent); buf_puts(b, "sp_exc_rootmark[sp_exc_top] = sp_gc_nroots; sp_rescue_mark[sp_exc_top] = sp_rescue_sp;\n");
     emit_indent(b, indent); buf_puts(b, "sp_exc_msg[sp_exc_top] = 0; sp_exc_obj[sp_exc_top] = 0; sp_exc_top++;\n");

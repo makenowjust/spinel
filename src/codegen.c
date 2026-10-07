@@ -6195,7 +6195,7 @@ void emit_fiber_new(Compiler *c, int id, Buf *b, int as_gen, int size_node) {
   int sv_bnren = g_block_nren;
   const char *sv_bpn = g_block_param_name, *sv_self = g_self, *sv_rv = g_result_var;
   const char *sv_yld = g_yielder_name;
-  TyKind sv_rt = g_ret_type; int sv_rp = g_result_poly;
+  TyKind sv_rt = g_ret_type; int sv_rp = g_result_poly; int sv_rto = g_ret_oint;
   int sv_cv = g_c_ret_void; g_c_ret_void = 1;   /* the C function is `static void` */
   /* A `return` written in a fiber/thread body cannot reach its home method:
      the body runs on its own stack, and CRuby answers the same shape with
@@ -6465,7 +6465,7 @@ void emit_fiber_new(Compiler *c, int id, Buf *b, int as_gen, int size_node) {
   /* Restore emission state */
   ren_unpark(&ren_sv);
   g_pre = sv_pre; g_indent = sv_indent; g_block_id = sv_block; g_block_nren = sv_bnren;
-  g_block_param_name = sv_bpn; g_self = sv_self; g_ret_type = sv_rt; g_c_ret_void = sv_cv;
+  g_block_param_name = sv_bpn; g_self = sv_self; g_ret_type = sv_rt; g_c_ret_void = sv_cv; g_ret_oint = sv_rto;
   g_proc_return_home = sv_prh_fb; g_proc_toplevel_return = sv_ptr_fb;
   g_self_deref = sv_fbderef;
   g_result_poly = sv_rp; g_result_var = sv_rv; g_yielder_name = sv_yld;
@@ -7507,7 +7507,7 @@ else if (orecv >= 0 && onm) {
   Buf *sv_pre = g_pre; int sv_indent = g_indent, sv_nren = g_nren, sv_block = g_block_id;
   int sv_bnren = g_block_nren;
   const char *sv_bpn = g_block_param_name, *sv_self = g_self, *sv_rv = g_result_var;
-  TyKind sv_rt = g_ret_type; int sv_rp = g_result_poly;
+  TyKind sv_rt = g_ret_type; int sv_rp = g_result_poly; int sv_rto = g_ret_oint;
   const char *sv_cap_struct = g_cap_struct; NameSet *sv_cap_names = g_cap_names;
   int sv_ensure_depth = g_ensure_depth;
   EnsureCtx sv_estk[MAX_ENSURE_DEPTH]; memcpy(sv_estk, g_ensure_stack, sizeof sv_estk);
@@ -8158,7 +8158,7 @@ else if (orecv >= 0 && onm) {
 
   ren_unpark(&ren_sv);
   g_pre = sv_pre; g_indent = sv_indent; g_block_id = sv_block; g_block_nren = sv_bnren;
-  g_block_param_name = sv_bpn; g_self = sv_self; g_result_var = sv_rv; g_ret_type = sv_rt;
+  g_block_param_name = sv_bpn; g_self = sv_self; g_result_var = sv_rv; g_ret_type = sv_rt; g_ret_oint = sv_rto;
   g_self_deref = sv_deref;
   g_ie_class_id = sv_iec;
   if (bs) { bs->class_id = sv_bcls; bs->is_cmethod = sv_bcm; }

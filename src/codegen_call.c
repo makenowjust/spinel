@@ -13084,14 +13084,14 @@ static void emit_splice_bounds(Compiler *c, int ta, int tg,
     /* frozen precedes any range validation (CRuby's modify-check order),
        and a range beginning before -len is a RangeError, not IndexError */
     buf_printf(b, " if(_t%d->frozen)sp_raise_frozen_array();", ta);
-    buf_printf(b, " if(_t%d.first!=INTPTR_MIN&&_t%d.first<-_al%d)"
+    buf_printf(b, " if(!_t%d.nobeg&&_t%d.first<-_al%d)"
                   "sp_raise_cls(\"RangeError\",sp_sprintf(\"%%s out of range\",sp_range_str(_t%d)));",
                tg, tg, tg, tg);
-    /* INTPTR_MIN/MAX are the beginless/endless sentinels: start 0 / to-end */
-    buf_printf(b, " sp_int _s%d = _t%d.first==INTPTR_MIN?0:(_t%d.first<0?_t%d.first+_al%d:_t%d.first);",
+    /* a beginless range starts at 0, an endless one runs to the end */
+    buf_printf(b, " sp_int _s%d = _t%d.nobeg?0:(_t%d.first<0?_t%d.first+_al%d:_t%d.first);",
                ta, tg, tg, tg, tg, tg);
     buf_printf(b, " sp_int _l%d;"
-                  " if(_t%d.last==INTPTR_MAX){_l%d=_al%d-_s%d;if(_l%d<0)_l%d=0;}"
+                  " if(_t%d.noend){_l%d=_al%d-_s%d;if(_l%d<0)_l%d=0;}"
                   "\nelse{sp_int _e%d=_t%d.last<0?_t%d.last+_al%d:_t%d.last;"
                   " _l%d=_e%d-_s%d+(_t%d.excl?0:1);if(_l%d<0)_l%d=0;} ",
                ta,
