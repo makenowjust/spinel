@@ -5283,8 +5283,10 @@ static int iter_range_upto_arms(Compiler *c, int id, Buf *b, int indent, const N
     buf_printf(b, "sp_int _t%d = sp_range_step(_t%d); sp_int _t%d = _t%d.last - (_t%d.excl ? (_t%d > 0 ? 1 : -1) : 0);\n",
                ts0, t0, te0, t0, t0, ts0);
     emit_indent(b, indent);
-    buf_printf(b, "for (sp_int _t%d = _t%d.first; _t%d > 0 ? _t%d <= _t%d : _t%d >= _t%d; _t%d += _t%d) {\n",
-               ti0, t0, ts0, ti0, te0, ti0, te0, ti0, ts0);
+    { char v[32], f[40], s[32], l[32];
+      snprintf(v, sizeof v, "_t%d", ti0); snprintf(f, sizeof f, "_t%d.first", t0);
+      snprintf(s, sizeof s, "_t%d", ts0); snprintf(l, sizeof l, "_t%d", te0);
+      emit_range_walk_head(b, indent, v, 1, f, s, l); }
     emit_loop_body(c, body, b, indent + 1);
     emit_indent(b, indent); buf_puts(b, "}\n");
     return 1;
@@ -5364,17 +5366,20 @@ static int iter_range_upto_arms(Compiler *c, int id, Buf *b, int indent, const N
     if (clv && clv->type == TY_POLY) {
       int tc = ++g_tmp;
       emit_indent(b, indent);
-      buf_printf(b, "for (sp_int _t%d = _t%d.first; _t%d > 0 ? _t%d <= _t%d : _t%d >= _t%d; _t%d += _t%d) {\n",
-                 tc, t, ts, tc, te, tc, te, tc, ts);
+      { char v[32], f[40], s[32], l[32];
+        snprintf(v, sizeof v, "_t%d", tc); snprintf(f, sizeof f, "_t%d.first", t);
+        snprintf(s, sizeof s, "_t%d", ts); snprintf(l, sizeof l, "_t%d", te);
+        emit_range_walk_head(b, indent, v, 1, f, s, l); }
       emit_indent(b, indent + 1);
       buf_printf(b, "lv_%s = sp_box_int(_t%d);\n", p0, tc);
       emit_loop_body(c, body, b, indent + 1);
       emit_indent(b, indent); buf_puts(b, "}\n");
       return 1;
     }
-    emit_indent(b, indent);
-    buf_printf(b, "for (lv_%s = _t%d.first; _t%d > 0 ? lv_%s <= _t%d : lv_%s >= _t%d; lv_%s += _t%d) {\n",
-               p0, t, ts, p0, te, p0, te, p0, ts);
+    { char v[200], f[40], s[32], l[32];
+      snprintf(v, sizeof v, "lv_%s", p0); snprintf(f, sizeof f, "_t%d.first", t);
+      snprintf(s, sizeof s, "_t%d", ts); snprintf(l, sizeof l, "_t%d", te);
+      emit_range_walk_head(b, indent, v, 0, f, s, l); }
     emit_loop_body(c, body, b, indent + 1);
     emit_indent(b, indent); buf_puts(b, "}\n");
     return 1;
@@ -5409,9 +5414,17 @@ static int iter_range_upto_arms(Compiler *c, int id, Buf *b, int indent, const N
       buf_printf(&hi, "_t%d", th);
     }
     emit_indent(b, indent);
-    buf_printf(b, "for (sp_int _t%d = ", ti); buf_puts(b, lo.p);
-    buf_printf(b, "; _t%d %s ", ti, up ? "<=" : ">="); buf_puts(b, hi.p);
-    buf_printf(b, "; _t%d%s) {\n", ti, up ? "++" : "--");
+    if (comp_ntype(c, argv[0]) == TY_INT || repr_of(c, argv[0]).kind == RK_BOXED) {
+      /* an Integer limit: the walk stops at the ends of sp_int
+         (`(m + 1).downto(m)` with m at INTPTR_MIN never ended) */
+      char v[32]; snprintf(v, sizeof v, "_t%d", ti);
+      emit_range_walk_head(b, indent, v, 1, lo.p ? lo.p : "0", up ? "1" : "(-1)", hi.p ? hi.p : "0");
+    }
+    else {
+      buf_printf(b, "for (sp_int _t%d = ", ti); buf_puts(b, lo.p);
+      buf_printf(b, "; _t%d %s ", ti, up ? "<=" : ">="); buf_puts(b, hi.p);
+      buf_printf(b, "; _t%d%s) {\n", ti, up ? "++" : "--");
+    }
     if (p0) { char ts[32]; snprintf(ts, sizeof ts, "_t%d", ti); emit_iter_param_assign(c, block, p0_orig, p0, TY_INT, ts, b, indent + 1); }
     { char rs_es[32]; snprintf(rs_es, sizeof rs_es, "_t%d", ti);
       int rs_np = 0; while (block_param_name(c, block, rs_np)) rs_np++;
@@ -6828,8 +6841,10 @@ static int emit_iteration_stmt_body(Compiler *c, int id, Buf *b, int indent) {
       buf_printf(b, "sp_int _t%d = _t%d.last == INTPTR_MAX ? INTPTR_MIN : _t%d.last + (_t%d.excl ? 1 : 0);\n",
                  td2, tr, tr, tr);
       emit_indent(b, indent);
-      buf_printf(b, "for (sp_int _t%d = _t%d.first; _t%d > 0 ? _t%d <= _t%d : _t%d >= _t%d; _t%d += _t%d) {\n",
-                 tv2, tr, ts2, tv2, tl2, tv2, td2, tv2, ts2);
+      { char v[32], f[40], s[32], l[80];
+        snprintf(v, sizeof v, "_t%d", tv2); snprintf(f, sizeof f, "_t%d.first", tr);
+        snprintf(s, sizeof s, "_t%d", ts2); snprintf(l, sizeof l, "(_t%d > 0 ? _t%d : _t%d)", ts2, tl2, td2);
+        emit_range_walk_head(b, indent, v, 1, f, s, l); }
       if (p0) {
         char elem[32]; snprintf(elem, sizeof elem, "_t%d", tv2);
         emit_iter_param_assign(c, block, p0_orig, p0, TY_INT, elem, b, indent + 1);

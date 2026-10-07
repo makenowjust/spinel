@@ -2005,6 +2005,12 @@ int ivar_node_slot(Compiler *c, int node, int *cid, int *iv);
 int ivar_read_slot_is_oint(Compiler *c, int node);
 /* an Integer literal as a C constant (INT64_MIN spelled as an expression) */
 void emit_int_lit(Buf *b, long long v);
+/* can a `next` of this block body (not a nested block's) hand the slot a
+   nil: a bare `next`, `next nil`, a value that can be nil (codegen_call.c) */
+int block_next_may_be_nil(Compiler *c, int id, int depth);
+/* the head of a Range walk that stops at the ends of sp_int (see codegen_util.c) */
+void emit_range_walk_head(Buf *b, int indent, const char *var, int decl, const char *first,
+                          const char *step, const char *last);
 /* a global's / class-level ivar's / cvar's static is an sp_oint */
 int gvar_is_oint(Compiler *c, const LocalVar *g);
 int civ_is_oint(Compiler *c, int cid, int iv);

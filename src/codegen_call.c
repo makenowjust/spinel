@@ -2347,7 +2347,12 @@ void emit_complex_coerce(Compiler *c, int node, Buf *b) {
     return;
   }
   buf_puts(b, "((sp_Complex){(sp_float)(");
-  emit_coerce(c, node, TY_FLOAT, CO_HOLD, "a Complex component", b);
+  /* a number that can be nil is Ruby's TypeError at run time, not a store
+     the program is refused for */
+  if (oint_kind(comp_ntype(c, node)) && node_may_be_nil(c, node)) {
+    buf_puts(b, "sp_ofloat_arg("); emit_oint_expr(c, node, TY_FLOAT, b); buf_puts(b, ")");
+  }
+  else emit_coerce(c, node, TY_FLOAT, CO_HOLD, "a Complex component", b);
   buf_printf(b, "), 0, %d})", comp_ntype(c, node) == TY_FLOAT ? 1 : 0);
 }
 
@@ -4569,7 +4574,7 @@ int obj_cmp_by_identity(TyKind t) {
 /* Can a `next v` of this block body (not one of a nested block, lambda,
    def or loop, which `next` leaves instead) hand the slot a nil: a bare
    `next`, `next nil`, or a value that can be nil. */
-static int block_next_may_be_nil(Compiler *c, int id, int depth) {
+int block_next_may_be_nil(Compiler *c, int id, int depth) {
   const NodeTable *nt = c->nt;
   if (id < 0 || depth > 200) return 0;
   NodeKind k = nt_kind(nt, id);
@@ -13674,8 +13679,12 @@ static int emit_array_arith_call(Compiler *c, int id, Buf *b) {
     /* the same for an int `+`, `-`, `*` the inference typed poly under
        promote (#4681): sp_poly_add / sub / mul promote past the word */
     if (g_promote_mode && rt == TY_INT && a0 == TY_INT && res == TY_POLY &&
-        is_add_sub_mul(name)) {
-      buf_printf(b, "sp_poly_%s(", sp_streq(name, "+") ? "add" : sp_streq(name, "-") ? "sub" : "mul");
+        (is_add_sub_mul(name) || sp_streq(name, "/") || sp_streq(name, "div"))) {
+      /* `/` and `div` too: -2**63 / -1 promotes to the Bignum (the
+         inference types the quotient poly unless the divisor is a constant
+         other than -1) */
+      buf_printf(b, "sp_poly_%s(", sp_streq(name, "+") ? "add" : sp_streq(name, "-") ? "sub" : sp_streq(name, "*") ? "mul"
+                                  : sp_streq(name, "/") ? "div" : "div_m");
       emit_boxed(c, recv, b); buf_puts(b, ", "); emit_boxed(c, argv[0], b); buf_puts(b, ")");
       return 1;
     }

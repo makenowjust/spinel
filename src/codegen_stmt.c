@@ -7314,8 +7314,10 @@ void emit_for(Compiler *c, int id, Buf *b, int indent) {
     buf_printf(b, "sp_int _t%d = sp_range_step(_t%d); sp_int _t%d = _t%d.last - (_t%d.excl ? (_t%d > 0 ? 1 : -1) : 0);\n",
                ts, tr, te, tr, tr, ts);
     emit_indent(b, indent + 1);
-    buf_printf(b, "for (sp_int _t%d = _t%d.first; _t%d > 0 ? _t%d <= _t%d : _t%d >= _t%d; _t%d += _t%d) {\n",
-               tc, tr, ts, tc, te, tc, te, tc, ts);
+    { char v[32], f[40], s[32], l[32];
+      snprintf(v, sizeof v, "_t%d", tc); snprintf(f, sizeof f, "_t%d.first", tr);
+      snprintf(s, sizeof s, "_t%d", ts); snprintf(l, sizeof l, "_t%d", te);
+      emit_range_walk_head(b, indent + 1, v, 1, f, s, l); }
     char el[32]; snprintf(el, sizeof el, "_t%d", tc);
     if (multi) emit_for_multi_scalar(c, idx, TY_INT, el, b, indent + 2);
     else {

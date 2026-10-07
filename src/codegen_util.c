@@ -4980,6 +4980,24 @@ int ivar_node_slot(Compiler *c, int node, int *cid, int *iv) {
   *cid = h.cid; *iv = h.idx;
   return h.cls_slot ? 2 : 1;
 }
+/* The head of a Range walk, `for (VAR = first; ...; VAR += step)`, whose
+   bounds may sit at the ends of sp_int: `i >= last` with last at INTPTR_MIN
+   never ended, and `i += 1` past INTPTR_MAX overflowed. The test runs ahead
+   of the step on the distance left, in unsigned arithmetic, and the step is
+   not taken past the last value. `first`, `step` and `last` (the inclusive
+   end) are C texts read once each iteration; `decl` declares VAR in the
+   head, else the guard is declared on its own line first. */
+void emit_range_walk_head(Buf *b, int indent, const char *var, int decl, const char *first,
+                          const char *step, const char *last) {
+  int g = ++g_tmp;
+  if (!decl) { emit_indent(b, indent); buf_printf(b, "sp_int _g%d = (%s > 0 ? %s <= %s : %s >= %s);\n", g, step, first, last, first, last); emit_indent(b, indent); }
+  buf_printf(b, "for (%s%s = %s", decl ? "sp_int " : "", var, first);
+  if (decl) buf_printf(b, ", _g%d = (%s > 0 ? %s <= %s : %s >= %s)", g, step, var, last, var, last);
+  buf_printf(b, "; _g%d; _g%d = (%s > 0 ? (uintptr_t)(%s) - (uintptr_t)(%s) >= (uintptr_t)(%s)"
+                " : (uintptr_t)(%s) - (uintptr_t)(%s) >= (uintptr_t)0 - (uintptr_t)(%s)), %s = _g%d ? %s + %s : %s) {\n",
+             g, g, step, last, var, step, var, last, step, var, g, var, step, var);
+}
+
 /* An Integer literal as a C constant. INT64_MIN has no literal of its own:
    `-9223372036854775808LL` negates a constant too wide for long long (C reads
    it unsigned, a -Werror), so it is spelled as the expression. */

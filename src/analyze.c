@@ -27273,7 +27273,8 @@ int nullable_int_value(Compiler *c, int v) {
     for (int rs = nt_ref(nt, v, "rescue_clause"); rs >= 0; rs = nt_ref(nt, rs, "subsequent"))
       if (nullable_int_value(c, nt_ref(nt, rs, "statements"))) return 1;
     int els = nt_ref(nt, v, "else_clause");
-    return els >= 0 && nullable_int_value(c, nt_ref(nt, els, "statements"));
+    /* an else with no statements answers nil */
+    return els >= 0 && (nt_ref(nt, els, "statements") < 0 || nullable_int_value(c, nt_ref(nt, els, "statements")));
   }
   if (nt_kind(nt, v) == NK_RescueModifierNode)
     return nullable_int_value(c, nt_ref(nt, v, "expression")) ||
@@ -27333,6 +27334,18 @@ int nullable_int_value(Compiler *c, int v) {
   }
   if (nt_kind(nt, v) == NK_CallNode) {
     if (nn_index_inbounds(c, v)) return 0;
+    /* `<=>` over two numbers (or two Strings, two Symbols) always answers:
+       only a pairing of other kinds can be nil */
+    if (sp_streq(nt_str(nt, v, "name"), "<=>")) {
+      int cr = nt_ref(nt, v, "receiver"), ca = nt_ref(nt, v, "arguments"), can = 0;
+      const int *cav = ca >= 0 ? nt_arr(nt, ca, "arguments", &can) : NULL;
+      if (cr >= 0 && cav && can == 1) {
+        TyKind lt = infer_type(c, cr), at = infer_type(c, cav[0]);
+        int num_l = lt == TY_INT || lt == TY_FLOAT, num_r = at == TY_INT || at == TY_FLOAT;
+        if ((num_l && num_r) || (lt == TY_STRING && at == TY_STRING) || (lt == TY_SYMBOL && at == TY_SYMBOL)) return 0;
+      }
+      return 1;
+    }
     if (nullable_int_call_name(nt_str(nt, v, "name"))) return 1;
     if (nn_call_unboxes_nil(c, v)) return 1;
     /* A setter assignment answers its RHS, not the writer's return. Its
@@ -27432,6 +27445,9 @@ int nullable_int_value(Compiler *c, int v) {
     return rv && (rv->type == TY_INT || rv->type == TY_FLOAT) && rv->nullable_int;
   }
   if (nt_kind(nt, v) == NK_LocalVariableOrWriteNode)
+    return nullable_int_value(c, nt_ref(nt, v, "value"));
+  /* `x = v` answers v: `s0 = s1 = nil` hands s0 the inner write's nil */
+  if (nt_kind(nt, v) == NK_LocalVariableWriteNode)
     return nullable_int_value(c, nt_ref(nt, v, "value"));
   return 0;
 }

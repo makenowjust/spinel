@@ -4131,8 +4131,16 @@ static TyKind slot_hash_variant_from_writes(Compiler *c, NodeKind rk, const char
     int wa = nt_ref(nt, w, "arguments");
     int wan = 0; const int *wav = wa >= 0 ? nt_arr(nt, wa, "arguments", &wan) : NULL;
     if (wan < (is_owr ? 1 : 2)) continue;
-    kt = ty_unify(kt, infer_type(c, wav[0]));
-    if (!is_owr) vt = ty_unify(vt, infer_type(c, wav[1]));
+    /* an Integer or Float key or value that can be nil widens the slot to
+       the boxed kind: a typed key or value slot has no nil (nil out of band) */
+    { TyKind wkt = infer_type(c, wav[0]);
+      if ((wkt == TY_INT || wkt == TY_FLOAT) && nullable_int_value(c, wav[0])) wkt = TY_POLY;
+      kt = ty_unify(kt, wkt); }
+    if (!is_owr) {
+      TyKind wvt = infer_type(c, wav[1]);
+      if ((wvt == TY_INT || wvt == TY_FLOAT) && nullable_int_value(c, wav[1])) wvt = TY_POLY;
+      vt = ty_unify(vt, wvt);
+    }
     saw = 1;
   }
   /* The default is a value the hash answers, so it is part of the value type:
@@ -6844,8 +6852,14 @@ static TyKind cvar_hash_variant_from_writes(Compiler *c, const char *cvname, int
     int wa = nt_ref(nt, w, "arguments");
     int wan = 0; const int *wav = wa >= 0 ? nt_arr(nt, wa, "arguments", &wan) : NULL;
     if (opw ? wan != 1 : wan < 2) continue;
-    kt = ty_unify(kt, infer_type(c, wav[0]));
-    vt = ty_unify(vt, infer_type(c, opw ? nt_ref(nt, w, "value") : wav[1]));
+    /* a key or value that can be nil widens to the boxed kind, as a global's */
+    { TyKind wkt = infer_type(c, wav[0]);
+      if ((wkt == TY_INT || wkt == TY_FLOAT) && nullable_int_value(c, wav[0])) wkt = TY_POLY;
+      kt = ty_unify(kt, wkt);
+      int wv = opw ? nt_ref(nt, w, "value") : wav[1];
+      TyKind wvt = infer_type(c, wv);
+      if ((wvt == TY_INT || wvt == TY_FLOAT) && nullable_int_value(c, wv)) wvt = TY_POLY;
+      vt = ty_unify(vt, wvt); }
     saw = 1;
   }
   /* the default is a value the hash answers, as for a global's */

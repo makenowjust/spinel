@@ -9060,12 +9060,18 @@ TyKind infer_uncached(Compiler *c, int id) {
       }
       if (!aty || !sp_streq(aty, "AssocNode")) return TY_UNKNOWN;
       {
-        TyKind kt_elem = infer_type(c, nt_ref(nt, els[k], "key"));
+        int knode = nt_ref(nt, els[k], "key");
+        TyKind kt_elem = infer_type(c, knode);
         if (kt_elem == TY_NIL) kt_elem = TY_POLY;   /* a nil key keeps the hash poly-keyed (see the value below) */
+        /* so does an Integer or Float key that can be nil (nil out of band:
+           a typed key slot has no nil) */
+        if ((kt_elem == TY_INT || kt_elem == TY_FLOAT) && nullable_int_value(c, knode)) kt_elem = TY_POLY;
         kt = ty_unify(kt, kt_elem);
       }
       int vnode = nt_ref(nt, els[k], "value");
       TyKind vt_elem = infer_type(c, vnode);
+      /* an Integer or Float value that can be nil keeps the hash poly-valued */
+      if ((vt_elem == TY_INT || vt_elem == TY_FLOAT) && nullable_int_value(c, vnode)) vt_elem = TY_POLY;
       /* A nested hash/array literal whose element kind is unresolved (a bare
          `{}` or `[]`) is still a non-scalar value; treat it as poly so the
          outer hash promotes to a poly-valued variant rather than erasing the
