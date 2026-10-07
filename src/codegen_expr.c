@@ -1567,6 +1567,18 @@ static void emit_ivar_write_result(Compiler *c, int id, int value, TyKind slot,
                                    const char *ref, Buf *b) {
   Repr result = repr_of(c, id);
   TyKind wt = result.as_ty;
+  /* the slot's oint where the write answers one (node_is_oint): the field
+     beside its nil bit, or the oint static as it is */
+  if (oint_kind(wt) && node_is_oint(c, id)) {
+    int wcid, wiv, wk = ivar_node_slot(c, id, &wcid, &wiv);
+    if (wk == 1) {
+      char pfx[128], bt[160];
+      snprintf(pfx, sizeof pfx, "%s%s", g_self, g_self_deref);
+      ivar_nilbit_test(c, wcid, wiv, pfx, bt, sizeof bt);
+      buf_printf(b, "; ((%s){ %s, %s != 0 }); })", oint_ctype(wt), ref, bt);
+      return;
+    }
+  }
   if (nt_kind(c->nt, value) == NK_NilNode && ie_class_of(c, id) >= 0 && nil_value(wt)) {
     buf_printf(b, "; %s; })", nil_value(wt));
     return;

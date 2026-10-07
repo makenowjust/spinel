@@ -5043,6 +5043,10 @@ int node_is_oint(Compiler *c, int node) {
   case NK_ClassVariableReadNode:
   case NK_GlobalVariableReadNode:
     return nullable_int_value(c, node);
+  case NK_InstanceVariableWriteNode:
+    /* `@x = v` as an expression answers the slot it wrote: its oint where
+       the field carries a nil bit (or the static is an oint) */
+    return ivar_read_slot_is_oint(c, node);
   case NK_ParenthesesNode: {
     /* `(expr)` is its expression's form */
     int u = unwrap_parens(c, node);
@@ -5082,6 +5086,15 @@ int node_is_oint(Compiler *c, int node) {
     if (a2 >= 0) nt_arr(nt, a2, "arguments", &an2);
     /* a proc's result comes back boxed and is unboxed with its nil */
     if (is_call_or_yield(nm) && r >= 0 && rt == TY_PROC) return 1;
+    /* `o.instance_eval { ... }` spliced over an object answers its body's
+       last expression in that expression's form */
+    if ((sp_streq(nm, "instance_eval") || sp_streq(nm, "instance_exec")) && blk >= 0 && r >= 0 &&
+        ty_is_object(rt) && comp_method_in_chain(c, ty_object_class(rt), nm, NULL) < 0 &&
+        nt_kind(nt, blk) == NK_BlockNode) {
+      int bb = nt_ref(nt, blk, "body");
+      int bn = 0; const int *bs = bb >= 0 ? nt_arr(nt, bb, "body", &bn) : NULL;
+      return bn > 0 && node_is_oint(c, bs[bn - 1]);
+    }
     /* a method the program defines, resolved as the call emitter resolves
        it: its C function answers an oint iff method_ret_is_oint */
     int mi = -1;

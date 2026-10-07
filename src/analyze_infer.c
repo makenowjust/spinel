@@ -8540,6 +8540,11 @@ TyKind infer_uncached(Compiler *c, int id) {
     /* inside an instance_eval/exec splice the block scope has no class_id; the
        ivar belongs to the rebound receiver class (an_ie_class_id). */
     int wcls = s->class_id >= 0 ? s->class_id : an_ie_class_id;
+    /* a splice in a method of another class writes the receiver's ivar, as
+       the read arm below resolves it (`receiver.instance_eval { @x = nil }`
+       in an Integer-@x caller over a String-@x receiver typed the splice's
+       value as the caller's slot) */
+    if (ie_class_of(c, id) >= 0) wcls = ie_class_of(c, id);
     /* a toplevel method's `@x ||= v` / `@x &&= v` / `@x += v` answers the
        Toplevel slot, which the value alone does not type (`(@a ||= []) << 1`,
        a boxed `@i += 1` read back as the slot); so does a plain write of an
