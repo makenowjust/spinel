@@ -10374,6 +10374,12 @@ static void emit_obj_inspect_dispatch(Compiler *c, Buf *b) {
         buf_printf(b, "(%s ? sp_PolyArray_inspect(%s) : \"nil\")", expr, expr);
       else if (ty_is_hash(ivt) && ty_hash_cname(ivt))
         buf_printf(b, "(%s ? sp_%sHash_inspect(%s) : \"nil\")", expr, ty_hash_cname(ivt), expr);
+      /* an Integer / Float ivar boxes by its nil bit */
+      else if (ivt == TY_INT || ivt == TY_FLOAT) {
+        buf_puts(b, "sp_poly_inspect(");
+        emit_marshal_box_ivar_of(c, i, j, "o->", expr, b);
+        buf_puts(b, ")");
+      }
       else if (marshal_ivar_type_ok(ivt) && !marshal_container_type(ivt) && ivt != TY_UNKNOWN) {
         buf_puts(b, "sp_poly_inspect(");
         emit_marshal_box_ivar(c, ivt, expr, b);
