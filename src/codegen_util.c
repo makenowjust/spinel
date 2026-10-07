@@ -5253,6 +5253,10 @@ int node_is_oint(Compiler *c, int node) {
       int rci = comp_class_index(c, nt_str(nt, r, "name"));
       if (rci >= 0) mi = comp_cmethod_in_chain(c, rci, nm, NULL);
     }
+    /* a builtin value's method the program reopened its class with
+       (`class Symbol; def mark = ...`) */
+    if (mi < 0 && r >= 0 && rt != TY_POLY && rt != TY_UNKNOWN && !ty_is_object(rt))
+      mi = comp_builtin_kind_reopen_mi(c, rt, nm);
     /* a method whose return widened past the call's (a yielding method
        answering its block, typed per call site): the call's own analysis */
     if (mi >= 0 && (c->scopes[mi].ret == TY_POLY || c->scopes[mi].ret == TY_UNKNOWN)) return nullable_int_value(c, node);

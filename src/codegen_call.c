@@ -8643,6 +8643,8 @@ void emit_ctor_arm_param(Compiler *c, Scope *is, int j, const ArgLayout *L, cons
   if (L->from[j] != ARG_NODE) { emit_arg_or_default(c, is, j, -1, out); return; }
   char at[24]; snprintf(at, sizeof at, "_t%d", atmp[L->arg[j]]);
   if (pt == TY_POLY) buf_puts(out, at);
+  /* a parameter slot that holds its nil takes the box with it */
+  else if (oint_kind(pt) && pp && slot_is_oint(pp)) buf_printf(out, "%s(%s)", oint_unbox(pt), at);
   else emit_unbox_text(c, pt, at, out);
 }
 
