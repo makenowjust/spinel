@@ -4645,10 +4645,12 @@ static void emit_expr_node(Compiler *c, int id, Buf *b) {
                                ? _ynt : g_yield_slot_ty,
                              b, 0, 1); }
     else if (nt_str(nt, id, "call_operator") && sp_streq(nt_str(nt, id, "call_operator"), "&.")) {
-      /* `blk&.call`: the nil parameter answers nil instead of raising */
+      /* `blk&.call`: the nil parameter answers nil instead of raising (an
+         Integer / Float answer is the node's oint, as `&.` always is) */
       TyKind at = repr_of(c, id).as_ty;
       const char *nv = nil_value(at);
-      buf_puts(b, nv ? nv : default_value_from_compiler(c, at));
+      if (oint_kind(at) && node_is_oint(c, id)) buf_puts(b, oint_nil(at));
+      else buf_puts(b, nv ? nv : default_value_from_compiler(c, at));
     }
     else {
       TyKind _bt = repr_of(c, id).as_ty;

@@ -4892,8 +4892,10 @@ static void emit_poly_auto_splat(Compiler *c, int block, int telem, Buf *b, int 
   emit_indent(b, indent + 1); buf_puts(b, "}\n");
 }
 
-static int emit_shadow_save(Compiler *c, TyKind t, const char *name, Buf *b, int indent) {
-  int ts = ++g_tmp; Buf ot; memset(&ot, 0, sizeof ot); emit_ctype(c, t, &ot);
+/* the outer slot's own C type: an Integer / Float slot holding its nil
+   beside the value is saved as its sp_oint */
+static int emit_shadow_save(Compiler *c, const LocalVar *lv, const char *name, Buf *b, int indent) {
+  int ts = ++g_tmp; Buf ot; memset(&ot, 0, sizeof ot); emit_slot_ctype(c, lv, &ot);
   emit_indent(b, indent); buf_printf(b, "%s _t%d = lv_%s;\n", ot.p ? ot.p : "sp_RbVal", ts, name); free(ot.p);
   return ts;
 }
@@ -5624,6 +5626,14 @@ static int iter_combination_cons_arms(Compiler *c, int id, Buf *b, int indent, c
 /* emit_iteration_stmt_body's Enumerator#with_index, each over a poly array
    or an Enumerator, and the each / each_entry / reverse_each walk over a
    container (answers 1 emitted, 0 declined, -1 to go on) */
+/* The slot of block parameter j of `block` holds its nil beside the value
+   (an sp_oint): a plain element bound into it is wrapped in its oint. */
+static int block_param_slot_is_oint(Compiler *c, int block, int j) {
+  const char *pn = block_param_name(c, block, j);
+  Scope *bs = pn ? comp_scope_of(c, block) : NULL;
+  return slot_is_oint(bs ? scope_local(bs, pn) : NULL);
+}
+
 static int iter_enum_poly_walk_arms(Compiler *c, int id, Buf *b, int indent, const NodeTable *nt, int block, const char *name, int recv, int body, const char *p0_orig, const char *p0, TyKind rt) {
   /* <stored enumerator>.with_index(off) { |x, i| }: drain the enumerator once
      and drive the block with the offset index alongside each element. (The
@@ -5694,7 +5704,7 @@ static int iter_enum_poly_walk_arms(Compiler *c, int id, Buf *b, int indent, con
     Scope *cs_pa = p0 ? comp_scope_of(c, id) : NULL;
     LocalVar *outer_pa = (p0 && cs_pa) ? scope_local(cs_pa, p0) : NULL;
     int ts_pa = 0;
-    if (outer_pa) ts_pa = emit_shadow_save(c, outer_pa->type, p0, b, indent);
+    if (outer_pa) ts_pa = emit_shadow_save(c, outer_pa, p0, b, indent);
     emit_indent(b, indent);
     if (rt == TY_ENUMERATOR)
       buf_printf(b, "sp_PolyArray *_t%d = sp_Enumerator_to_a(%s);\n", ta, rb.p ? rb.p : "");
@@ -5800,7 +5810,7 @@ static int iter_enum_poly_walk_arms(Compiler *c, int id, Buf *b, int indent, con
     int ts = 0;
     if (outer) {
       /* Block params shadow outer variables in Ruby; save and restore */
-      ts = emit_shadow_save(c, outer->type, p0, b, indent);
+      ts = emit_shadow_save(c, outer, p0, b, indent);
     }
     if (rev) { emit_indent(b, indent); buf_printf(b, "sp_int _t%d = sp_%sArray_length(%s);\n", tn, k, rb.p); }
     emit_indent(b, indent);
@@ -5868,8 +5878,9 @@ static int iter_enum_poly_walk_arms(Compiler *c, int id, Buf *b, int indent, con
         buf_puts(b, rb.p); buf_printf(b, ", _t%d));\n", t);
       }
       else {
-        buf_printf(b, "lv_%s = sp_%sArray_get(", p0, k);
-        buf_puts(b, rb.p); buf_printf(b, ", _t%d);\n", t);
+        int o0 = (sp_streq(k, "Int") || sp_streq(k, "Float")) && block_param_slot_is_oint(c, block, 0);
+        buf_printf(b, "lv_%s = %ssp_%sArray_get(", p0, o0 ? (sp_streq(k, "Int") ? "sp_oint_of(" : "sp_ofloat_of(") : "", k);
+        buf_puts(b, rb.p); buf_printf(b, ", _t%d)%s;\n", t, o0 ? ")" : "");
       }
     }
     /* a `*rest` param (splat-only wraps the element; alongside requireds it
@@ -5979,8 +5990,8 @@ static int iter_ewi_zip_poly_arms(Compiler *c, int id, Buf *b, int indent, const
     int p1_box_poly = clv_ewi_p1 && clv_ewi_p1->type == TY_POLY;
     /* Save outer variables before loop */
     int ts_p0 = 0, ts_p1 = 0;
-    if (p0 && clv_ewi_p0) ts_p0 = emit_shadow_save(c, clv_ewi_p0->type, p0, b, indent);
-    if (p1 && clv_ewi_p1) ts_p1 = emit_shadow_save(c, clv_ewi_p1->type, p1, b, indent);
+    if (p0 && clv_ewi_p0) ts_p0 = emit_shadow_save(c, clv_ewi_p0, p0, b, indent);
+    if (p1 && clv_ewi_p1) ts_p1 = emit_shadow_save(c, clv_ewi_p1, p1, b, indent);
     emit_indent(b, indent);
     buf_printf(b, "for (sp_int _t%d = 0; _t%d < sp_%sArray_length(", t, t, k);
     buf_puts(b, rb.p); buf_printf(b, "); _t%d++) {\n", t);
@@ -5998,8 +6009,9 @@ static int iter_ewi_zip_poly_arms(Compiler *c, int id, Buf *b, int indent, const
         buf_printf(b, "lv_%s = ", p0); emit_boxed_text(c, ewi_et, src, b); buf_puts(b, ";\n");
       }
       else {
-        buf_printf(b, "lv_%s = sp_%sArray_get(", p0, k);
-        buf_puts(b, rb.p); buf_printf(b, ", _t%d);\n", t);
+        int o0 = (sp_streq(k, "Int") || sp_streq(k, "Float")) && block_param_slot_is_oint(c, block, 0);
+        buf_printf(b, "lv_%s = %ssp_%sArray_get(", p0, o0 ? (sp_streq(k, "Int") ? "sp_oint_of(" : "sp_ofloat_of(") : "", k);
+        buf_puts(b, rb.p); buf_printf(b, ", _t%d)%s;\n", t, o0 ? ")" : "");
       }
     }
     if (p1) {
@@ -6086,8 +6098,8 @@ static int iter_ewi_zip_poly_arms(Compiler *c, int id, Buf *b, int indent, const
       LocalVar *zlv0 = (p0 && zs) ? scope_local(zs, p0) : NULL;
       LocalVar *zlv1 = (p1n && zs) ? scope_local(zs, p1n) : NULL;
       int zs0 = 0, zs1 = 0;
-      if (p0 && zlv0) zs0 = emit_shadow_save(c, zlv0->type, p0, b, indent);
-      if (p1n && zlv1) zs1 = emit_shadow_save(c, zlv1->type, p1n, b, indent);
+      if (p0 && zlv0) zs0 = emit_shadow_save(c, zlv0, p0, b, indent);
+      if (p1n && zlv1) zs1 = emit_shadow_save(c, zlv1, p1n, b, indent);
       emit_indent(b, indent);
       if (recv_poly)
         buf_printf(b, "for (sp_int _t%d = 0; _t%d < sp_poly_arr_len(%s); _t%d++) {\n",

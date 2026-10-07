@@ -5028,7 +5028,7 @@ void emit_method(Compiler *c, Scope *s, Buf *b) {
       buf_printf(b, "  if (!sp_class_le((sp_Class){self->cls_id}, (sp_Class){%d})) %s", s->class_id,
                  method_is_void(s) ? "{ " : "return ");
       if (method_is_void(s) || s->ret == ps->ret) buf_puts(b, cb.p ? cb.p : "");
-      else if (s->ret == TY_POLY) emit_boxed_text(c, ps->ret, cb.p ? cb.p : "", b);
+      else if (s->ret == TY_POLY) emit_boxed_ret_call(c, ps, cb.p ? cb.p : "", b);
       else emit_unbox_text(c, s->ret, cb.p ? cb.p : "", b);
       buf_puts(b, ";");
       buf_puts(b, method_is_void(s) ? " return; }\n" : "\n");
@@ -9662,7 +9662,7 @@ static void emit_obj_to_h_dispatch(Compiler *c, Buf *b) {
              c->classes[defc].c_name, argb);
     buf_printf(b, "    case %d: return ", i);
     Buf bx; memset(&bx, 0, sizeof bx);
-    emit_boxed_text(c, m->ret, callb, &bx);
+    emit_boxed_ret_call(c, m, callb, &bx);
     buf_puts(b, bx.p ? bx.p : "sp_box_nil()"); free(bx.p);
     buf_puts(b, ";\n");
   }
@@ -9740,7 +9740,7 @@ static void emit_basicobject_singleton_to_a_wrappers(Compiler *c, Buf *b) {
     emit_method_cname(c, s, &call);
     buf_puts(&call, "()");
     Buf boxed; memset(&boxed, 0, sizeof boxed);
-    emit_boxed_text(c, (TyKind)s->ret, call.p ? call.p : "sp_box_nil()", &boxed);
+    emit_boxed_ret_call(c, s, call.p ? call.p : "sp_box_nil()", &boxed);
     buf_puts(b, boxed.p ? boxed.p : "sp_box_nil()");
     buf_puts(b, ";\n}\n");
     free(call.p); free(boxed.p);
@@ -12119,7 +12119,7 @@ static void emit_user_binop_dispatch(Compiler *c, Buf *b) {
       /* the operands a and b are unrooted: an arm that builds before its call roots them */
       buf_printf(b, "        %s%s*handled = TRUE; return ",
                  builds ? "SP_GC_ROOT_RBVAL(a); SP_GC_ROOT_RBVAL(b); " : "", pre.p ? pre.p : "");
-      emit_boxed_text(c, m->ret, call.p, b);
+      emit_boxed_ret_call(c, m, call.p, b);
       buf_puts(b, ";\n      }\n");
       free(pre.p); free(args.p); free(call.p);
     }
@@ -12161,6 +12161,13 @@ static void emit_user_binop_dispatch(Compiler *c, Buf *b) {
                        cguard ? " && (" : "", cguard ? cguard : "", cguard ? ")" : "");
             /* the receiver itself is equal without calling `<=>`, as CRuby's
                cmp_equal answers first */
+            /* a `<=>` answering its nil beside the value (sp_oint): equal
+               only when it answered 0 */
+            if (method_ret_is_oint(cm2))
+              buf_printf(b, "        *handled = TRUE; return sp_box_bool((b.tag == SP_TAG_OBJ && b.v.p == a.v.p) || "
+                            "({ sp_oint _c = sp_%s_%s(%s(sp_%s *)a.v.p, %s); !_c.nil && _c.v == 0; }));\n      }\n",
+                         ccn, mc(cm2->name ? cm2->name : "<=>"), cvt ? "*" : "", ccn, cargs);
+            else
             buf_printf(b, "        *handled = TRUE; return sp_box_bool((b.tag == SP_TAG_OBJ && b.v.p == a.v.p) || "
                           "sp_%s_%s(%s(sp_%s *)a.v.p, %s) == 0);\n      }\n",
                        ccn, mc(cm2->name ? cm2->name : "<=>"), cvt ? "*" : "", ccn, cargs);
@@ -12266,7 +12273,7 @@ static void emit_user_coerce_dispatch(Compiler *c, Buf *b) {
       Buf callb = {0}, boxb = {0};
       buf_printf(&callb, "sp_%s_coerce(%s(sp_%s *)obj.v.p, %s)",
                  dcn, c->classes[defcls].is_value_type ? "*" : "", dcn, arg);
-      emit_boxed_text(c, cm->ret, callb.p, &boxb);
+      emit_boxed_ret_call(c, cm, callb.p, &boxb);
       buf_printf(b, "    case %d: _pr = sp_poly_to_poly_array(%s); break;\n",
                  cidx, boxb.p ? boxb.p : "sp_box_nil()");
       free(callb.p); free(boxb.p);

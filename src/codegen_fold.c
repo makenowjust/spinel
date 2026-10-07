@@ -11313,7 +11313,10 @@ else {
       if (ran_t >= 0) atmp[k] = ran_t;
       else {
         emit_indent(g_pre, g_indent);
-        emit_ctype(c, att, g_pre);
+        /* an Integer / Float parameter holding its nil beside the value is
+           bound as its oint, and the temp is declared the same */
+        if (p && oint_kind(att) && slot_is_oint(p)) buf_puts(g_pre, oint_ctype(att));
+        else emit_ctype(c, att, g_pre);
         buf_printf(g_pre, " _t%d = ", atmp[k]);
         buf_puts(g_pre, ab.p ? ab.p : ""); buf_puts(g_pre, ";\n");
         /* Root heap-typed arg temps: evaluating a later argument may allocate

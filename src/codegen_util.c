@@ -5044,8 +5044,11 @@ int node_is_oint(Compiler *c, int node) {
     if (r < 0) mi = comp_self_call_mi(c, node, nm);
     else if (ty_is_object(rt)) {
       int cid = ty_object_class(rt);
-      /* an attr reader over an ivar with a nil bit answers the ivar's oint */
-      if (an2 == 0 && blk < 0 && reader_ivar_has_nilbit(c, cid, nm)) return 1;
+      /* an attr reader is its ivar's read: the ivar's oint when the ivar
+         carries a nil bit, the plain field otherwise (whatever the reader's
+         own return mark says: the field has no other form) */
+      if (an2 == 0 && blk < 0 && comp_reader_in_chain(c, cid, nm, NULL))
+        return reader_ivar_has_nilbit(c, cid, nm);
       mi = comp_method_in_chain(c, cid, nm, NULL);
     }
     else if (nt_kind(nt, r) == NK_ConstantReadNode) {
@@ -5053,21 +5056,53 @@ int node_is_oint(Compiler *c, int node) {
       if (rci >= 0) mi = comp_cmethod_in_chain(c, rci, nm, NULL);
     }
     if (mi >= 0) return method_ret_is_oint(&c->scopes[mi]);
+    /* `<=>` answers nil for an incomparable operand: the analysis's answer
+       (a String or Bigint compare it proves total stays plain) */
+    if (sp_streq(nm, "<=>") && an2 == 1) return nullable_int_value(c, node);
     /* a receiver that stayed poly: the dispatch answers an oint when a
        target can answer nil (the analysis's dispatch set) */
     if (rt == TY_POLY || (r < 0 && !ty_is_object(rt))) {
       if (nullable_int_value(c, node)) return 1;
     }
-    /* a class's own methods (File.delete) are no container's */
-    if (r >= 0 && nt_kind(nt, r) == NK_ConstantReadNode) return 0;
+    /* `Integer(x, exception: false)` / `Float(x, exception: false)`: nil on
+       a failed conversion */
+    if (r < 0 && (sp_streq(nm, "Integer") || sp_streq(nm, "Float")) && an2 >= 2) {
+      int a2v = nt_ref(nt, node, "arguments"), a2n = 0;
+      const int *a2a = a2v >= 0 ? nt_arr(nt, a2v, "arguments", &a2n) : NULL;
+      if (a2a && a2n >= 2 && nt_kind(nt, a2a[a2n - 1]) == NK_KeywordHashNode) return 1;
+    }
+    /* `IO::Buffer.size_of`: nil for an unknown type name; the other class
+       methods (File.delete) are no container's */
+    if (r >= 0 && (nt_kind(nt, r) == NK_ConstantReadNode || nt_kind(nt, r) == NK_ConstantPathNode))
+      return sp_streq(nm, "size_of");
     /* the runtime functions that answer an sp_oint (RUNTIME-API.md) */
     if ((sp_streq(nm, "bsearch") || sp_streq(nm, "bsearch_index")) && blk >= 0) return 1;
     if (sp_streq(nm, "nonzero?") || sp_streq(nm, "infinite?") || sp_streq(nm, "getbyte")) return 1;
+    if (sp_streq(nm, "exitstatus") || sp_streq(nm, "termsig") ||
+        sp_streq(nm, "world_readable?") || sp_streq(nm, "world_writable?")) return 1;
     if (sp_streq(nm, "index") || sp_streq(nm, "rindex") || sp_streq(nm, "delete_at") ||
         sp_streq(nm, "byteindex") || sp_streq(nm, "byterindex") ||
         sp_streq(nm, "pop") || sp_streq(nm, "shift") || sp_streq(nm, "delete")) return 1;
     if (is_range_bound_reader(nm) && r >= 0 &&
         (rt == TY_MATCHDATA || rt == TY_RANGE || rt == TY_FLOAT_RANGE)) return 1;
+    if (r >= 0 && (rt == TY_INT_ARRAY || rt == TY_FLOAT_ARRAY)) {
+      /* an Integer / Float array's element answers: nil when empty or missing */
+      if (an2 == 0 && blk < 0 &&
+          (sp_streq(nm, "first") || sp_streq(nm, "last") || sp_streq(nm, "sample") ||
+           sp_streq(nm, "min") || sp_streq(nm, "max"))) return 1;
+      if (sp_streq(nm, "slice!") && an2 == 1) return 1;
+      if (sp_streq(nm, "find_index")) return 1;
+      /* a seedless fold, a comparator min / max: nil over an empty receiver */
+      if (blk >= 0 && an2 == 0 && (is_reduce_alias(nm) || sp_streq(nm, "min") || sp_streq(nm, "max"))) return 1;
+    }
+    if (r >= 0 && rt == TY_RANGE && an2 == 0 && blk < 0 && (sp_streq(nm, "min") || sp_streq(nm, "max"))) return 1;
+    if (r >= 0 && ty_is_hash(rt) && sp_streq(nm, "dig") && an2 >= 1) return 1;
+    /* fetch with a nil default answers that nil */
+    if (r >= 0 && (ty_is_array(rt) || ty_is_hash(rt)) && sp_streq(nm, "fetch") && an2 == 2) {
+      int fv = nt_ref(nt, node, "arguments"), fn = 0;
+      const int *fa = fv >= 0 ? nt_arr(nt, fv, "arguments", &fn) : NULL;
+      if (fa && fn == 2 && (nt_kind(nt, fa[1]) == NK_NilNode || node_is_oint(c, fa[1]))) return 1;
+    }
     /* an element read that can miss, a fold or a search over a container
        that can hold nil: the analysis's answer, for a container receiver */
     if (r >= 0 && (ty_is_array(rt) || ty_is_hash(rt) || rt == TY_RANGE) &&

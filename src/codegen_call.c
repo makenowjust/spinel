@@ -16893,9 +16893,10 @@ static int emit_vis_refusal_x(Compiler *c, int id, Buf *b) {
   { int vblk = nt_ref(nt, id, "block");
     int vbx = vblk >= 0 && nt_kind(nt, vblk) == NK_BlockArgumentNode ? nt_ref(nt, vblk, "expression") : -1;
     if (vbx >= 0 && nt_kind(nt, vbx) != NK_SymbolNode) { buf_puts(b, "(void)("); emit_expr(c, vbx, b); buf_puts(b, "), "); } }
+  TyKind vrt = repr_of(c, id).as_ty;
   buf_printf(b, "sp_raise_cls(\"NoMethodError\", (&(\"\\xff\" \"%s method '%s' called for an instance of %s\")[1])), %s)",
              vis == SP_VIS_PRIVATE ? "private" : "protected", vnm, vrn,
-             default_value_from_compiler(c, repr_of(c, id).as_ty));
+             oint_kind(vrt) && node_is_oint(c, id) ? oint_nil(vrt) : default_value_from_compiler(c, vrt));
   return 1;
 }
 
@@ -17824,14 +17825,18 @@ int emit_unresolved_call(Compiler *c, int id, Buf *b) {
                 ((grt == TY_INT || grt == TY_FLOAT) && nullable_int_value(c, recv)));
             if (nullable_recv) {
               Buf rvb; memset(&rvb, 0, sizeof rvb);
-              if (recv_stageable) emit_expr(c, recv, &rvb);
+              /* an Integer / Float receiver is read as its oint (a plain
+                 read of a nil raises before the message is built) */
+              if (recv_stageable && !oint_kind(grt)) emit_expr(c, recv, &rvb);
               else {
                 /* a receiver expression is evaluated once, into a temp */
                 int rvt = ++g_tmp;
                 /* rendered aside first: the receiver's own prelude lands in
                    g_pre while it is emitted, ahead of this line (#4662) */
-                Buf rx; memset(&rx, 0, sizeof rx); emit_expr(c, recv, &rx);
-                emit_indent(g_pre, g_indent); emit_ctype(c, grt, g_pre);
+                Buf rx; memset(&rx, 0, sizeof rx);
+                if (oint_kind(grt)) emit_oint_expr(c, recv, grt, &rx); else emit_expr(c, recv, &rx);
+                emit_indent(g_pre, g_indent);
+                if (oint_kind(grt)) buf_puts(g_pre, oint_ctype(grt)); else emit_ctype(c, grt, g_pre);
                 buf_printf(g_pre, " _t%d = %s;\n", rvt, rx.p ? rx.p : "0");
                 free(rx.p);
                 buf_printf(&rvb, "_t%d", rvt);
@@ -17841,9 +17846,8 @@ int emit_unresolved_call(Compiler *c, int id, Buf *b) {
               char hd[96], hd2[96];
               snprintf(hd, sizeof hd, nomethod_head(nm), nm ? nm : "?");
               snprintf(hd2, sizeof hd2, nomethod_head(nm), nm ? nm : "?");
-              snprintf(gmsg, sizeof gmsg, "(%s%s%s ? \"%s nil\" : \"%s %s\")",
-                       grt == TY_FLOAT ? "sp_float_is_nil(" : "(", rv,
-                       grt == TY_FLOAT ? ")" : grt == TY_INT ? ") == SP_INT_NIL" : ") == NULL",
+              snprintf(gmsg, sizeof gmsg, "((%s)%s ? \"%s nil\" : \"%s %s\")",
+                       rv, oint_kind(grt) ? ".nil" : " == NULL",
                        hd, hd2, rdesc);
               free(rvb.p);
             }

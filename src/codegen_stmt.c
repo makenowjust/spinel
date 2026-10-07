@@ -13623,7 +13623,9 @@ void emit_stmt_tail_inner(Compiler *c, int id, Buf *b, int indent) {
     emit_indent(b, indent); emit_tail_lead(b);
     if (want_poly9 && lt9 != TY_POLY) {
       Buf bx9; memset(&bx9, 0, sizeof bx9);
-      emit_boxed_text(c, lt9, lref9, &bx9);
+      /* an Integer / Float slot holding its nil beside the value boxes as that oint */
+      if (slot_is_oint(lv9)) buf_printf(&bx9, "%s(%s)", oint_box(lt9), lref9);
+      else emit_boxed_text(c, lt9, lref9, &bx9);
       buf_printf(b, "%s;\n", bx9.p ? bx9.p : "sp_box_nil()");
       free(bx9.p);
     }
@@ -13934,7 +13936,7 @@ void emit_stmt_tail_inner(Compiler *c, int id, Buf *b, int indent) {
              default_value_from_compiler(c, g_result_ty) && default_value_from_compiler(c, g_result_ty)[0] == '(')
       buf_printf(b, ", %s)", default_value_from_compiler(c, g_result_ty));
     else if (g_result_ty == TY_INT || g_result_ty == TY_FLOAT)
-      buf_printf(b, ", %s)", default_value_from_compiler(c, g_result_ty));   /* the nil sentinel */
+      buf_printf(b, ", %s)", g_result_oint ? oint_nil(g_result_ty) : default_value_from_compiler(c, g_result_ty));
     else buf_printf(b, ", (__typeof__(%s))0)", g_result_var);
   }
   else {
