@@ -151,8 +151,10 @@ static const char *sp_int_head(const char *p, sp_int *base, int *neg) {
 
 /* Accumulates digits of `base` into *v, consuming `_` only between
    digits; *any is set once a digit is read. Returns the stop position,
-   or NULL on sp_int overflow. */
-static const char *sp_int_scan(const char *p, sp_int base, sp_int *v, int *any) {
+   or NULL on sp_int overflow. A negative number (neg) accumulates its
+   signed value, as sp_str_to_i_cruby does: -2**63 fits sp_int where its
+   magnitude does not. */
+static const char *sp_int_scan(const char *p, sp_int base, int neg, sp_int *v, int *any) {
   *v = 0;
   *any = 0;
   for (;; p++) {
@@ -166,7 +168,7 @@ static const char *sp_int_scan(const char *p, sp_int base, sp_int *v, int *any) 
     }
     sp_int t;
     if (sp_ckd_mul_iptr(*v, base, &t) ||
-        sp_ckd_add_iptr(t, (sp_int)d, v)) return NULL;
+        sp_ckd_add_iptr(t, neg ? -(sp_int)d : (sp_int)d, v)) return NULL;
     *any = 1;
   }
 }
@@ -181,7 +183,7 @@ int sp_str_int_overflows(const char *s, intptr_t base) {
   sp_int v, b = base;
   const char *p = sp_int_head(s, &b, &neg);
   if (b < 2 || b > 36) return 0;
-  return sp_int_scan(p, b, &v, &any) == NULL;
+  return sp_int_scan(p, b, neg, &v, &any) == NULL;
 }
 
 /* ...and the digits as the Bignum parser wants them: a '-' for a negative
@@ -225,10 +227,10 @@ sp_int sp_str_to_i_base(const char *s, sp_int base) {SP_GC_ROOT_STR(s);
   int neg, any;
   sp_int v;
   const char *p = sp_int_head(s, &base, &neg);
-  if (!sp_int_scan(p, base, &v, &any))
+  if (!sp_int_scan(p, base, neg, &v, &any))
     sp_raise_cls("RangeError", sp_sprintf("integer overflow parsing \"%s\"", s));
   if (!any) return 0;
-  return neg ? -v : v;
+  return v;
 }
 
 /* CRuby's `Integer(s)` raises ArgumentError for unparseable input
@@ -267,12 +269,12 @@ static sp_int sp_str_to_i_base_impl(const char *s, sp_int base, int lenient, int
   const char *p = sp_int_head(s, &base, &neg);
   if (base < 2 || base > 36) SP_INT_REJECT("ArgumentError", sp_sprintf("invalid radix %lld", (long long)base));
   if (*p == '\0') SP_INT_REJECT("ArgumentError", sp_sprintf("invalid value for Integer(): \"%s\"", s));
-  p = sp_int_scan(p, base, &v, &any);
+  p = sp_int_scan(p, base, neg, &v, &any);
   if (!p) SP_INT_REJECT("RangeError", sp_sprintf("integer overflow parsing \"%s\"", s));
   if (!any) SP_INT_REJECT("ArgumentError", sp_sprintf("invalid value for Integer(): \"%s\"", s));
   while (isspace((unsigned char)*p)) p++;
   if (*p != '\0') SP_INT_REJECT("ArgumentError", sp_sprintf("invalid value for Integer(): \"%s\"", s));
-  return neg ? -v : v;
+  return v;
 #undef SP_INT_REJECT
 }
 sp_int sp_str_to_i_strict_base(const char *s, sp_int base) {

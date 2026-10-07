@@ -5871,6 +5871,8 @@ else {
         /* copy the receiver into the fresh result */
         buf_printf(b, " %s _t%d = ", c_type_name(rt), tc); emit_expr(c, recv, b); buf_puts(b, ";");
         buf_printf(b, " _t%d->default_v = _t%d->default_v;", tr, tc);
+        if (rt == TY_STR_INT_HASH || rt == TY_INT_INT_HASH)
+          buf_printf(b, " _t%d->default_nil = _t%d->default_nil;", tr, tc);
         if (vt == TY_POLY)
           buf_printf(b, " _t%d->dproc = _t%d->dproc; _t%d->dproc_self = _t%d->dproc_self;", tr, tc, tr, tc);
         buf_printf(b, " for (sp_int _t%d = 0; _t%d < _t%d->len; _t%d++)"
@@ -10792,12 +10794,19 @@ int emit_range_call(Compiler *c, int id, Buf *b) {
       int as_int2 = comp_ntype(c, id) == TY_INT;
       buf_printf(b, "({ sp_FloatRange _t%d = ", tr); emit_expr(c, recv, b);
       /* an omitted end: #end is nil and #last the RangeError, as CRuby */
-      if (as_int2) buf_printf(b, "; (sp_int)_t%d.last; })", tr);
+      if (as_int2 && node_is_oint(c, id)) buf_printf(b, "; sp_oint_of((sp_int)_t%d.last); })", tr);
+      else if (as_int2) buf_printf(b, "; (sp_int)_t%d.last; })", tr);
       else {
-        /* the runtime answers the endpoint with its nil (an endless range) */
-        buf_puts(b, "; "); oint_open(c, id, TY_FLOAT, b);
-        buf_printf(b, "sp_frange_%s_v(_t%d)", sp_streq(name, "end") ? "end" : "last", tr);
-        oint_close(c, id, b); buf_puts(b, "; })");
+        /* #end answers the endpoint with its nil (an endless range);
+           #last the plain endpoint (an endless range raises) */
+        buf_puts(b, "; ");
+        if (sp_streq(name, "end")) {
+          oint_open(c, id, TY_FLOAT, b); buf_printf(b, "sp_frange_end_v(_t%d)", tr); oint_close(c, id, b);
+        }
+        else {
+          oint_lift_open(c, id, TY_FLOAT, b); buf_printf(b, "sp_frange_last_v(_t%d)", tr); oint_lift_close(c, id, b);
+        }
+        buf_puts(b, "; })");
       }
       return 1;
     }
@@ -10807,7 +10816,10 @@ int emit_range_call(Compiler *c, int id, Buf *b) {
       int as_int = comp_ntype(c, id) == TY_INT;
       buf_printf(b, "({ sp_FloatRange _t%d = ", tr); emit_expr(c, recv, b);
       buf_puts(b, "; ");
-      if (as_int) buf_printf(b, "(sp_int)sp_ofloat_arg(sp_frange_max_v(_t%d)); })", tr);
+      /* an Integer end: its nil (an empty range) kept where the consumer takes the oint */
+      if (as_int && node_is_oint(c, id))
+        buf_printf(b, "sp_ofloat _m%d = sp_frange_max_v(_t%d); _m%d.nil ? sp_oint_nil() : sp_oint_of((sp_int)_m%d.v); })", tr, tr, tr, tr);
+      else if (as_int) buf_printf(b, "(sp_int)sp_ofloat_arg(sp_frange_max_v(_t%d)); })", tr);
       else { oint_open(c, id, TY_FLOAT, b); buf_printf(b, "sp_frange_max_v(_t%d)", tr); oint_close(c, id, b); buf_puts(b, "; })"); }
       return 1;
     }
@@ -13167,7 +13179,8 @@ static int emit_poly_index_call(Compiler *c, int id, Buf *b, const NodeTable *nt
     /* `@table[i][j]` dispatch table narrowed to int (poly_double_index_int):
        call the entry (bound method / int array) for an unboxed int result. */
     if (repr_of(c, id).as_ty == TY_INT) {
-      buf_puts(b, "sp_poly_index_int("); emit_expr(c, recv, b);
+      /* a read that can miss answers its nil where the consumer takes the oint */
+      buf_puts(b, node_is_oint(c, id) ? "sp_poly_index_oint(" : "sp_poly_index_int("); emit_expr(c, recv, b);
       buf_puts(b, ", "); emit_int_expr(c, argv[0], b); buf_puts(b, ")");
       { *out = 1; return 1; }
     }

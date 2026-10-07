@@ -478,6 +478,9 @@ int emit_op_hash_replace(Compiler *c, const BopCtx *x, Buf *b) {
     if (!keep_default) {
       buf_printf(b, " if (_t%d && _t%d) { sp_gc_wb((void *)_t%d); _t%d->default_v = _t%d->default_v;",
                  trp, to, trp, trp, to);
+      /* an Integer-valued hash's nil default is its flag beside the value */
+      if (rt == TY_STR_INT_HASH || rt == TY_INT_INT_HASH)
+        buf_printf(b, " _t%d->default_nil = _t%d->default_nil;", trp, to);
       if (rt == TY_SYM_POLY_HASH || rt == TY_STR_POLY_HASH || rt == TY_POLY_POLY_HASH)   /* the dproc variants */
         buf_printf(b, " _t%d->dproc = _t%d->dproc; _t%d->dproc_self = _t%d->dproc_self;", trp, to, trp, to);
       buf_puts(b, " }");

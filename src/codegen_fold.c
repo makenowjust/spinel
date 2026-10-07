@@ -3388,7 +3388,11 @@ int emit_reduce_block_expr(Compiler *c, int id, Buf *b) {
   buf_printf(b, "for (sp_int _t%d = %d; _t%d < sp_%sArray_length(_t%d); _t%d++) { ",
              ti, start, ti, k, ta, ti);
   buf_puts(b, "{ ");
-  if (p0) { emit_ctype(c, acc_ty, b); buf_printf(b, " lv_%s = _t%d; ", p0, tacc); }
+  /* a parameter whose slot holds its nil (a desugared block splat's
+     `__bsN`) shadows in that form */
+  if (p0 && rlv0 && oint_kind(acc_ty) && slot_is_oint(rlv0))
+    buf_printf(b, "%s lv_%s = %s(_t%d); ", oint_ctype(acc_ty), p0, oint_of(acc_ty), tacc);
+  else if (p0) { emit_ctype(c, acc_ty, b); buf_printf(b, " lv_%s = _t%d; ", p0, tacc); }
   if (p1_multi) {
     int te2 = ++g_tmp;
     buf_printf(b, "sp_RbVal _t%d = sp_PolyArray_get(_t%d, _t%d); ", te2, ta, ti);
@@ -3402,6 +3406,8 @@ int emit_reduce_block_expr(Compiler *c, int id, Buf *b) {
   }
   else if (!p1) { }
   else if (nested) { emit_ctype(c, et, b); buf_printf(b, " lv_%s = (sp_IntArray *)sp_PolyArray_get(_t%d, _t%d).v.p; ", p1, ta, ti); }
+  else if (rlv1 && oint_kind(et) && slot_is_oint(rlv1))
+    buf_printf(b, "%s lv_%s = sp_%sArray_oget(_t%d, _t%d); ", oint_ctype(et), p1, k, ta, ti);
   else { emit_ctype(c, et, b); buf_printf(b, " lv_%s = sp_%sArray_get(_t%d, _t%d); ", p1, k, ta, ti); }
   /* `next v` inside a fold block sets the accumulator and moves on, so point
      the next-value channel at the accumulator temp for this body (#3356). The
@@ -3835,7 +3841,7 @@ int emit_each_with_index_chain(Compiler *c, int id, Buf *b) {
   else {
     buf_printf(b, "sp_%sArray *lv_%s = sp_%sArray_new(); ", pk, rename_local(pairo), pk);
     if (elem_t == TY_INT) {
-      buf_printf(b, "sp_IntArray_push_nilable(lv_%s, sp_%sArray_get(_t%d, _t%d)); sp_IntArray_push(lv_%s, _t%d); ",
+      buf_printf(b, "sp_IntArray_push_nilable(lv_%s, sp_%sArray_oget(_t%d, _t%d)); sp_IntArray_push(lv_%s, _t%d); ",
                  rename_local(pairo), k, ta, ti, rename_local(pairo), tidx);
     }
     else {
@@ -4001,7 +4007,7 @@ int emit_each_with_index_terminal(Compiler *c, int id, Buf *b) {
     emit_indent(g_pre, din); buf_printf(g_pre, "sp_%sArray *_t%d = sp_%sArray_new(); SP_GC_ROOT(_t%d);\n", pk, tpair, pk, tpair);
     if (elem_t == TY_INT) {
       emit_indent(g_pre, din);
-      buf_printf(g_pre, "sp_IntArray_push_nilable(_t%d, sp_%sArray_get(_t%d, _t%d)); sp_IntArray_push(_t%d, _t%d);\n", tpair, k, ta, ti, tpair, tidx);
+      buf_printf(g_pre, "sp_IntArray_push_nilable(_t%d, sp_%sArray_oget(_t%d, _t%d)); sp_IntArray_push(_t%d, _t%d);\n", tpair, k, ta, ti, tpair, tidx);
     }
     else {
       emit_indent(g_pre, din); buf_printf(g_pre, "sp_PolyArray_push(_t%d, ", tpair);
@@ -7118,6 +7124,7 @@ static void emit_arg_or_default_fill(Compiler *c, Scope *m, int idx, int provide
        A poly-widened slot must mirror the scalar `0` an int slot emits, not
        sp_box_nil() -- otherwise the padded value renders as blank. */
     if (pt == TY_POLY) buf_puts(out, "sp_box_int(0)");
+    else if (oint_kind(pt) && p && slot_is_oint(p)) buf_printf(out, "%s(0)", oint_of(pt));
     else buf_puts(out, pt == TY_RANGE ? "(sp_Range){0}" : default_value_from_compiler(c, pt));
   }
 else if (dty && sp_streq(dty, "NilNode")) {
@@ -7133,7 +7140,9 @@ else if (dty && sp_streq(dty, "NilNode")) {
   else if (pt != TY_POLY && repr_of(c, dv).as_ty == TY_VOID) {
     buf_puts(out, "(");
     emit_expr(c, dv, out);
-    buf_printf(out, ", %s)", pt == TY_RANGE ? "(sp_Range){0}" : default_value_from_compiler(c, pt));
+    /* an oint slot's dead value is its nil */
+    if (oint_kind(pt) && p && slot_is_oint(p)) buf_printf(out, ", %s)", oint_nil(pt));
+    else buf_printf(out, ", %s)", pt == TY_RANGE ? "(sp_Range){0}" : default_value_from_compiler(c, pt));
   }
   else if (pt == TY_POLY) emit_boxed(c, dv, out);
   /* A default expression typed poly landing in a concrete parameter slot: it
