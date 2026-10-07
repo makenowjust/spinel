@@ -5330,6 +5330,10 @@ int node_is_oint(Compiler *c, int node) {
       if (blk >= 0 && an2 == 0 && (is_reduce_alias(nm) || sp_streq(nm, "min") || sp_streq(nm, "max"))) return 1;
     }
     if (r >= 0 && rt == TY_RANGE && an2 == 0 && blk < 0 && (sp_streq(nm, "min") || sp_streq(nm, "max"))) return 1;
+    /* a String range has no size (nil); an Enumerator's find_index / index
+       answers nil on a miss */
+    if (r >= 0 && rt == TY_STR_RANGE && an2 == 0 && (sp_streq(nm, "size"))) return 1;
+    if (r >= 0 && rt == TY_ENUMERATOR && (sp_streq(nm, "find_index") || sp_streq(nm, "index"))) return 1;
     if (r >= 0 && ty_is_hash(rt) && sp_streq(nm, "dig") && an2 >= 1) return 1;
     /* fetch with a nil default answers that nil */
     if (r >= 0 && (ty_is_array(rt) || ty_is_hash(rt)) && sp_streq(nm, "fetch") && an2 == 2) {
@@ -5517,7 +5521,11 @@ int ivar_orw_niltest(Compiler *c, int id, const char *ref, char *out, size_t cap
   return 0;
 }
 
+/* set while a value is emitted only for its effects (`p` of a nil-typed
+   call): a nil read there is no unwrap */
+int g_value_discarded = 0;
 void emit_slot_nil_read(Compiler *c, TyKind t, Buf *b) {
+  if (oint_kind(t) && g_value_discarded) { buf_puts(b, t == TY_FLOAT ? "0.0" : "0"); return; }
   if (oint_kind(t)) { buf_printf(b, "%s(%s)", oint_arg(t), oint_nil(t)); return; }
   const char *nv = nil_value(t);
   buf_puts(b, nv ? nv : default_value_from_compiler(c, t));
