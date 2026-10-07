@@ -550,7 +550,12 @@ void emit_p_one(Compiler *c, int arg, Buf *b, int indent) {
     buf_printf(b, "; if (!_t%d) sp_puts_line(\"nil\"); else { const char *_bs = sp_bigint_to_s(_t%d); if (_bs) sp_puts_line(_bs); } }\n", bv3, bv3);
   }
   else if (t == TY_NIL || t == TY_VOID) {
-    buf_puts(b, "(void)("); emit_expr(c, arg, b); buf_puts(b, "); fputs(\"nil\\n\", stdout);\n");
+    int sv_vd = g_value_discarded; g_value_discarded = 1;
+    buf_puts(b, "(void)(");
+    /* a producer whose nil rides beside it is evaluated as that oint, never unwrapped */
+    if (node_has_oint_form(c, arg)) emit_oint_expr(c, arg, TY_INT, b); else emit_expr(c, arg, b);
+    buf_puts(b, "); fputs(\"nil\\n\", stdout);\n");
+    g_value_discarded = sv_vd;
   }
   else if (nt_type(c->nt, arg) && sp_streq(nt_type(c->nt, arg), "ArrayNode") &&
            ({ int _n = 0; nt_arr(c->nt, arg, "elements", &_n); _n == 0; })) {

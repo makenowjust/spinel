@@ -5145,6 +5145,14 @@ int node_is_oint(Compiler *c, int node) {
     TyKind rt = r >= 0 ? comp_ntype(c, r) : TY_UNKNOWN;
     int a2 = nt_ref(nt, node, "arguments"), an2 = 0;
     if (a2 >= 0) nt_arr(nt, a2, "arguments", &an2);
+    /* `x.then { ... }` answers its block: a nil tail or a `next` that can
+       hand nil makes it nil */
+    if ((sp_streq(nm, "then") || sp_streq(nm, "yield_self")) && blk >= 0 && nt_kind(nt, blk) == NK_BlockNode) {
+      int bb = nt_ref(nt, blk, "body");
+      int bn = 0; const int *bs = bb >= 0 ? nt_arr(nt, bb, "body", &bn) : NULL;
+      if (bn > 0 && (node_has_oint_form(c, bs[bn - 1]) || nt_kind(nt, bs[bn - 1]) == NK_NilNode)) return 1;
+      return bb >= 0 && block_next_may_be_nil(c, bb, 0);
+    }
     /* unary `+` hands an Integer / Float its operand: the operand's form */
     if (sp_streq(nm, "+@") && an2 == 0 && r >= 0 && oint_kind(rt)) return node_is_oint(c, r);
     /* a proc's result comes back boxed and is unboxed with its nil */
@@ -5156,7 +5164,7 @@ int node_is_oint(Compiler *c, int node) {
         nt_kind(nt, blk) == NK_BlockNode) {
       int bb = nt_ref(nt, blk, "body");
       int bn = 0; const int *bs = bb >= 0 ? nt_arr(nt, bb, "body", &bn) : NULL;
-      return bn > 0 && node_is_oint(c, bs[bn - 1]);
+      return (bn > 0 && node_is_oint(c, bs[bn - 1])) || (bb >= 0 && block_next_may_be_nil(c, bb, 0));
     }
     /* a method the program defines, resolved as the call emitter resolves
        it: its C function answers an oint iff method_ret_is_oint */
@@ -5321,7 +5329,14 @@ int node_is_oint(Compiler *c, int node) {
       /* a seedless fold, a comparator min / max: nil over an empty receiver */
       if (blk >= 0 && an2 == 0 && (is_reduce_alias(nm) || sp_streq(nm, "min") || sp_streq(nm, "max"))) return 1;
     }
-    if (r >= 0 && rt == TY_RANGE && an2 == 0 && blk < 0 && (sp_streq(nm, "min") || sp_streq(nm, "max"))) return 1;
+    if (r >= 0 && (rt == TY_RANGE || rt == TY_FLOAT_RANGE) && an2 == 0 && blk < 0 &&
+        (sp_streq(nm, "min") || sp_streq(nm, "max"))) return 1;
+    /* `s.unpack1("q")` past the input's end is nil */
+    if (r >= 0 && sp_streq(nm, "unpack1")) return 1;
+    /* a String range has no size (nil); an Enumerator's find_index / index
+       answers nil on a miss */
+    if (r >= 0 && rt == TY_STR_RANGE && an2 == 0 && (sp_streq(nm, "size"))) return 1;
+    if (r >= 0 && rt == TY_ENUMERATOR && (sp_streq(nm, "find_index") || sp_streq(nm, "index"))) return 1;
     if (r >= 0 && ty_is_hash(rt) && sp_streq(nm, "dig") && an2 >= 1) return 1;
     /* fetch with a nil default answers that nil */
     if (r >= 0 && (ty_is_array(rt) || ty_is_hash(rt)) && sp_streq(nm, "fetch") && an2 == 2) {
@@ -5509,7 +5524,11 @@ int ivar_orw_niltest(Compiler *c, int id, const char *ref, char *out, size_t cap
   return 0;
 }
 
+/* set while a value is emitted only for its effects (`p` of a nil-typed
+   call): a nil read there is no unwrap */
+int g_value_discarded = 0;
 void emit_slot_nil_read(Compiler *c, TyKind t, Buf *b) {
+  if (oint_kind(t) && g_value_discarded) { buf_puts(b, t == TY_FLOAT ? "0.0" : "0"); return; }
   if (oint_kind(t)) { buf_printf(b, "%s(%s)", oint_arg(t), oint_nil(t)); return; }
   const char *nv = nil_value(t);
   buf_puts(b, nv ? nv : default_value_from_compiler(c, t));

@@ -25163,7 +25163,7 @@ static int nullable_int_call_name(const char *nm) {
   if (!nm) return 0;
   static const char *const N[] = {
     "index", "rindex", "byteindex", "byterindex", "delete_at", "slice!", "pop", "shift",
-    "delete", "nonzero?", "infinite?", "getbyte", "bsearch", "bsearch_index",
+    "delete", "nonzero?", "infinite?", "getbyte", "bsearch", "bsearch_index", "unpack1",
     /* `a <=> b` answers nil when the two are not comparable, and the poly
        helper spells that with the sentinel like every other nullable int */
     "<=>", NULL };
@@ -27750,6 +27750,25 @@ static void mark_array_or_nil_slots(Compiler *c) {
 /* Can one of the values a block site passes be an Integer's or a Float's
    nil? Asked of every site before its block is typed again below, so the
    common program -- no site passes one -- pays for this walk alone. */
+/* Under --int-overflow=promote an Integer variable that can hold nil is
+   widened to the box (an ivar, a local, a parameter, a global, a class
+   variable): such a read handed to a block parameter, which keeps its
+   Integer type, can be nil. */
+int promote_boxed_var_read(Compiler *c, int v) {
+  if (v < 0) return 0;
+  switch (nt_kind(c->nt, v)) {
+  case NK_InstanceVariableReadNode: case NK_GlobalVariableReadNode: case NK_ClassVariableReadNode:
+    return c->ntype[v] == TY_POLY;
+  case NK_LocalVariableReadNode: {
+    const char *nm = nt_str(c->nt, v, "name");
+    Scope *s = nm ? comp_scope_of(c, v) : NULL;
+    LocalVar *lv = s ? scope_local(s, nm) : NULL;
+    return (lv && lv->type == TY_POLY) || c->ntype[v] == TY_POLY;
+  }
+  default: return 0;
+  }
+}
+
 static int site_args_may_be_nil(Compiler *c, const int *av, int an) {
   const NodeTable *nt = c->nt;
   for (int k = 0; k < an; k++) {
@@ -27762,6 +27781,8 @@ static int site_args_may_be_nil(Compiler *c, const int *av, int an) {
     }
     TyKind t = v >= 0 ? c->ntype[v] : TY_UNKNOWN;
     if ((t == TY_INT || t == TY_FLOAT) && nullable_int_value(c, v)) return 1;
+    /* under promote a boxed ivar (an Integer member) can hand its nil too */
+    if (g_promote_mode && promote_boxed_var_read(c, v)) return 1;
   }
   return 0;
 }
@@ -28178,10 +28199,10 @@ static int named_method_first(const NamedMethod *v, int n, const char *name) {
    to, with that local's reads) widens here; a typed key or value slot has no
    nil (nil out of band). */
 void infer_subtree(Compiler *c, int id);   /* analyze_infer.c */
-static int wnh_bodies[64], wnh_n;
+static int wnh_bodies[4096], wnh_n;
 static void wnh_note(int body) {
   for (int i = 0; i < wnh_n; i++) if (wnh_bodies[i] == body) return;
-  if (wnh_n < 64) wnh_bodies[wnh_n++] = body;
+  if (wnh_n < 4096) wnh_bodies[wnh_n++] = body;
 }
 /* Does a read of local `name` in scope sc hand the hash on whole -- a
    statement list's last value (a method's or block's answer), a `return`,
@@ -28318,6 +28339,22 @@ static void widen_nullable_keyed_hash_literals(Compiler *c) {
     }
     if (sc->body >= 0) wnh_note(sc->body);
   }
+  /* A constant written from an Integer / Float that can be nil (`X =
+     define_method(:c) { next 3 if f; 4 }` over a method answering its proc's
+     value) holds it boxed: a constant has no nil flag of its own. Its reads,
+     anywhere, re-infer against the box. */
+  int const_widened = 0;
+  NT_FOREACH_KIND(nt, NK_ConstantWriteNode, id) {
+    const char *cn = nt_str(nt, id, "name");
+    int v = nt_ref(nt, id, "value");
+    LocalVar *cv = cn ? comp_const(c, cn) : NULL;
+    if (!cv || v < 0 || (cv->type != TY_INT && cv->type != TY_FLOAT)) continue;
+    if (!nullable_int_value(c, v)) continue;
+    cv->type = TY_POLY; const_widened = 1;
+    c->ntype[id] = TY_POLY;
+  }
+  if (const_widened)
+    for (int si = 0; si < c->nscopes; si++) if (c->scopes[si].body >= 0) wnh_note(c->scopes[si].body);
   /* the expressions over a widened hash (its reads' `[]`, a call it is an
      argument of) re-infer against it */
   for (int i = 0; i < wnh_n; i++) infer_subtree(c, wnh_bodies[i]);

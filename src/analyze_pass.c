@@ -9718,10 +9718,15 @@ static TyKind bs_value(Compiler *c, int v) {
    ? nil : i`, a missed element read) records BS_NIL beside its type: it is
    emitted as the slot's sentinel when it is nil, which the binders hand
    through as they do a literal's. */
+int promote_boxed_var_read(Compiler *c, int v);   /* analyze.c */
 static TyKind bs_join_val(Compiler *c, TyKind a, int v, char *flags) {
   if (v >= 0 && nt_kind(c->nt, v) == NK_NilNode) { *flags |= BS_NIL; return a; }
   TyKind t = bs_value(c, v);
   if ((t == TY_INT || t == TY_FLOAT) && nullable_int_value(c, v)) *flags |= BS_NIL;
+  /* under promote an Integer member or ivar is boxed, and its nil reaches
+     the parameter as the box's (Struct#each yielding a member left nil) */
+  else if (g_promote_mode && (t == TY_POLY || t == TY_INT || t == TY_FLOAT) && promote_boxed_var_read(c, v))
+    *flags |= BS_NIL;
   return bs_join(a, t);
 }
 

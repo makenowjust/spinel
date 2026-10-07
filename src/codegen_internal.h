@@ -2018,6 +2018,10 @@ int ivar_node_slot(Compiler *c, int node, int *cid, int *iv);
 int ivar_read_slot_is_oint(Compiler *c, int node);
 /* an Integer literal as a C constant (INT64_MIN spelled as an expression) */
 void emit_int_lit(Buf *b, long long v);
+/* a value emitted only for its effects: a nil read there is no unwrap (codegen_util.c) */
+extern int g_value_discarded;
+/* the caller declared emit_block_value_into's `dest` as its oint (codegen_fold.c) */
+extern int g_bv_dest_oint;
 /* can a `next` of this block body (not a nested block's) hand the slot a
    nil: a bare `next`, `next nil`, a value that can be nil (codegen_call.c) */
 int block_next_may_be_nil(Compiler *c, int id, int depth);

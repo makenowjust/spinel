@@ -11193,6 +11193,13 @@ static void emit_zsuper_arg(Compiler *c, Scope *s, LocalVar *dst, TyKind dt, con
   else if (st == TY_POLY && dt == TY_INT) buf_printf(b, "sp_poly_to_i(%s)", _bx.p);
   else if (st == TY_POLY && dt == TY_FLOAT) buf_printf(b, "sp_poly_to_f(%s)", _bx.p);
   else if (st == TY_POLY && dt != TY_POLY && dt != TY_UNKNOWN) emit_unbox_text(c, dt, _bx.p, b);
+  /* a number between this method's slot and the parent's, each in its own
+     form: an oint into a plain parameter is its value (the analysis marks
+     the parent's parameter where a nil can reach it), a plain one wraps */
+  else if (oint_kind(st) && st == dt && src && dst && slot_is_oint(src) && !slot_is_oint(dst))
+    buf_printf(b, "%s(%s)", oint_arg(st), _bx.p);
+  else if (oint_kind(st) && st == dt && src && dst && !slot_is_oint(src) && slot_is_oint(dst))
+    buf_printf(b, "%s(%s)", oint_of(st), _bx.p);
   else buf_puts(b, _bx.p);
   free(_bx.p);
 }
