@@ -5077,6 +5077,7 @@ void emit_method(Compiler *c, Scope *s, Buf *b) {
     g_self = cm_self9;
   }
   g_ret_type = method_is_void(s) ? TY_VOID : s->ret;
+  int saved_ro = g_ret_oint; g_ret_oint = method_ret_is_oint(s);
   g_exc_frame_depth = 0; g_method_pr_exc_depth = 0; g_rescue_save_depth = 0;
   /* real-function funnel mirror: no proc-return frame yet (set below when
      one exists); block bodies spliced by yield-inlines restore from these. */
@@ -5166,7 +5167,7 @@ void emit_method(Compiler *c, Scope *s, Buf *b) {
   g_fn_pr_label = NULL; g_fn_pr_var = NULL; g_fn_ret_type = TY_UNKNOWN;
   g_self_deref = saved_deref;
   g_self = saved_self9;
-  g_ret_type = saved_rt; g_ensure_depth = saved_ed;
+  g_ret_type = saved_rt; g_ret_oint = saved_ro; g_ensure_depth = saved_ed;
   memcpy(g_ensure_stack, saved_estk, sizeof saved_estk);
   g_emitting_class_id = saved_emcls;
   g_dm_subst_name = saved_dmn; g_dm_subst_node = saved_dmnode;
@@ -6203,7 +6204,7 @@ void emit_fiber_new(Compiler *c, int id, Buf *b, int as_gen, int size_node) {
      lower to Fiber.yield through g_yielder_name). */
   g_block_param_name = as_gen ? bp0 : NULL; g_self = sv_self;
   g_yielder_name = as_gen ? bp0 : NULL;   /* `y << v` -> Fiber.yield in the body */
-  g_ret_type = TY_POLY; g_result_poly = 0; g_result_var = NULL;
+  g_ret_type = TY_POLY; g_ret_oint = 0; g_result_poly = 0; g_result_var = NULL;
   /* Value-type self is captured by value (sp_X self), so ivar access in the
      body uses `.`; a pointer self uses `->`. Override the global for the body
      (restored below). */
@@ -7518,7 +7519,7 @@ else if (orecv >= 0 && onm) {
      method's live entries: park them, not just the count (#3943) */
   RenPark ren_sv = ren_park(0);
   g_pre = NULL; g_indent = 0; g_block_id = -1; g_block_nren = 0; g_block_param_name = NULL;
-  g_self = "self"; g_result_var = NULL; g_ret_type = ret; g_ensure_depth = 0; g_result_poly = 0;
+  g_self = "self"; g_result_var = NULL; g_ret_type = ret; g_ret_oint = 0; g_ensure_depth = 0; g_result_poly = 0;
   int sv_iec = g_ie_class_id, sv_bcls = bs ? bs->class_id : -1, sv_bcm = bs ? bs->is_cmethod : 0;
   /* a block written in a class method reads `self` as the class object, as
      the method's own body does: the proc function has no `self` (#7166) */

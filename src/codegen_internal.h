@@ -1412,7 +1412,6 @@ void emit_ds_param_extract(Compiler *c, Scope *m, int i, int ds_hash_tmp,
    analyze_scope.c; canonical declarations live in analyze_internal.h) */
 int is_arith_op(const char *op);
 int is_cmp_op(const char *op);
-int int_slot_store_needs_ck(Compiler *c, int v, TyKind slot_ty, int slot_nullable);
 const char *int_shift_fn(Compiler *c, const char *op, int v);
 int class_def_body(Compiler *c, int def_node);
 int class_body_list(Compiler *c, int **out_ci, int **out_body);
@@ -2015,6 +2014,14 @@ extern int g_oint_read;
    and for an Integer or Float, whose plain scalar has no nil, the TypeError
    a nil raises where an Integer is wanted (sp_oint_arg(sp_oint_nil())). */
 void emit_slot_nil_read(Compiler *c, TyKind t, Buf *b);
+/* the method being emitted answers an oint (set beside g_ret_type) */
+extern int g_ret_oint;
+/* a store's right-hand side into an ivar with a nil bit, the bit kept in
+   step (codegen_util.c): from node v, or from an sp_oint text */
+void emit_ivar_value_nilbit(Compiler *c, int cid, int iv, const char *obj, int v, Buf *b);
+void emit_ivar_text_nilbit(Compiler *c, int cid, int iv, const char *obj, const char *otext, Buf *b);
+/* the right-hand side of `@x = nil` on an Integer / Float ivar */
+void emit_ivar_nil_store(Compiler *c, int id, TyKind t, Buf *b);
 /* node as a plain scalar through its oint form: `sp_oint_val(<oint>, op)`
    when the node may be nil (cmp_operand_may_be_nil), else emit_expr */
 void emit_scalar_operand_op(Compiler *c, int node, const char *op, Buf *b);

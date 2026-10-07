@@ -858,8 +858,8 @@ static void emit_index_get(Compiler *c, int recv, int key, Buf *b) {
 void emit_slot_nil_test(Compiler *c, TyKind t, int tmp, int want_nil, Buf *b) {
   const char *n = want_nil ? "" : "!";
   switch (t) {
-    case TY_INT:    buf_printf(b, "%s(_t%d == SP_INT_NIL)", n, tmp); return;
-    case TY_FLOAT:  buf_printf(b, "%ssp_float_is_nil(_t%d)", n, tmp); return;
+    /* an Integer or Float temp is its sp_oint */
+    case TY_INT: case TY_FLOAT: buf_printf(b, "%s_t%d.nil", n, tmp); return;
     case TY_SYMBOL: buf_printf(b, "%s(_t%d == (sp_sym)-1)", n, tmp); return;
     case TY_POLY:   buf_printf(b, "%ssp_poly_truthy(_t%d)", want_nil ? "!" : "", tmp); return;
     default: break;
@@ -1470,6 +1470,17 @@ static void emit_guarded_slot_assign(Compiler *c, int v, int tn, Buf *b) {
   free(rvb.p);
 }
 
+/* `_tN = <v as an sp_oint>`, as emit_guarded_slot_assign, for an Integer or
+   Float element slot read with its nil */
+static void emit_guarded_oint_slot_assign(Compiler *c, int v, TyKind t, int tn, Buf *b) {
+  Buf rvb; memset(&rvb, 0, sizeof rvb);
+  Buf *svp = g_pre; g_pre = b;
+  emit_oint_expr(c, v, t, &rvb);
+  g_pre = svp;
+  buf_printf(b, "_t%d = %s", tn, rvb.p ? rvb.p : oint_nil(t));
+  free(rvb.p);
+}
+
 static void emit_guarded_poly_slot_assign(Compiler *c, int v, int tn, Buf *b) {
   /* The right-hand side's own prelude belongs INSIDE the guard. Hoisted
      above it, a call there runs even when the key is already present --
@@ -1767,12 +1778,8 @@ static int emit_local_ivar_write_expr(Compiler *c, int id, Buf *b, const NodeTab
     }
     /* poly RHS into a scalar/string slot: the same unbox the statement form
        applies (emit_poly_rhs_coerced) */
+    else if (lv && slot_is_oint(lv)) emit_oint_expr(c, v, lv->type, b);
     else if (lv && emit_poly_rhs_coerced(c, lv->type, v, b)) { }
-    else if (lv && int_slot_store_needs_ck(c, v, lv->type, lv->nullable_int)) {
-      buf_puts(b, "sp_int_slot_ck(");
-      emit_coerce(c, v, lv->type, CO_HOLD, "a local variable write", b);
-      buf_puts(b, ")");
-    }
     else if (lv) emit_coerce(c, v, lv->type, CO_HOLD, "a local variable write", b);
     else emit_expr(c, v, b);
     buf_puts(b, "; "); emit_local_ref(c, id, nm, b); buf_puts(b, "; })");
@@ -1848,8 +1855,7 @@ static int emit_local_ivar_write_expr(Compiler *c, int id, Buf *b, const NodeTab
         switch (ivt2) {
         case TY_RANGE: buf_puts(b, "(sp_Range){0}"); break;
         case TY_POLY: buf_puts(b, "sp_box_nil()"); break;
-        case TY_INT: buf_puts(b, "SP_INT_NIL"); break;
-        case TY_FLOAT: buf_puts(b, "sp_float_nil()"); break;
+        case TY_INT: case TY_FLOAT: emit_ivar_nil_store(c, id, ivt2, b); break;
         case TY_STRING: buf_puts(b, "NULL"); break;
         default: buf_puts(b, default_value_from_compiler(c, ivt2)); break;
         }
@@ -1861,7 +1867,14 @@ static int emit_local_ivar_write_expr(Compiler *c, int id, Buf *b, const NodeTab
     if (fz_cid >= 0) emit_frozen_obj_guard(c, fz_cid, g_self ? g_self : "self", b);
     buf_printf(b, "%s = ", ref2e);
     Repr rp = repr_of(c, v);
-    if (v_empty_array2 && ty_is_ptr_array(ivt2)) buf_puts(b, "sp_PtrArray_new()");
+    int wcid2, wiv2, wk2 = ivar_node_slot(c, id, &wcid2, &wiv2);
+    /* an Integer or Float field with a nil bit, or an oint static */
+    if (wk2 == 1 && ivar_has_nilbit(c, wcid2, wiv2)) {
+      char wpfx2[128]; snprintf(wpfx2, sizeof wpfx2, "%s%s", g_self, g_self_deref);
+      emit_ivar_value_nilbit(c, wcid2, wiv2, wpfx2, v, b);
+    }
+    else if (wk2 == 2 && civ_is_oint(c, wcid2, wiv2)) emit_oint_expr(c, v, ivt2, b);
+    else if (v_empty_array2 && ty_is_ptr_array(ivt2)) buf_puts(b, "sp_PtrArray_new()");
     else if (v_empty_array2 && ivt2 == TY_POLY_ARRAY) buf_puts(b, "sp_PolyArray_new()");
     else if (v_empty_array2 && array_kind(ivt2)) buf_printf(b, "sp_%sArray_new()", array_kind(ivt2));
     else if (v_empty_hash2 && ty_is_hash(ivt2)) {
@@ -1915,11 +1928,6 @@ static int emit_local_ivar_write_expr(Compiler *c, int id, Buf *b, const NodeTab
       emit_unbox_text(c, ivt2, _ck.p ? _ck.p : "sp_box_nil()", b);
       free(_ck.p);
       free(_rb.p);
-    }
-    else if (int_slot_store_needs_ck(c, v, ivt2, ivnull2)) {
-      buf_puts(b, "sp_int_slot_ck(");
-      emit_coerce(c, v, ivt2, CO_HOLD, "an instance variable write", b);
-      buf_puts(b, ")");
     }
     else {
       /* a subclass instance stored into an ancestor-typed ivar slot (#3418) */
@@ -4308,21 +4316,18 @@ static void emit_expr_node(Compiler *c, int id, Buf *b) {
       emit_guarded_poly_slot_assign(c, iv, tc2, b);
       buf_printf(b, "; sp_PolyArray_set(_t%d, _t%d, _t%d); } _t%d; })", ta2, tb2, tc2, tc2);
     }
-    else if (irt == TY_INT_ARRAY) {
-      buf_printf(b, "({ sp_IntArray *_t%d = ", ta2); emit_expr(c, ir, b);
+    else if (irt == TY_INT_ARRAY || irt == TY_FLOAT_ARRAY) {
+      /* the element is read with its nil; the value written is its oint
+         (a nil value sets the element's bit) and the expression's value is
+         the element's plain scalar */
+      const char *k = irt == TY_INT_ARRAY ? "Int" : "Float";
+      TyKind et = irt == TY_INT_ARRAY ? TY_INT : TY_FLOAT;
+      buf_printf(b, "({ sp_%sArray *_t%d = ", k, ta2); emit_expr(c, ir, b);
       buf_printf(b, "; sp_int _t%d = ", tb2); emit_int_expr(c, iav[0], b);
-      buf_printf(b, "; sp_int _t%d = sp_IntArray_get(_t%d, _t%d);", tc2, ta2, tb2);
-      buf_printf(b, " if (%s(_t%d == SP_INT_NIL)) { ", is_or2 ? "" : "!", tc2);
-      emit_guarded_slot_assign(c, iv, tc2, b);
-      buf_printf(b, "; sp_IntArray_set%s(_t%d, _t%d, _t%d); } _t%d; })", nil_store_sfx(c, "Int", iv), ta2, tb2, tc2, tc2);
-    }
-    else if (irt == TY_FLOAT_ARRAY) {
-      buf_printf(b, "({ sp_FloatArray *_t%d = ", ta2); emit_expr(c, ir, b);
-      buf_printf(b, "; sp_int _t%d = ", tb2); emit_int_expr(c, iav[0], b);
-      buf_printf(b, "; sp_float _t%d = sp_FloatArray_get(_t%d, _t%d);", tc2, ta2, tb2);
-      buf_printf(b, " if (%ssp_float_is_nil(_t%d)) { ", is_or2 ? "" : "!", tc2);
-      emit_guarded_slot_assign(c, iv, tc2, b);
-      buf_printf(b, "; sp_FloatArray_set%s(_t%d, _t%d, _t%d); } _t%d; })", nil_store_sfx(c, "Float", iv), ta2, tb2, tc2, tc2);
+      buf_printf(b, "; %s _t%d = sp_%sArray_oget(_t%d, _t%d);", oint_ctype(et), tc2, k, ta2, tb2);
+      buf_printf(b, " if (%s_t%d.nil) { ", is_or2 ? "" : "!", tc2);
+      emit_guarded_oint_slot_assign(c, iv, et, tc2, b);
+      buf_printf(b, "; sp_%sArray_oset(_t%d, _t%d, _t%d); } _t%d.v; })", k, ta2, tb2, tc2, tc2);
     }
     else if (irt == TY_STR_ARRAY) {
       buf_printf(b, "({ sp_StrArray *_t%d = ", ta2); emit_expr(c, ir, b);
@@ -4414,7 +4419,8 @@ static void emit_expr_node(Compiler *c, int id, Buf *b) {
          answer to which (#3383). */
       { TyKind yt = repr_of(c, id).as_ty;
         if (yt == TY_POLY) buf_puts(b, ", _sp_proc_poly_ret)");
-        else if (yt == TY_INT) buf_puts(b, ", sp_poly_as_int_or_nil(_sp_proc_poly_ret))");   /* a nil answer is the Integer slot's nil */
+        /* a nil answer is the Integer slot's nil, where the yield can answer one (its oint form) */
+        else if (yt == TY_INT) buf_puts(b, node_is_oint(c, id) ? ", sp_poly_as_int_or_nil(_sp_proc_poly_ret))" : ", sp_poly_to_i(_sp_proc_poly_ret))");
         else if (yt == TY_UNKNOWN || yt == TY_VOID || yt == TY_NIL) buf_puts(b, ", _sp_proc_poly_ret.v.i)");
         else {
           /* a typed slot other than an Integer's reads the boxed answer by
@@ -4475,7 +4481,7 @@ static void emit_expr_node(Compiler *c, int id, Buf *b) {
          took an sp_int and the C build stopped) */
       { TyKind yt = repr_of(c, id).as_ty;
         if (yt == TY_POLY || yt == TY_UNKNOWN || yt == TY_NIL || yt == TY_VOID) buf_puts(b, "sp_box_nil())");
-        else if (yt == TY_INT) buf_puts(b, "SP_INT_NIL)");
+        else if (yt == TY_INT) buf_puts(b, "(sp_int)0)");
         else { buf_puts(b, default_value_from_compiler(c, yt)); buf_puts(b, ")"); } }
       return;
     }

@@ -2096,9 +2096,16 @@ const char *ivar_set_test(Compiler *c, int cid, const char *ivn, const char *exp
     return buf;
   }
   if (kind != 1) return NULL;
-  TyKind t = c->classes[cid].ivar_types[comp_ivar_index(&c->classes[cid], ivn)];
-  if (t == TY_INT) snprintf(buf, cap, "(%s != SP_INT_NIL)", expr);
-  else if (t == TY_FLOAT) snprintf(buf, cap, "(!sp_float_is_nil(%s))", expr);
+  int iv = comp_ivar_index(&c->classes[cid], ivn);
+  TyKind t = c->classes[cid].ivar_types[iv];
+  if (oint_kind(t)) {
+    /* set when its nil bit is clear; a field with no bit is always set */
+    if (!ivar_has_nilbit(c, cid, iv)) return NULL;
+    size_t n = strlen(expr) - strlen(iv_c(ivn + 1)) - 3;
+    char obj[256]; snprintf(obj, sizeof obj, "%.*s", (int)n, expr);
+    char bt[320]; ivar_nilbit_test(c, cid, iv, obj, bt, sizeof bt);
+    snprintf(buf, cap, "(!%s)", bt);
+  }
   else if (t == TY_POLY) snprintf(buf, cap, "((%s).tag != SP_TAG_NIL)", expr);
   else snprintf(buf, cap, "(%s != NULL)", expr);
   return buf;
@@ -2794,7 +2801,7 @@ const char *local_init_value(Compiler *c, LocalVar *lv) {
    numeric 0 that reads as a real value. Every other slot takes emit_expr. */
 void emit_expr_slot(Compiler *c, int node, TyKind slot, Buf *b) {
   if (node >= 0 && (slot == TY_INT || slot == TY_FLOAT)) {
-    const char *sent = slot == TY_INT ? "SP_INT_NIL" : "sp_float_nil()";
+    const char *sent = oint_nil(slot);   /* a slot that takes nil is an sp_oint */
     if (nt_kind(c->nt, node) == NK_NilNode) { buf_puts(b, sent); return; }
     TyKind vt = repr_of(c, node).as_ty;
     if (vt == TY_NIL || vt == TY_VOID) {
@@ -2974,13 +2981,10 @@ void emit_coerce_text(Compiler *c, int node, TyKind from, TyKind slot, int how,
     buf_printf(b, "((void)(%s), %s)", text, raise_tail_value_c(c, slot));
     RCCT(CF_NIL_SENT);
     return;
-  case CF_INT2BIG: {
-    int t = ++g_tmp;
-    buf_printf(b, "({ sp_int _t%d = (%s); _t%d == SP_INT_NIL ? NULL : sp_bigint_new_int(_t%d); })",
-               t, text, t, t);
+  case CF_INT2BIG:
+    buf_printf(b, "sp_bigint_new_int(%s)", text);
     RCCT(CF_INT2BIG);
     return;
-  }
   case CF_CONVERT:
     /* a Bignum or a Rational operand a Float slot converts, as Ruby does */
     buf_printf(b, "%s(%s)", from == TY_BIGINT ? "sp_bigint_to_double" : "sp_rational_to_f", text);
@@ -3085,8 +3089,8 @@ int local_nil_test(Compiler *c, LocalVar *lv, const char *ref, Buf *out) {
      the nil join keeps such a slot an sp_int, and its nil is the sentinel */
   if (lv->nullable_int) nil_init = 1;
   if (t == TY_INT || t == TY_FLOAT) {
-    if (!nil_init) return 0;
-    buf_printf(out, t == TY_INT ? "%s == SP_INT_NIL" : "sp_float_is_nil(%s)", ref);
+    if (!nil_init || !slot_is_oint(lv)) return 0;
+    buf_printf(out, "%s.nil", ref);
     return 1;
   }
   /* any other builtin kind: its ty_traits row's nil_test_local (types.c),
@@ -3181,8 +3185,8 @@ const char *default_value(TyKind t) {
    kinds hold nil as a sentinel (default_value), which C reads as true. */
 void emit_slot_truthy(TyKind t, const char *ref, Buf *b) {
   switch (t) {
-  case TY_INT:    buf_printf(b, "(%s != SP_INT_NIL)", ref); break;
-  case TY_FLOAT:  buf_printf(b, "(!sp_float_is_nil(%s))", ref); break;
+  /* an Integer or Float `ref` is its sp_oint (emit_sentinel_bind) */
+  case TY_INT: case TY_FLOAT: buf_printf(b, "(!(%s).nil)", ref); break;
   case TY_SYMBOL: buf_printf(b, "(%s != (sp_sym)-1)", ref); break;
   case TY_POLY:   buf_printf(b, "(sp_poly_truthy(%s))", ref); break;
   default:        buf_printf(b, "(%s)", ref); break;
@@ -3194,7 +3198,8 @@ void emit_slot_truthy(TyKind t, const char *ref, Buf *b) {
    closes the block or statement expression around it. */
 void emit_sentinel_bind(Compiler *c, TyKind t, int node, char *ref, size_t cap, Buf *b) {
   snprintf(ref, cap, "_t%d", ++g_tmp);
-  emit_ctype(c, t, b); buf_printf(b, " %s = ", ref); emit_expr(c, node, b);
+  if (oint_kind(t)) { buf_printf(b, "%s %s = ", oint_ctype(t), ref); emit_oint_expr(c, node, t, b); }
+  else { emit_ctype(c, t, b); buf_printf(b, " %s = ", ref); emit_expr(c, node, b); }
   buf_puts(b, "; ");
 }
 /* The box for an element an Integer or Float array hands to a poly container
@@ -3846,7 +3851,8 @@ int hash_key_misses(Compiler *c, int key, TyKind kt) {
    Integer slot that held nil is stored as the slot's sentinel, which
    emit_hash_key hands a nil key as, so the lookup finds that entry. */
 int hash_nil_key_stored(Compiler *c, int key, TyKind kt) {
-  return kt == TY_INT && comp_ntype(c, key) == TY_NIL;
+  (void)c; (void)key; (void)kt;
+  return 0;   /* an Integer key has no nil word any more (A5) */
 }
 
 void emit_hash_key(Compiler *c, int key, TyKind kt, Buf *b) {
@@ -3857,7 +3863,9 @@ void emit_hash_key(Compiler *c, int key, TyKind kt, Buf *b) {
     emit_expr(c, key, b);
     if (kt == TY_STRING)      buf_puts(b, "); (const char *)0; })");
     else if (kt == TY_SYMBOL) buf_puts(b, "); (sp_sym)-1; })");
-    else                      buf_puts(b, "); SP_INT_NIL; })");
+    /* an Integer key no key equals does not exist: a nil key is refused
+       where it is read (the runtime raises for one stored, A5) */
+    else                      buf_puts(b, "); sp_oint_arg(sp_oint_nil()); })");
     return;
   }
   /* A Symbol key on a String-keyed hash used to coerce to its name, a
@@ -3877,7 +3885,7 @@ void emit_hash_key(Compiler *c, int key, TyKind kt, Buf *b) {
        it rather than answering the no-key sentinel (#4279). */
     if (kt == TY_STRING)      buf_puts(b, "; _hk = sp_poly_strbuf_deref(_hk); _hk.tag == SP_TAG_STR ? _hk.v.s : (const char *)0; })");
     else if (kt == TY_SYMBOL) buf_puts(b, "; _hk.tag == SP_TAG_SYM ? (sp_sym)_hk.v.i : (sp_sym)-1; })");
-    else                      buf_puts(b, "; _hk.tag == SP_TAG_INT ? _hk.v.i : SP_INT_NIL; })");
+    else                      buf_puts(b, "; sp_poly_hkey_i(_hk); })");   /* another kind raises (A5) */
     return;
   }
   if (kt == TY_POLY && !kboxed) {
@@ -5056,6 +5064,62 @@ static int leaf_slot_is_oint(Compiler *c, int node) {
   return 0;
 }
 
+/* the method being emitted answers an sp_oint / sp_ofloat (method_ret_is_oint
+   of its scope; set beside g_ret_type) */
+int g_ret_oint = 0;
+
+/* The right-hand side of a store into ivar iv of class cid (an object
+   field with a nil bit; `obj` is the receiver prefix, "self->") from node
+   v, with the bit kept in step: a value that can be nil (an oint form, a
+   boxed value, a nil) stores its value and copies its nil into the bit; a
+   plain value clears the bit. A statement-expression whose value is the
+   field's. */
+void emit_ivar_value_nilbit(Compiler *c, int cid, int iv, const char *obj, int v, Buf *b) {
+  TyKind t = c->classes[cid].ivar_types[iv];
+  char bs[160], bc[160];
+  ivar_nilbit_set(c, cid, iv, obj, bs, sizeof bs);
+  ivar_nilbit_clear(c, cid, iv, obj, bc, sizeof bc);
+  int to = ++g_tmp;
+  if (v < 0 || nt_kind(c->nt, v) == NK_NilNode) { buf_printf(b, "({ %s; (%s)0; })", bs, c_type_name(t)); return; }
+  Repr r = repr_of(c, v);
+  if (node_has_oint_form(c, v) || r.kind == RK_BOXED || r.as_ty == TY_NIL || r.as_ty == TY_VOID ||
+      r.as_ty == TY_UNKNOWN || (oint_kind(r.as_ty) && r.as_ty != t)) {
+    buf_printf(b, "({ %s _t%d = ", oint_ctype(t), to);
+    if (r.as_ty == TY_UNKNOWN) { buf_printf(b, "%s(", oint_unbox(t)); emit_expr(c, v, b); buf_puts(b, ")"); }
+    else emit_oint_expr(c, v, t, b);
+    buf_printf(b, "; if (_t%d.nil) %s; else %s; _t%d.v; })", to, bs, bc, to);
+    return;
+  }
+  buf_printf(b, "({ %s _t%d = ", c_type_name(t), to);
+  emit_coerce(c, v, t, CO_HOLD, "an instance variable write", b);
+  buf_printf(b, "; %s; _t%d; })", bc, to);
+}
+/* the same for a value already rendered as an sp_oint / sp_ofloat text */
+void emit_ivar_text_nilbit(Compiler *c, int cid, int iv, const char *obj, const char *otext, Buf *b) {
+  TyKind t = c->classes[cid].ivar_types[iv];
+  char bs[160], bc[160];
+  ivar_nilbit_set(c, cid, iv, obj, bs, sizeof bs);
+  ivar_nilbit_clear(c, cid, iv, obj, bc, sizeof bc);
+  int to = ++g_tmp;
+  buf_printf(b, "({ %s _t%d = %s; if (_t%d.nil) %s; else %s; _t%d.v; })", oint_ctype(t), to, otext, to, bs, bc, to);
+}
+
+/* The right-hand side of `@x = nil` for an Integer or Float ivar named by
+   write node `id`: a field with a nil bit sets it (the value is its 0), an
+   oint static takes its nil, a plain field (nothing marks it) the TypeError
+   a nil raises where a number is wanted. */
+void emit_ivar_nil_store(Compiler *c, int id, TyKind t, Buf *b) {
+  int cid, iv, k = ivar_node_slot(c, id, &cid, &iv);
+  if (k == 1 && ivar_has_nilbit(c, cid, iv)) {
+    char pfx[128], bs[200];
+    snprintf(pfx, sizeof pfx, "%s%s", g_self, g_self_deref);
+    ivar_nilbit_set(c, cid, iv, pfx, bs, sizeof bs);
+    buf_printf(b, "({ %s; (%s)0; })", bs, c_type_name(t));
+  }
+  else if (k == 2 && civ_is_oint(c, cid, iv)) buf_puts(b, oint_nil(t));
+  else emit_slot_nil_read(c, t, b);
+}
+
 void emit_slot_nil_read(Compiler *c, TyKind t, Buf *b) {
   if (oint_kind(t)) { buf_printf(b, "%s(%s)", oint_arg(t), oint_nil(t)); return; }
   const char *nv = nil_value(t);
@@ -5087,8 +5151,9 @@ void emit_oint_expr(Compiler *c, int node, TyKind t, Buf *b) {
     buf_puts(b, "((void)("); emit_expr(c, node, b); buf_printf(b, "), %s)", oint_nil(t));
     return;
   }
-  /* a boxed value: unboxed with its nil */
-  if (r.kind == RK_BOXED || vt == TY_POLY) {
+  /* a boxed value, or an untyped one (the gate's raising token): unboxed
+     with its nil */
+  if (r.kind == RK_BOXED || vt == TY_POLY || vt == TY_UNKNOWN) {
     buf_printf(b, "%s(", oint_unbox(t)); emit_expr(c, node, b); buf_puts(b, ")");
     return;
   }
