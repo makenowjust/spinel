@@ -23,6 +23,12 @@ static char *op_recv_text(Compiler *c, const BopCtx *x) {
      $r   the receiver, emitted at its first occurrence (or the text the
           caller rendered, x->rtext); a later $r repeats the same text
      $R   the receiver emitted again, for an arm that emitted it twice
+     $o   an Integer or Float receiver with its nil beside the value (an
+          sp_oint / sp_ofloat, emit_oint_expr): a receiver that can be nil
+          hands the row its flag, one that cannot is wrapped as never nil.
+          Emitted at its first occurrence, repeated after, as $r is. The
+          caller's x->rtext is the plain rendering, so a receiver with an
+          oint form is rendered again from the node (as the nil? arm does)
      $h   the receiver held across the arguments (hold_recv_open, rooted
           in a temp of its C type): the hold opens before anything else is
           emitted or any temp is taken, and closes after the row's text
@@ -56,7 +62,7 @@ static int emit_op_template(Compiler *c, const BopCtx *x, Buf *b) {
     char pat[3] = { '$', tnames[k], 0 };
     if (strstr(x->op->arg, pat)) tn[k] = ++g_tmp;
   }
-  char *r = NULL;
+  char *r = NULL, *o = NULL;
   int argc;
   const int *argv = call_args(c->nt, x->id, &argc);
   for (const char *p = x->op->arg; *p; p++) {
@@ -69,6 +75,21 @@ static int emit_op_template(Compiler *c, const BopCtx *x, Buf *b) {
         r = strndup(b->p ? b->p + mark : "", b->len - mark);
       }
       else buf_puts(b, r);
+      p++;
+    }
+    else if (p[0] == '$' && p[1] == 'o') {
+      if (!o && x->rtext && !node_has_oint_form(c, x->recv)) {
+        Buf ob; memset(&ob, 0, sizeof ob);
+        buf_printf(&ob, "%s(%s)", oint_of(x->rt), x->rtext);
+        o = ob.p ? ob.p : strdup("");
+        buf_puts(b, o);
+      }
+      else if (!o) {
+        size_t mark = b->len;
+        emit_oint_expr(c, x->recv, x->rt, b);
+        o = strndup(b->p ? b->p + mark : "", b->len - mark);
+      }
+      else buf_puts(b, o);
       p++;
     }
     else if (p[0] == '$' && p[1] == 'h') {
@@ -121,7 +142,7 @@ static int emit_op_template(Compiler *c, const BopCtx *x, Buf *b) {
     }
     else { char ch[2] = { *p, 0 }; buf_puts(b, ch); }
   }
-  free(r);
+  free(r); free(o);
   if (held) buf_puts(b, "; })");
   free(hb.p);
   return 1;

@@ -35,7 +35,43 @@ static void emit_int_bit_recv(Compiler *c, int recv, TyKind rt, const char *conv
 }
 
 /* Integer shifts, <=>, the comparison and equality operators, and is_a? on a poly receiver */
+/* `==` / `!=` where either side is an Integer or Float that can be nil:
+   nil's own equality, as CRuby's (nil == x only for a nil x), where the
+   plain compare unwrapped the nil and raised. Two numbers of one kind
+   compare their values through sp_oint_eq / sp_ofloat_eq; an Integer
+   against a Float through sp_int_flt_cmp, exact for every value; a boxed
+   operand through sp_poly_eq. Any other operand kind is left to the
+   general arm. Answers 1 when it emitted. */
+static int emit_nil_aware_num_eq(Compiler *c, int id, const char *name, int recv, int argc, const int *argv, TyKind rt, Buf *b) {
+  if (recv < 0 || argc != 1 || !(sp_streq(name, "==") || sp_streq(name, "!="))) return 0;
+  if (!oint_kind(rt)) return 0;
+  TyKind at = comp_ntype(c, argv[0]);
+  int a_num = oint_kind(at), a_poly = at == TY_POLY || at == TY_UNKNOWN;
+  if (!a_num && !a_poly) return 0;
+  if (!node_has_oint_form(c, recv) && !(a_num && node_has_oint_form(c, argv[0]))) return 0;
+  int ne = name[0] == '!';
+  int tl = ++g_tmp, tr = ++g_tmp;
+  buf_printf(b, "({ %s _t%d = ", oint_ctype(rt), tl); emit_oint_expr(c, recv, rt, b);
+  if (a_poly) {
+    buf_printf(b, "; sp_RbVal _t%d = ", tr); emit_boxed(c, argv[0], b);
+    buf_printf(b, "; %s(_t%d.nil ? sp_poly_nil_p(_t%d) : sp_poly_eq(%s(_t%d.v), _t%d)); })",
+               ne ? "!" : "", tl, tr, rt == TY_FLOAT ? "sp_box_float" : "sp_box_int", tl, tr);
+    return 1;
+  }
+  buf_printf(b, "; %s _t%d = ", oint_ctype(at), tr); emit_oint_expr(c, argv[0], at, b);
+  if (rt == at)
+    buf_printf(b, "; %s%s(_t%d, _t%d); })", ne ? "!" : "", rt == TY_FLOAT ? "sp_ofloat_eq" : "sp_oint_eq", tl, tr);
+  else if (rt == TY_INT)
+    buf_printf(b, "; %s(_t%d.nil ? _t%d.nil : (!_t%d.nil && sp_int_flt_cmp(_t%d.v, _t%d.v) == 0)); })",
+               ne ? "!" : "", tl, tr, tr, tl, tr);
+  else
+    buf_printf(b, "; %s(_t%d.nil ? _t%d.nil : (!_t%d.nil && sp_int_flt_cmp(_t%d.v, _t%d.v) == 0)); })",
+               ne ? "!" : "", tl, tr, tr, tr, tl);
+  return 1;
+}
+
 int emit_call_compare_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv, int argc, const int *argv, TyKind rt) {
+  if (emit_nil_aware_num_eq(c, id, name, recv, argc, argv, rt, b)) return 1;
   /* a literal `<<` whose result overflowed int64 (`1 << 64`): the node is typed
      bigint, but the int receiver would otherwise emit a UB C `1LL << 64LL`.
      Promote to a bigint shift. */
