@@ -3983,6 +3983,26 @@ static int infer_int_float_recv_call(Compiler *c, int id, const NodeTable *nt, c
        lets be a Bignum (sp_float_div_v), as Float#div below (#4688) */
     if (g_promote_mode && is_div_name(name) && argc == 1 && infer_type(c, argv[0]) == TY_FLOAT)
       { *out = TY_POLY; return 1; }
+    /* --int-overflow=promote: succ / next / pred and abs / magnitude leave
+       the word at its bounds (2**63 - 1 + 1, |-2**63|): a receiver that is
+       not a known constant inside them promotes (the boxed helpers), as
+       `+ 1` and `0 - x` do */
+    if (g_promote_mode && argc == 0 && (sp_streq(name, "succ") || sp_streq(name, "next") ||
+                                        sp_streq(name, "pred") || sp_streq(name, "abs") ||
+                                        sp_streq(name, "magnitude"))) {
+      long long pr;
+      int exact = infer_const_int_node(nt, recv, &pr) &&
+                  ((sp_streq(name, "pred") || sp_streq(name, "abs") || sp_streq(name, "magnitude"))
+                     ? pr != (long long)INTPTR_MIN : pr != (long long)INTPTR_MAX);
+      if (!exact) { *out = TY_POLY; return 1; }
+    }
+    /* --int-overflow=promote: -2**63.divmod(-1) is [2**63, 0], past the
+       word, so a divmod whose divisor is not a constant other than -1 is
+       the boxed pair (sp_poly_divmod promotes its quotient) */
+    if (g_promote_mode && sp_streq(name, "divmod") && argc == 1 && infer_type(c, argv[0]) == TY_INT) {
+      long long pb;
+      if (!(infer_const_int_node(nt, argv[0], &pb) && pb != -1)) { *out = TY_POLY_ARRAY; return 1; }
+    }
     {
       const BuiltinOp *op = an_bop_find(c, id, rt, name, argc, nt_ref(nt, id, "block") >= 0);
       if (op && op->result != TY_UNKNOWN) { *out = op->result; return 1; }
@@ -3992,6 +4012,15 @@ static int infer_int_float_recv_call(Compiler *c, int id, const NodeTable *nt, c
         sp_streq(nt_type(nt, argv[0]), "IntegerNode") &&
         nt_int(nt, argv[0], "value", 0) < 0) { *out = TY_RATIONAL; return 1; }
     if (sp_streq(name, "pow") && argc == 1 && infer_type(c, argv[0]) == TY_FLOAT) { *out = TY_FLOAT; return 1; }
+    /* --int-overflow=promote: pow(n) is `**`: a pair that is not both known
+       constants can leave the word and promotes (sp_poly_int_pow); a
+       constant pair that overflows is the Bignum, the rest an sp_int */
+    if (g_promote_mode && sp_streq(name, "pow") && argc == 1 &&
+        (infer_type(c, argv[0]) == TY_INT || infer_type(c, argv[0]) == TY_POLY)) {
+      long long pb, pe;
+      if (!(infer_const_int_node(nt, recv, &pb) && infer_const_int_node(nt, argv[0], &pe))) { *out = TY_POLY; return 1; }
+      if (pe >= 0 && infer_int_pow_overflows(pb, pe)) { *out = TY_BIGINT; return 1; }
+    }
     if (sp_streq(name, "pow") && argc >= 1) { *out = TY_INT; return 1; }
     /* clamp keeps the applied operand's class: a Float bound can be returned, so
        the mixed int-receiver/float-bound form is poly; pure-int stays Integer. */
@@ -4127,12 +4156,21 @@ static int infer_operator_call(Compiler *c, int id, const NodeTable *nt, const c
          and a value that never passes through one -- a block parameter, an
          element read, a size -- was typed sp_int at the expression and took
          the raising int helper in the mode whose contract is to promote
-         (#4681). `/` and `%` cannot leave the word. */
+         (#4681). `%` cannot leave the word; `/` and `div` only at
+         -2**63 / -1, which the rule below keys on. */
       if (g_promote_mode && rt == TY_INT && a0 == TY_INT &&
-          is_add_sub_mul(name)) {
+          (is_add_sub_mul(name) || sp_streq(name, "/") || sp_streq(name, "div"))) {
         long long pa, pb;
+        /* a quotient leaves the word only at -2**63 / -1: a divisor the
+           program wrote as any other constant keeps the quotient an sp_int */
+        if ((sp_streq(name, "/") || sp_streq(name, "div")) &&
+            infer_const_int_node(nt, argv[0], &pb) && pb != -1) { *out = TY_INT; return 1; }
         if (!(infer_const_int_node(nt, recv, &pa) && infer_const_int_node(nt, argv[0], &pb)))
           { *out = TY_POLY; return 1; }
+        if (sp_streq(name, "/") || sp_streq(name, "div")) {
+          if (pb == -1 && pa == (long long)INTPTR_MIN) { *out = TY_POLY; return 1; }
+          *out = TY_INT; return 1;
+        }
         /* Two constants escape the word too when their result does: `max + 1`
            was typed sp_int and took the raising helper (#4968). Judged in
            intptr_t, sp_int's own type in the compiler that emits for it. */

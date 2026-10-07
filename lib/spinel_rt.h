@@ -218,6 +218,16 @@ SP_NORETURN SP_COLD void sp_raise_nil_float_op(int left_nil, const char *op);
 #define SP_POW2_CONST(b) (SP_CONSTANT_P(b) && (b) > 0 && ((b) & ((b) - 1)) == 0)
 static inline sp_int sp_idiv(sp_int a, sp_int b) {
   if (b == 0) sp_raise_cls("ZeroDivisionError", "divided by 0");
+  /* -2**63 / -1 is 2**63, past the word: the C division traps. RangeError
+     under raise, the wrapped -2**63 under wrap; promote reaches the boxed
+     sp_poly_div, which answers the Bignum. */
+  if (SP_UNLIKELY(b == -1 && a == INTPTR_MIN)) {
+#ifdef SP_INT_OVERFLOW_MODE_WRAP
+    return a;
+#else
+    sp_raise_cls("RangeError", "integer overflow in /");
+#endif
+  }
   sp_int q = a / b; sp_int r = a % b;
   if ((r != 0) && ((r ^ b) < 0)) q--;
   return q;
@@ -235,6 +245,7 @@ static inline sp_int sp_int_abs(sp_int a) {
 static inline sp_int sp_imod(sp_int a, sp_int b) {
   if (SP_POW2_CONST(b)) return a & (b - 1);
   if (b == 0) sp_raise_cls("ZeroDivisionError", "divided by 0");
+  if (SP_UNLIKELY(b == -1)) return 0;   /* -2**63 % -1 traps in C; it is 0 */
   sp_int r = a % b;
   if ((r != 0) && ((r ^ b) < 0)) r += b;
   return r;
@@ -4203,7 +4214,8 @@ SP_COLD static const char *sp_nomethod_msg(const char *m, sp_RbVal v) {
    Integer (#3843). */
 static sp_RbVal sp_enum_next_boxed(sp_RbVal v);      /* defined below, after sp_enum.h */
 static sp_RbVal sp_poly_succ_m(sp_RbVal v, sp_bool allow_enum) {
-  if (v.tag == SP_TAG_INT) return sp_box_int(v.v.i + 1);
+  /* (2**63 - 1).succ leaves the word, as `+ 1` does */
+  if (v.tag == SP_TAG_INT) return SP_POLY_INT_OP(add, v.v.i, (sp_int)1);
   if (v.tag == SP_TAG_BIGINT) return sp_box_bigint(sp_bigint_add((sp_Bigint *)v.v.p,
                                                                  sp_bigint_new_int(1)));
   if (v.tag == SP_TAG_STR) return sp_box_str(sp_str_succ(v.v.s));
@@ -4310,7 +4322,16 @@ static inline sp_RbVal sp_float_div_v(sp_float x, sp_float y) {
    too wide for sp_int is the answer rather than an error, and a Bignum
    receiver is already one (#4688). */
 static sp_RbVal sp_poly_to_i_meth_v(sp_RbVal v) {
+  if (SP_UNLIKELY(sp_poly_is_strbuf(v))) v = sp_poly_strbuf_deref(v);
   if (v.tag == SP_TAG_OBJ && v.cls_id >= 0) sp_raise_nomethod(sp_nomethod_msg("to_i", v));
+  /* true, false, a Symbol, an Array, a Hash and a Range have no #to_i, as
+     the sp_int form (sp_poly_to_i_meth) already says; this boxed form
+     answered 1 for true (#promote) */
+  if (v.tag == SP_TAG_BOOL || v.tag == SP_TAG_SYM ||
+      (v.tag == SP_TAG_OBJ && (sp_poly_is_array_kind(v.cls_id) || sp_poly_is_hash_kind(v.cls_id) ||
+                               v.cls_id == SP_BUILTIN_RANGE || v.cls_id == SP_BUILTIN_FLOAT_RANGE ||
+                               v.cls_id == SP_BUILTIN_STR_RANGE)))
+    sp_raise_nomethod(sp_nomethod_msg("to_i", v));
   if (v.tag == SP_TAG_BIGINT || v.tag == SP_TAG_INT) return v;
   if (v.tag == SP_TAG_FLT) { sp_poly_flo_domain_ck(v.v.f); return sp_box_f_to_int(v.v.f); }
   /* a Bignum-numerator Rational's quotient is itself a Bignum, and this slot
@@ -5272,7 +5293,7 @@ static sp_Complex sp_complex_div_poly(sp_Complex a, sp_RbVal b) {
   if (b.tag == SP_TAG_FLT) return sp_complex_div_real(a, b.v.f);
   return sp_complex_div(a, sp_poly_as_complex(b));
 }
-static sp_RbVal sp_poly_div(sp_RbVal a, sp_RbVal b) { /* Two plain numbers first, as add/sub/mul already do (#3984): none of the checks below can match either tag, and this is what a boxed arithmetic loop actually holds. */ if (a.tag == SP_TAG_INT && b.tag == SP_TAG_INT) return sp_box_int(sp_idiv(a.v.i, b.v.i)); if (a.tag == SP_TAG_FLT && b.tag == SP_TAG_FLT) return sp_box_float(a.v.f / b.v.f); /* before the tower branches, which match on the receiver kind and would convert a user object to a number of that kind */ if (SP_UNLIKELY(sp_poly_is_user_obj(a) || sp_poly_is_user_obj(b))) return sp_poly_binop_bad("/", a, b); if (SP_UNLIKELY(sp_poly_is_strbuf(a) || sp_poly_is_strbuf(b))) return sp_poly_div(sp_poly_strbuf_deref(a), sp_poly_strbuf_deref(b)); if (SP_UNLIKELY(sp_poly_tower_mismatch(a, b))) return sp_poly_binop_bad("/", a, b); if ((sp_poly_is_brat(a) || sp_poly_is_brat(b))) { if (a.tag == SP_TAG_FLT || b.tag == SP_TAG_FLT) return sp_box_float(sp_poly_to_f(a) / sp_poly_to_f(b)); return sp_brat_div_poly(a, b); } if ((sp_poly_is_rational(a) || sp_poly_is_rational(b)) && a.tag != SP_TAG_FLT && b.tag != SP_TAG_FLT) return sp_box_rational(sp_rational_div(sp_poly_as_rational(a), sp_poly_as_rational(b))); /* A Complex divided by a REAL divides each component, and the typed arms have done that since #3616: boxing the real into c+0i and running the conjugate formula answers NaN where MRI answers Infinity for a Float divisor, and swallows the ZeroDivisionError an Integer 0 owes (integer division rules). The boxed path still boxed, so `Complex(20, 40) / z` with a zero z out of a container answered (NaN+NaN*i) in both modes instead of raising. Complex / Complex keeps the full formula. */ if (a.tag == SP_TAG_OBJ && a.cls_id == SP_BUILTIN_COMPLEX) return sp_box_complex(sp_complex_div_poly(sp_poly_as_complex(a), b)); if ((a.tag == SP_TAG_OBJ && a.cls_id == SP_BUILTIN_COMPLEX) || (b.tag == SP_TAG_OBJ && b.cls_id == SP_BUILTIN_COMPLEX)) return sp_box_complex(sp_complex_div(sp_poly_as_complex(a), sp_poly_as_complex(b))); if (a.tag == SP_TAG_FLT || b.tag == SP_TAG_FLT) return sp_box_float(sp_poly_to_f_with_rational(a) / sp_poly_to_f_with_rational(b)); if ((a.tag == SP_TAG_BIGINT || b.tag == SP_TAG_BIGINT)) return sp_box_bigint(sp_bigint_div(sp_poly_as_bigint(a), sp_poly_as_bigint(b))); return sp_box_int(sp_idiv(sp_poly_to_i(a), sp_poly_to_i(b))); }
+static sp_RbVal sp_poly_div(sp_RbVal a, sp_RbVal b) { /* Two plain numbers first, as add/sub/mul already do (#3984): none of the checks below can match either tag, and this is what a boxed arithmetic loop actually holds. */ if (a.tag == SP_TAG_INT && b.tag == SP_TAG_INT) { /* -2**63 / -1 leaves the word, as `0 - a` does */ if (SP_UNLIKELY(b.v.i == -1)) return SP_POLY_INT_OP(sub, (sp_int)0, a.v.i); return sp_box_int(sp_idiv(a.v.i, b.v.i)); } if (a.tag == SP_TAG_FLT && b.tag == SP_TAG_FLT) return sp_box_float(a.v.f / b.v.f); /* before the tower branches, which match on the receiver kind and would convert a user object to a number of that kind */ if (SP_UNLIKELY(sp_poly_is_user_obj(a) || sp_poly_is_user_obj(b))) return sp_poly_binop_bad("/", a, b); if (SP_UNLIKELY(sp_poly_is_strbuf(a) || sp_poly_is_strbuf(b))) return sp_poly_div(sp_poly_strbuf_deref(a), sp_poly_strbuf_deref(b)); if (SP_UNLIKELY(sp_poly_tower_mismatch(a, b))) return sp_poly_binop_bad("/", a, b); if ((sp_poly_is_brat(a) || sp_poly_is_brat(b))) { if (a.tag == SP_TAG_FLT || b.tag == SP_TAG_FLT) return sp_box_float(sp_poly_to_f(a) / sp_poly_to_f(b)); return sp_brat_div_poly(a, b); } if ((sp_poly_is_rational(a) || sp_poly_is_rational(b)) && a.tag != SP_TAG_FLT && b.tag != SP_TAG_FLT) return sp_box_rational(sp_rational_div(sp_poly_as_rational(a), sp_poly_as_rational(b))); /* A Complex divided by a REAL divides each component, and the typed arms have done that since #3616: boxing the real into c+0i and running the conjugate formula answers NaN where MRI answers Infinity for a Float divisor, and swallows the ZeroDivisionError an Integer 0 owes (integer division rules). The boxed path still boxed, so `Complex(20, 40) / z` with a zero z out of a container answered (NaN+NaN*i) in both modes instead of raising. Complex / Complex keeps the full formula. */ if (a.tag == SP_TAG_OBJ && a.cls_id == SP_BUILTIN_COMPLEX) return sp_box_complex(sp_complex_div_poly(sp_poly_as_complex(a), b)); if ((a.tag == SP_TAG_OBJ && a.cls_id == SP_BUILTIN_COMPLEX) || (b.tag == SP_TAG_OBJ && b.cls_id == SP_BUILTIN_COMPLEX)) return sp_box_complex(sp_complex_div(sp_poly_as_complex(a), sp_poly_as_complex(b))); if (a.tag == SP_TAG_FLT || b.tag == SP_TAG_FLT) return sp_box_float(sp_poly_to_f_with_rational(a) / sp_poly_to_f_with_rational(b)); if ((a.tag == SP_TAG_BIGINT || b.tag == SP_TAG_BIGINT)) return sp_box_bigint(sp_bigint_div(sp_poly_as_bigint(a), sp_poly_as_bigint(b))); return sp_box_int(sp_idiv(sp_poly_to_i(a), sp_poly_to_i(b))); }
 static sp_RbVal sp_poly_str_mod(sp_RbVal a, sp_RbVal b);  /* fwd: defined beside the format helper */
 /* Range#% (step) on a boxed Integer or Float Range, materialized as the
    typed `range % n` is (an Integer or a Float Array): an Integer step over
@@ -5373,6 +5394,12 @@ static sp_RbVal sp_poly_divmod(sp_RbVal a, sp_RbVal b) {
   }
   {
     sp_int ia = sp_poly_to_i(a), ib = sp_poly_to_i(b);
+    /* -2**63 divmod -1 is [2**63, 0], past the word (the Bignum under promote) */
+    if (SP_UNLIKELY(ib == -1)) {
+      sp_PolyArray_push(out, SP_POLY_INT_OP(sub, (sp_int)0, ia));
+      sp_PolyArray_push(out, sp_box_int(0));
+      return sp_box_poly_array(out);
+    }
     sp_PolyArray_push(out, sp_box_int(sp_idiv(ia, ib)));
     sp_PolyArray_push(out, sp_box_int(sp_imod(ia, ib)));
     return sp_box_poly_array(out);
@@ -5749,7 +5776,9 @@ static sp_RbVal sp_poly_uplus(sp_RbVal v) {
 }
 static sp_RbVal sp_poly_neg(sp_RbVal a) {
   if (a.tag == SP_TAG_FLT) return sp_box_float(-a.v.f);
-  if (a.tag == SP_TAG_INT) return sp_box_int(-a.v.i);
+  /* -(-2**63) leaves the word: the Bignum under promote, RangeError under
+     raise, as `0 - a` answers (the plain negation was undefined there) */
+  if (a.tag == SP_TAG_INT) return SP_POLY_INT_OP(sub, (sp_int)0, a.v.i);
   if (a.tag == SP_TAG_BIGINT)
     return sp_box_bigint(sp_bigint_sub(sp_bigint_new_int(0), (sp_Bigint *)a.v.p));
   if (sp_poly_is_rational(a)) return sp_box_rational(sp_rational_neg(sp_poly_as_rational(a)));
