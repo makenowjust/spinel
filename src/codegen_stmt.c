@@ -11716,7 +11716,10 @@ else {
       if (discard) {
         int sv = g_ie_discard_value; g_ie_discard_value = 1;
         emit_indent(b, indent);
-        emit_expr(c, id, b);
+        /* an answer whose nil rides beside it is left as that oint */
+        TyKind sct = comp_ntype(c, id);
+        if (oint_kind(sct) && node_is_oint(c, id)) emit_oint_expr(c, id, sct, b);
+        else emit_expr(c, id, b);
         buf_puts(b, ";\n");
         g_ie_discard_value = sv;
         return 1;
@@ -13604,9 +13607,13 @@ void emit_stmt_inner(Compiler *c, int id, Buf *b, int indent) {
   if (sp_streq(ty, "PreExecutionNode") || sp_streq(ty, "PostExecutionNode")) { return; } /* hoisted separately */
 
   /* any remaining value expression as a bare statement (its value is used
-     only when this is the last statement of an inlined expr method) */
+     only when this is the last statement of an inlined expr method); a
+     number answered with its nil beside it is left as that oint, not
+     unwrapped (a nil would raise for a value nobody reads) */
   emit_indent(b, indent);
-  emit_expr(c, id, b);
+  { TyKind st = comp_ntype(c, id);
+    if (oint_kind(st) && node_is_oint(c, id)) emit_oint_expr(c, id, st, b);
+    else emit_expr(c, id, b); }
   buf_puts(b, ";\n");
 }
 

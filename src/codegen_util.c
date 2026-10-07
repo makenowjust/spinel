@@ -5210,9 +5210,10 @@ int node_is_oint(Compiler *c, int node) {
     if (r < 0) { Scope *ies = comp_scope_of(c, node); if (ies && ies->class_id >= 0 && !ies->is_cmethod) iert = ty_object(ies->class_id); }
     /* over a boxed receiver the splice runs per class, and a receiver with no
        such ivar (nil, a builtin, Object.new) reads it nil: an Integer / Float
-       tail can be nil */
+       tail can be nil -- so too over a typed receiver that is no object of
+       the program's (nil, a number, a String) */
     if ((sp_streq(nm, "instance_eval") || sp_streq(nm, "instance_exec")) && blk >= 0 && r >= 0 &&
-        rt == TY_POLY && nt_kind(nt, blk) == NK_BlockNode) {
+        (rt == TY_POLY || (rt != TY_UNKNOWN && !ty_is_object(rt))) && nt_kind(nt, blk) == NK_BlockNode) {
       int bb = nt_ref(nt, blk, "body");
       int bn = 0; const int *bs = bb >= 0 ? nt_arr(nt, bb, "body", &bn) : NULL;
       return bn > 0 && oint_kind(comp_ntype(c, bs[bn - 1]));

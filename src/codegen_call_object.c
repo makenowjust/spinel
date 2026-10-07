@@ -669,7 +669,8 @@ int emit_call_instance_eval_arms(Compiler *c, int id, Buf *b, const NodeTable *n
       /* a number result that can be nil (the tail's own form: a nil-bit
          ivar write, a nullable read) is held as its oint, which the call
          answers (node_is_oint follows the tail) */
-      int res_oint = scalar_res && oint_kind(body_ty) && ie_bn > 0 && node_is_oint(c, ie_bb[ie_bn - 1]);
+      int res_oint = scalar_res && oint_kind(body_ty) &&
+                     ((ie_bn > 0 && node_is_oint(c, ie_bb[ie_bn - 1])) || node_is_oint(c, id));
       int tr = ++g_tmp, tres = ++g_tmp;
       int self_is_val = c->classes[cls_id].is_value_type;
       Buf rb; memset(&rb, 0, sizeof rb);
