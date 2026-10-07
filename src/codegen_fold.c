@@ -6,8 +6,15 @@
 /* An sp_oint / sp_ofloat expression where the dispatcher wants the node
    plain is unwrapped here (TypeError for nil); an oint consumer takes it
    as it is. */
-static void oint_open(Compiler *c, int id, TyKind t, Buf *b) { if (!node_is_oint(c, id)) buf_printf(b, "%s(", oint_arg(t)); }
-static void oint_close(Compiler *c, int id, Buf *b) { if (!node_is_oint(c, id)) buf_puts(b, ")"); }
+/* The call a boxed receiver's arm re-enters (emit_face_arm) takes the
+   answer as it is too: the arm boxes a nil as nil. */
+int g_face_oint_id = -1, g_face_oint_got = 0;   /* got: the oint's kind */
+static int oint_kept(Compiler *c, int id, TyKind t) {
+  if (id == g_face_oint_id) { if (t != TY_UNKNOWN) g_face_oint_got = t; return 1; }
+  return node_is_oint(c, id);
+}
+static void oint_open(Compiler *c, int id, TyKind t, Buf *b) { if (!oint_kept(c, id, t)) buf_printf(b, "%s(", oint_arg(t)); }
+static void oint_close(Compiler *c, int id, Buf *b) { if (!oint_kept(c, id, TY_UNKNOWN)) buf_puts(b, ")"); }
 static void emit_seedless_fold_answer(Compiler *c, int id, TyKind et, int tn, int tacc, Buf *b);
 /* A caller of emit_block_value_into that declared `dest` as the oint of an
    Integer / Float value (a `next nil`, a nullable tail) sets this for the
