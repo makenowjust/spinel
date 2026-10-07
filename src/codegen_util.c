@@ -5293,10 +5293,9 @@ int node_is_oint(Compiler *c, int node) {
       /* the direct arms (a self-less target called by name, a bound target
          called through emit_bound_method_call) answer the target's own
          form; the fn-cast arm answers the plain value */
-      int recvless = mn >= 0 && nt_ref(nt, mn, "receiver") < 0;
-      int selfless = recvless && !(target >= 0 && c->scopes[target].class_id >= 0 && !c->scopes[target].is_cmethod);
-      if (target >= 0 && (selfless || !method_call_param_shift(c, mn, target)))
-        return method_ret_is_oint(&c->scopes[target]);
+      /* every arm (a self-less target by name, emit_bound_method_call, the
+         fn cast) answers the target's own form */
+      if (target >= 0) return method_ret_is_oint(&c->scopes[target]);
       return 0;
     }
     /* a search with its needle; without one the call is an arity error, no nil */
