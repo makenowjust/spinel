@@ -1624,8 +1624,7 @@ static void emit_block_arg_coerced(Compiler *c, int node, TyKind ot, Buf *b) {
   /* a literal nil into an Integer or a Float parameter (one
      block_settle_types kept nullable, bs_join_val) is the slot's own nil,
      not the 0 it emits as */
-  else if (nk == NK_NilNode && ot == TY_INT) buf_puts(b, "SP_INT_NIL");
-  else if (nk == NK_NilNode && ot == TY_FLOAT) buf_puts(b, "sp_float_nil()");
+  else if (nk == NK_NilNode && oint_kind(ot)) buf_puts(b, oint_nil(ot));
   /* and so is a boxed nil: under --int-overflow=promote an Integer slot
      that can hold nil (an ivar, a local, a method's parameter) is widened
      to the box, while a block parameter it feeds keeps its Integer type,
@@ -2194,13 +2193,16 @@ static void emit_block_binds_gathered(Compiler *c, int blk, int t, TyKind at, in
        Float is its sentinel, where `.v.i` / `.v.f` read the 0 under the
        nil tag. Such a parameter holds no other kind: an Integer and a
        Float element box it (ty_unify). */
-    else if (et == TY_POLY && bt != TY_POLY && bt != TY_UNKNOWN && bl->nullable_int)
+    else if (et == TY_POLY && bt != TY_POLY && bt != TY_UNKNOWN && slot_is_oint(bl))
       emit_unbox_nilable_text(c, bt, eb.p ? eb.p : "", b);
     else if (et == TY_POLY && bt != TY_POLY && bt != TY_UNKNOWN)
       emit_unbox_text(c, bt, eb.p ? eb.p : "", b);
+    /* a plain element into a parameter that holds its nil: wrapped */
+    else if (oint_kind(et) && slot_is_oint(bl))
+      buf_printf(b, "%s(%s)", oint_of(bt), eb.p ? eb.p : "0");
     else
       buf_puts(b, eb.p ? eb.p : "");
-    if (!sure) buf_printf(b, " : %s)", bt == TY_RANGE ? "(sp_Range){0}" : default_value_from_compiler(c, bt));
+    if (!sure) buf_printf(b, " : %s)", slot_is_oint(bl) ? oint_nil(bt) : bt == TY_RANGE ? "(sp_Range){0}" : default_value_from_compiler(c, bt));
     free(eb.p);
     buf_puts(b, as_expr ? "; " : ";\n");
   }
@@ -2227,16 +2229,17 @@ static void emit_block_binds_gathered(Compiler *c, int blk, int t, TyKind at, in
     LocalVar *ol = bsc ? scope_local(bsc, op) : NULL;
     TyKind ot = ol ? ol->type : TY_UNKNOWN;
     int dv = block_opt_default(c, blk, oi);
-    const char *odflt = ot == TY_RANGE ? "(sp_Range){0}" : default_value_from_compiler(c, ot);
+    const char *odflt = slot_is_oint(ol) ? oint_nil(ot) : ot == TY_RANGE ? "(sp_Range){0}" : default_value_from_compiler(c, ot);
     if (!as_expr) emit_indent(b, indent);
     buf_printf(b, "lv_%s = ", oprbuf);
     Buf eb; memset(&eb, 0, sizeof eb);
     emit_array_elem_at(at, t, P + oi, &eb);
     buf_printf(b, "(%d < _t%d ? ", oi, t_ot);
     if (ot == TY_POLY && et != TY_POLY && et != TY_UNKNOWN) emit_boxed_text(c, et, eb.p ? eb.p : "0", b);
-    else if (et == TY_POLY && ot != TY_POLY && ot != TY_UNKNOWN && ol->nullable_int)
+    else if (et == TY_POLY && ot != TY_POLY && ot != TY_UNKNOWN && slot_is_oint(ol))
       emit_unbox_nilable_text(c, ot, eb.p ? eb.p : "", b);
     else if (et == TY_POLY && ot != TY_POLY && ot != TY_UNKNOWN) emit_unbox_text(c, ot, eb.p ? eb.p : "", b);
+    else if (oint_kind(et) && slot_is_oint(ol)) buf_printf(b, "%s(%s)", oint_of(ot), eb.p ? eb.p : "0");
     else buf_puts(b, eb.p ? eb.p : "");
     buf_puts(b, " : ");
     if (dv >= 0) { bi_block_side(bi); emit_block_arg_coerced(c, dv, ot, b); bi_method_side(bi); }
@@ -2986,7 +2989,7 @@ void emit_block_invoke(Compiler *c, int args_node, Buf *b, int indent, int as_ex
       g_ie_next_ty = (nx_bt == TY_INT || nx_bt == TY_FLOAT) ? nx_bt : TY_UNKNOWN;
       if (g_ie_res_poly) buf_printf(b, "sp_RbVal _t%d = sp_box_nil(); ", nx_tmp);
       else if (nx_bt == TY_INT || nx_bt == TY_BOOL || nx_bt == TY_SYMBOL)
-        buf_printf(b, "sp_int _t%d = SP_INT_NIL; ", nx_tmp);
+        buf_printf(b, "sp_int _t%d = 0; ", nx_tmp);
       else if (proc_slot_is_ptr(nx_bt)) {
         emit_ctype(c, nx_bt, b); buf_printf(b, " _t%d = NULL; ", nx_tmp);
       }
@@ -2994,7 +2997,7 @@ void emit_block_invoke(Compiler *c, int args_node, Buf *b, int indent, int as_ex
         /* type-opaque tail (e.g. the body IS the `next`): ride the sp_int
            carrier with the nil sentinel; the next-var stays active so a
            valued `next` still delivers. */
-        buf_printf(b, "sp_int _t%d = SP_INT_NIL; ", nx_tmp);
+        buf_printf(b, "sp_int _t%d = 0; ", nx_tmp);
       }
       buf_puts(b, "do { ");
     }
@@ -4094,8 +4097,8 @@ int emit_tap_then_expr(Compiler *c, int id, Buf *b) {
      keeps it: sp_poly_to_i read it as 0, so under promote `x = nil;
      x.then { |y| y.nil? }` answered false. */
   const char *unbox = NULL;
-  if (use_shadow && et == TY_POLY && tsaved0 == TY_INT) unbox = "sp_poly_to_i_or_nil";
-  else if (use_shadow && et == TY_POLY && tsaved0 == TY_FLOAT) unbox = "sp_poly_to_f_or_nil";
+  if (use_shadow && et == TY_POLY && tsaved0 == TY_INT) unbox = "sp_poly_to_i";
+  else if (use_shadow && et == TY_POLY && tsaved0 == TY_FLOAT) unbox = "sp_poly_to_f";
   if (unbox) use_shadow = 0;
   int din = g_indent;
   if (use_shadow) {
@@ -4185,8 +4188,8 @@ static void emit_block_param_nil(Compiler *c, TyKind pt, Buf *b) {
   (void)c;
   switch (pt) {
   case TY_POLY:              buf_puts(b, "sp_box_nil()"); break;
-  case TY_INT: case TY_BOOL: buf_puts(b, "SP_INT_NIL"); break;
-  case TY_FLOAT:             buf_puts(b, "sp_float_nil()"); break;
+  case TY_BOOL:              buf_puts(b, "0"); break;
+  case TY_INT: case TY_FLOAT: buf_puts(b, oint_nil(pt)); break;   /* the parameter's slot holds its nil */
   case TY_SYMBOL:            buf_puts(b, "((sp_sym)-1)"); break;
   default:                   buf_puts(b, "NULL"); break;  /* string / heap ptr */
   }
@@ -4881,16 +4884,15 @@ static int emit_iteration_stmt_sn(Compiler *c, int id, Buf *b, int indent) {
   if (boxed) emit_boxed(c, recv, &rb); else emit_expr(c, recv, &rb);
   emit_indent(&gb, indent);
   buf_puts(&gb, "{ ");
-  if (boxed) buf_puts(&gb, "sp_RbVal"); else emit_ctype(c, rt, &gb);
+  if (boxed) buf_puts(&gb, "sp_RbVal"); else emit_res_ctype(c, rt, oint_kind(rt), &gb);
   buf_printf(&gb, " _sn%d = %s;", t, rb.p ? rb.p : "0");
   free(rb.p);
   if (boxed) buf_printf(&gb, " SP_GC_ROOT_RBVAL(_sn%d);", t);
   else if (needs_root(rt)) buf_printf(&gb, " SP_GC_ROOT(_sn%d);", t);
   if (boxed) buf_printf(&gb, " if (_sn%d.tag != SP_TAG_NIL) {\n", t);
-  else if (rt == TY_INT) buf_printf(&gb, " if (_sn%d != SP_INT_NIL) {\n", t);
-  else if (rt == TY_FLOAT) buf_printf(&gb, " if (!sp_float_is_nil(_sn%d)) {\n", t);
+  else if (oint_kind(rt)) buf_printf(&gb, " if (!_sn%d.nil) {\n", t);   /* an Integer / Float receiver is held as its oint */
   else buf_printf(&gb, " if (_sn%d != NULL) {\n", t);
-  int slot = view_bind(recv, "_sn%d", t);
+  int slot = oint_kind(rt) && !boxed ? view_bind(recv, "_sn%d.v", t) : view_bind(recv, "_sn%d", t);
   int sv = g_sn_skip; g_sn_skip = id;
   int ok = emit_ivar_nil_guarded(c, id, &gb, indent + 1, emit_iteration_stmt_body);
   g_sn_skip = sv;
@@ -4928,7 +4930,7 @@ static void emit_row_param_bind(Compiler *c, int block, int pj, const char *k, T
   char get[200];
   if (rt == TY_POLY_ARRAY && (pt == TY_INT || pt == TY_FLOAT))
     snprintf(get, sizeof get, "%s(sp_PolyArray_get(_t%d, _t%d + %d))",
-             pt == TY_INT ? "sp_poly_to_i_or_nil" : "sp_poly_to_f_or_nil", ta, ti, pj);
+             slot_is_oint(lv) ? oint_unbox(pt) : pt == TY_INT ? "sp_poly_to_i" : "sp_poly_to_f", ta, ti, pj);
   else snprintf(get, sizeof get, "sp_%sArray_get(_t%d, _t%d + %d)", k, ta, ti, pj);
   /* A typed row can feed a boxed parameter. Keep missed reads nil when
      boxing the element, including the short final slice. */

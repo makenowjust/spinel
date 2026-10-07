@@ -497,12 +497,13 @@ int emit_call_callable_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
         int slot = view_bind(recv, "_t%d", tq);
         int sv = g_sn_proc_node; g_sn_proc_node = id;
         Buf cb; memset(&cb, 0, sizeof cb);
-        emit_expr(c, id, &cb);
+        /* an Integer / Float answer is an sp_oint: nil for the skipped call,
+           the call's own oint otherwise (`&.` makes this node an oint) */
+        if (oint_kind(rty)) emit_oint_expr(c, id, rty, &cb); else emit_expr(c, id, &cb);
         g_sn_proc_node = sv;
         view_unbind(g_n_argov - 1);
         const char *nilv = rty == TY_POLY || rty == TY_UNKNOWN ? "sp_box_nil()"
-                         : rty == TY_INT ? "SP_INT_NIL"
-                         : rty == TY_FLOAT ? "sp_float_nil()" : default_value_from_compiler(c, rty);
+                         : oint_kind(rty) ? oint_nil(rty) : default_value_from_compiler(c, rty);
         buf_printf(b, "(_t%d ? %s : %s)", tq, cb.p ? cb.p : nilv, nilv);
         free(cb.p);
         return 1;
@@ -787,7 +788,7 @@ int emit_call_method_obj_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, 
       emit_method_cname(c, &c->scopes[umi], b);
       buf_puts(b, ", ");
       emit_str_literal(b, method_sym_arg(c, id));
-      { int ar; if (method_scope_arity(c, umi, &ar)) buf_printf(b, ", (sp_int)%d", ar); else buf_puts(b, ", SP_INT_NIL"); }
+      { int ar; if (method_scope_arity(c, umi, &ar)) buf_printf(b, ", (sp_int)%d", ar); else buf_puts(b, ", (sp_int)-1"); }
       { char _db[512]; BUILD_METHOD_DESC(umi, method_sym_arg(c, id), 1, _db);
         buf_puts(b, ", "); emit_str_literal(b, _db); }
       buf_puts(b, ")");
@@ -853,7 +854,7 @@ int emit_call_method_obj_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, 
       emit_method_cname(c, &c->scopes[pmip], b);
       buf_puts(b, ", ");
       emit_str_literal(b, c->scopes[pmip].name ? c->scopes[pmip].name : "?");
-      { int ar; if (method_scope_arity(c, pmip, &ar)) buf_printf(b, ", (sp_int)%d", ar); else buf_puts(b, ", SP_INT_NIL"); }
+      { int ar; if (method_scope_arity(c, pmip, &ar)) buf_printf(b, ", (sp_int)%d", ar); else buf_puts(b, ", (sp_int)-1"); }
       { char _db[512];
         BUILD_METHOD_DESC(pmip, c->scopes[pmip].name, sup_unb, _db);
         buf_puts(b, ", "); emit_str_literal(b, _db); }
@@ -943,7 +944,7 @@ int emit_call_method_obj_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, 
       emit_method_cname(c, &c->scopes[t2], b);
       buf_puts(b, ", ");
       emit_str_literal(b, method_sym_arg(c, mn2));
-      { int ar; if (method_scope_arity(c, t2, &ar)) buf_printf(b, ", (sp_int)%d", ar); else buf_puts(b, ", SP_INT_NIL"); }
+      { int ar; if (method_scope_arity(c, t2, &ar)) buf_printf(b, ", (sp_int)%d", ar); else buf_puts(b, ", (sp_int)-1"); }
       { char _db[512]; BUILD_METHOD_DESC(t2, method_sym_arg(c, mn2), 0, _db);
         buf_puts(b, ", "); emit_str_literal(b, _db); }
       buf_puts(b, ")");
@@ -1120,7 +1121,9 @@ int emit_call_method_obj_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, 
           if (g_promote_mode) {
             /* promote: bound methods are invoked through the poly ABI, so the
                adapter takes/returns sp_RbVal (boxing the int/string element). */
-            const char *boxret = (ki == 0) ? "sp_box_int_or_nil" : "sp_box_str";
+            /* an Integer element read that misses is nil: the oget's oint, boxed */
+            const char *boxret = (ki == 0) ? "sp_box_oint" : "sp_box_str";
+            const char *getfn  = (ki == 0) ? "sp_IntArray_oget" : "sp_StrArray_get";
             /* the element the typed array is asked to hold: its own kind
                or the refusal, never a coercion (#4481) */
             const char *unbox  = (ki == 0) ? "sp_poly_elem_i" : "sp_poly_elem_s";
@@ -1128,7 +1131,7 @@ int emit_call_method_obj_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, 
             if (oi == 0) {
               buf_printf(&g_proc_protos, "static sp_RbVal _bam_%sArray_get(void *a, sp_RbVal i);\n", bk);
               buf_printf(&g_procs, "static sp_RbVal _bam_%sArray_get(void *a, sp_RbVal i) {\n"
-                                   "  return %s(sp_%sArray_get((sp_%sArray *)a, sp_poly_arg_i(i)));\n}\n", bk, boxret, bk, bk);
+                                   "  return %s(%s((sp_%sArray *)a, sp_poly_arg_i(i)));\n}\n", bk, boxret, getfn, bk);
             }
             else if (oi == 1) {
               buf_printf(&g_proc_protos, "static sp_RbVal _bam_%sArray_set(void *a, sp_RbVal i, sp_RbVal v);\n", bk);
@@ -1220,12 +1223,12 @@ int emit_call_method_obj_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, 
       else if (mi >= 0 && method_scope_arity(c, mi, &ar)) buf_printf(b, ", (sp_int)%d", ar);
       else if (bop_is_adapter) {
         /* An adapter has no method scope: stamp CRuby's arity for the Array op
-           it stands in for (`push`/`[]`/`[]=` are all -1), not SP_INT_NIL. */
+           it stands in for (`push`/`[]`/`[]=` are all -1). */
         int ba;
         if (builtin_method_arity("Array", sym, &ba)) buf_printf(b, ", (sp_int)%d", ba);
-        else buf_puts(b, ", SP_INT_NIL");
+        else buf_puts(b, ", (sp_int)-1");
       }
-      else buf_puts(b, ", SP_INT_NIL"); }
+      else buf_puts(b, ", (sp_int)-1"); }
     if (mi >= 0) {
       char _db[512]; BUILD_METHOD_DESC(mi, disp, 0, _db);
       buf_puts(b, ", "); emit_str_literal(b, _db);

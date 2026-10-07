@@ -18,7 +18,8 @@
 typedef enum {
   RK_NONE,      /* no value: unknown or void */
   RK_SCALAR,    /* an immediate: Integer, Float, true/false, Symbol, nil */
-  RK_SENTINEL,  /* an Integer or Float slot that can hold nil as its sentinel */
+  RK_OPT,       /* an Integer or Float that can hold nil beside its value: an
+                   sp_oint / sp_ofloat, or an ivar with a bit in iv__nilbits */
   RK_STRUCT,    /* a by-value builtin struct: Range, Time, Complex, Rational,
                    Process::Tms, a Class */
   RK_VOBJ,      /* a user object of a value-type class, held by value */
@@ -49,8 +50,8 @@ typedef struct {
   unsigned poly_lift:1;   /* a poly read lifted to the shared handle */
   unsigned dyn_cls:1;     /* an object of a class with subclasses: its box
                              reads the class id from the object */
-  unsigned nil_scalar:1;  /* an Integer or Float whose box tests for the nil
-                             sentinel */
+  unsigned nil_scalar:1;  /* an Integer or Float whose box reads its nil
+                             (sp_box_oint / sp_box_ofloat) */
   unsigned nil_tested:1;  /* a call's nil arm has tested this receiver for
                              nil (VR_NIL_TESTED, a view around the call) */
   unsigned nil_cold:1;    /* ... in the out-of-range branch of a cached
@@ -105,8 +106,8 @@ int repr_hash_is(Repr r, TyKind key, TyKind val);
 /* Called once the analysis is final (the end of analyze_program): from here
    on the flags repr_of reads no longer change. */
 void repr_seal(Compiler *c);
-/* Whether an Integer or Float node's box has to test for the nil sentinel
-   (emit_boxed's sp_box_int_or_nil / sp_box_float_or_nil). */
+/* Whether an Integer or Float node's box has to read its nil (emit_boxed's
+   sp_box_oint / sp_box_ofloat): the node has an sp_oint form of its own. */
 int repr_nil_scalar(const Compiler *c, int node, TyKind t);
 /* Does a user object of kind t box with the class id it carries
    (sp_box_nullable_obj_dyn)? Its class has a subclass, and it is neither a
@@ -130,9 +131,9 @@ typedef enum {
   RF_PASS,          /* already an sp_RbVal */
   RF_NIL_EFFECT,    /* evaluated for its effect, then nil */
   RF_INT,           /* sp_box_int */
-  RF_INT_NIL,       /* an Integer whose sentinel boxes as nil */
+  RF_INT_NIL,       /* an Integer boxed with its nil: sp_box_oint */
   RF_FLT,           /* sp_box_float */
-  RF_FLT_NIL,       /* a Float whose sentinel boxes as nil */
+  RF_FLT_NIL,       /* a Float boxed with its nil: sp_box_ofloat */
   RF_BIGINT,        /* a Bignum, NULL as nil */
   RF_STR,           /* sp_box_str */
   RF_BOOL,
@@ -182,8 +183,9 @@ typedef enum {
   CF_FIT,           /* written as it is */
   CF_BOX,           /* boxed into a poly slot */
   CF_EMPTY_LIT,     /* an empty [] / {} / Array.new / Hash.new built at the slot's kind */
-  CF_NIL_SENT,      /* the slot's nil: a nil literal, or a value with no C type
-                       evaluated for its effect */
+  CF_NIL_SENT,      /* the slot's nil (sp_oint_nil(), NULL, a boxed nil): a nil
+                       literal, or a value with no C type evaluated for its
+                       effect */
   CF_INT2BIG,       /* an Integer widened into a Bignum slot */
   CF_POLY_RHS,      /* a boxed value through its scalar conversion
                        (emit_poly_rhs_coerced) */

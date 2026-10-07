@@ -2195,19 +2195,20 @@ int emit_call_class_value_arms(Compiler *c, int id, Buf *b, const NodeTable *nt,
                    ? _cidx : builtin_class_id("NilClass"));
       return 1;
     }
-    if (cn && rt == TY_INT) {
-      /* an int slot can hold the nil sentinel (a nil-returning <=>, a
-         missing key): report NilClass then, matching how p prints it */
-      int tcv = ++g_tmp;
-      buf_printf(b, "({ sp_int _t%d = ", tcv); emit_expr(c, recv, b);
-      buf_printf(b, "; ((sp_Class){(sp_int)-1, _t%d == SP_INT_NIL ? SPL(\"NilClass\") : SPL(\"Integer\")}); })", tcv);
-      return 1;
-    }
-    if (cn && rt == TY_FLOAT) {
-      /* same for the float nil sentinel (NaN-boxed nil) */
-      int tcv = ++g_tmp;
-      buf_printf(b, "({ sp_float _t%d = ", tcv); emit_expr(c, recv, b);
-      buf_printf(b, "; ((sp_Class){(sp_int)-1, sp_float_is_nil(_t%d) ? SPL(\"NilClass\") : SPL(\"Float\")}); })", tcv);
+    if (cn && (rt == TY_INT || rt == TY_FLOAT)) {
+      /* a nullable Integer / Float slot (a nil-returning <=>, a missing key)
+         reports NilClass when it holds nil, matching how p prints it; a plain
+         one is never nil */
+      const char *cls = rt == TY_INT ? "Integer" : "Float";
+      if (node_has_oint_form(c, recv)) {
+        int tcv = ++g_tmp;
+        buf_printf(b, "({ %s _t%d = ", oint_ctype(rt), tcv); emit_oint_expr(c, recv, rt, b);
+        buf_printf(b, "; ((sp_Class){(sp_int)-1, _t%d.nil ? SPL(\"NilClass\") : SPL(\"%s\")}); })", tcv, cls);
+      }
+      else {
+        buf_puts(b, "({ (void)("); emit_expr(c, recv, b);
+        buf_printf(b, "); ((sp_Class){(sp_int)-1, SPL(\"%s\")}); })", cls);
+      }
       return 1;
     }
     if (cn && ty_null_is_nil(rt) && node_may_be_null_nil(c, recv)) {

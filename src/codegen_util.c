@@ -1837,7 +1837,9 @@ void emit_block_locals_reset(Compiler *c, int blk, Buf *b, int indent) {
                        c->classes[ty_object_class(lv->type)].c_name);
           }
           else {
-            const char *nv = nil_value(lv->type);
+            /* a block-local starts every iteration nil: an oint slot's nil,
+               a plain scalar's zero */
+            const char *nv = slot_is_oint(lv) ? oint_nil(lv->type) : nil_value(lv->type);
             if (!nv) nv = lv->type == TY_RANGE ? "(sp_Range){0}" : default_value_from_compiler(c, lv->type);
             buf_printf(b, "lv_%s = %s;\n", rename_local(tmpn), nv);
           }
@@ -2096,9 +2098,16 @@ const char *ivar_set_test(Compiler *c, int cid, const char *ivn, const char *exp
     return buf;
   }
   if (kind != 1) return NULL;
-  TyKind t = c->classes[cid].ivar_types[comp_ivar_index(&c->classes[cid], ivn)];
-  if (t == TY_INT) snprintf(buf, cap, "(%s != SP_INT_NIL)", expr);
-  else if (t == TY_FLOAT) snprintf(buf, cap, "(!sp_float_is_nil(%s))", expr);
+  int iv = comp_ivar_index(&c->classes[cid], ivn);
+  TyKind t = c->classes[cid].ivar_types[iv];
+  if (oint_kind(t)) {
+    /* set when its nil bit is clear; a field with no bit is always set */
+    if (!ivar_has_nilbit(c, cid, iv)) return NULL;
+    size_t n = strlen(expr) - strlen(iv_c(ivn + 1)) - 3;
+    char obj[256]; snprintf(obj, sizeof obj, "%.*s", (int)n, expr);
+    char bt[320]; ivar_nilbit_test(c, cid, iv, obj, bt, sizeof bt);
+    snprintf(buf, cap, "(!%s)", bt);
+  }
   else if (t == TY_POLY) snprintf(buf, cap, "((%s).tag != SP_TAG_NIL)", expr);
   else snprintf(buf, cap, "(%s != NULL)", expr);
   return buf;
@@ -2773,6 +2782,12 @@ const char *ffi_cb_arg_ctype(const char *spec) {
    sentinel when a `||=` writes the local or a read can run before any write
    (#3388). */
 const char *local_init_value(Compiler *c, LocalVar *lv) {
+  /* an Integer or Float slot that holds its nil starts nil where a read can
+     run before any write, its zero otherwise */
+  if (slot_is_oint(lv)) {
+    int unset = (lv->or_written || lv->maybe_unset) && !lv->is_param && !lv->is_block_param;
+    return unset ? oint_nil(lv->type) : lv->type == TY_FLOAT ? "sp_ofloat_of(0.0)" : "sp_oint_of(0)";
+  }
   if ((lv->or_written || lv->maybe_unset) && !lv->is_param && !lv->is_block_param) {
     const char *nv = nil_value(lv->type);
     if (nv) return nv;
@@ -2794,7 +2809,7 @@ const char *local_init_value(Compiler *c, LocalVar *lv) {
    numeric 0 that reads as a real value. Every other slot takes emit_expr. */
 void emit_expr_slot(Compiler *c, int node, TyKind slot, Buf *b) {
   if (node >= 0 && (slot == TY_INT || slot == TY_FLOAT)) {
-    const char *sent = slot == TY_INT ? "SP_INT_NIL" : "sp_float_nil()";
+    const char *sent = oint_nil(slot);   /* a slot that takes nil is an sp_oint */
     if (nt_kind(c->nt, node) == NK_NilNode) { buf_puts(b, sent); return; }
     TyKind vt = repr_of(c, node).as_ty;
     if (vt == TY_NIL || vt == TY_VOID) {
@@ -2974,13 +2989,10 @@ void emit_coerce_text(Compiler *c, int node, TyKind from, TyKind slot, int how,
     buf_printf(b, "((void)(%s), %s)", text, raise_tail_value_c(c, slot));
     RCCT(CF_NIL_SENT);
     return;
-  case CF_INT2BIG: {
-    int t = ++g_tmp;
-    buf_printf(b, "({ sp_int _t%d = (%s); _t%d == SP_INT_NIL ? NULL : sp_bigint_new_int(_t%d); })",
-               t, text, t, t);
+  case CF_INT2BIG:
+    buf_printf(b, "sp_bigint_new_int(%s)", text);
     RCCT(CF_INT2BIG);
     return;
-  }
   case CF_CONVERT:
     /* a Bignum or a Rational operand a Float slot converts, as Ruby does */
     buf_printf(b, "%s(%s)", from == TY_BIGINT ? "sp_bigint_to_double" : "sp_rational_to_f", text);
@@ -3085,8 +3097,8 @@ int local_nil_test(Compiler *c, LocalVar *lv, const char *ref, Buf *out) {
      the nil join keeps such a slot an sp_int, and its nil is the sentinel */
   if (lv->nullable_int) nil_init = 1;
   if (t == TY_INT || t == TY_FLOAT) {
-    if (!nil_init) return 0;
-    buf_printf(out, t == TY_INT ? "%s == SP_INT_NIL" : "sp_float_is_nil(%s)", ref);
+    if (!nil_init || !slot_is_oint(lv)) return 0;
+    buf_printf(out, "%s.nil", ref);
     return 1;
   }
   /* any other builtin kind: its ty_traits row's nil_test_local (types.c),
@@ -3181,8 +3193,8 @@ const char *default_value(TyKind t) {
    kinds hold nil as a sentinel (default_value), which C reads as true. */
 void emit_slot_truthy(TyKind t, const char *ref, Buf *b) {
   switch (t) {
-  case TY_INT:    buf_printf(b, "(%s != SP_INT_NIL)", ref); break;
-  case TY_FLOAT:  buf_printf(b, "(!sp_float_is_nil(%s))", ref); break;
+  /* an Integer or Float `ref` is its sp_oint (emit_sentinel_bind) */
+  case TY_INT: case TY_FLOAT: buf_printf(b, "(!(%s).nil)", ref); break;
   case TY_SYMBOL: buf_printf(b, "(%s != (sp_sym)-1)", ref); break;
   case TY_POLY:   buf_printf(b, "(sp_poly_truthy(%s))", ref); break;
   default:        buf_printf(b, "(%s)", ref); break;
@@ -3194,7 +3206,8 @@ void emit_slot_truthy(TyKind t, const char *ref, Buf *b) {
    closes the block or statement expression around it. */
 void emit_sentinel_bind(Compiler *c, TyKind t, int node, char *ref, size_t cap, Buf *b) {
   snprintf(ref, cap, "_t%d", ++g_tmp);
-  emit_ctype(c, t, b); buf_printf(b, " %s = ", ref); emit_expr(c, node, b);
+  if (oint_kind(t)) { buf_printf(b, "%s %s = ", oint_ctype(t), ref); emit_oint_expr(c, node, t, b); }
+  else { emit_ctype(c, t, b); buf_printf(b, " %s = ", ref); emit_expr(c, node, b); }
   buf_puts(b, "; ");
 }
 /* The box for an element an Integer or Float array hands to a poly container
@@ -3224,7 +3237,17 @@ const char *nil_store_sfx(Compiler *c, const char *k, int node) {
   TyKind t = r.as_ty;
   if (t == TY_NIL || r.kind == RK_BOXED || t == TY_UNKNOWN) return "_nilable";
   if (t != TY_INT && t != TY_FLOAT) return "";
-  return enum_builtin_node(c, node) ? "_nilable" : "";
+  /* a value with an oint form stores with its nil (the _nilable store takes
+     an sp_oint: emit_elem_store_value) */
+  return node_has_oint_form(c, node) ? "_nilable" : "";
+}
+/* The value node `node` stored into an Integer / Float array (kind k) as
+   the store nil_store_sfx picked takes it: an sp_oint for the `_nilable`
+   store, the plain element otherwise. */
+void emit_elem_store_value(Compiler *c, const char *k, int node, Buf *b) {
+  TyKind et = sp_streq(k, "Float") ? TY_FLOAT : TY_INT;
+  if (nil_store_sfx(c, k, node)[0]) emit_oint_expr(c, node, et, b);
+  else emit_coerce(c, node, et, CO_HOLD, "an Array element", b);
 }
 /* The C text asking whether the Integer or Float array `arr` (C text; `node`
    its Ruby expression, of kind `t`) may hold nil: "1" where analyze marked
@@ -3846,7 +3869,8 @@ int hash_key_misses(Compiler *c, int key, TyKind kt) {
    Integer slot that held nil is stored as the slot's sentinel, which
    emit_hash_key hands a nil key as, so the lookup finds that entry. */
 int hash_nil_key_stored(Compiler *c, int key, TyKind kt) {
-  return kt == TY_INT && comp_ntype(c, key) == TY_NIL;
+  (void)c; (void)key; (void)kt;
+  return 0;   /* an Integer key has no nil word any more (A5) */
 }
 
 void emit_hash_key(Compiler *c, int key, TyKind kt, Buf *b) {
@@ -3857,7 +3881,9 @@ void emit_hash_key(Compiler *c, int key, TyKind kt, Buf *b) {
     emit_expr(c, key, b);
     if (kt == TY_STRING)      buf_puts(b, "); (const char *)0; })");
     else if (kt == TY_SYMBOL) buf_puts(b, "); (sp_sym)-1; })");
-    else                      buf_puts(b, "); SP_INT_NIL; })");
+    /* an Integer key no key equals does not exist: a nil key is refused
+       where it is read (the runtime raises for one stored, A5) */
+    else                      buf_puts(b, "); sp_oint_arg(sp_oint_nil()); })");
     return;
   }
   /* A Symbol key on a String-keyed hash used to coerce to its name, a
@@ -3877,7 +3903,7 @@ void emit_hash_key(Compiler *c, int key, TyKind kt, Buf *b) {
        it rather than answering the no-key sentinel (#4279). */
     if (kt == TY_STRING)      buf_puts(b, "; _hk = sp_poly_strbuf_deref(_hk); _hk.tag == SP_TAG_STR ? _hk.v.s : (const char *)0; })");
     else if (kt == TY_SYMBOL) buf_puts(b, "; _hk.tag == SP_TAG_SYM ? (sp_sym)_hk.v.i : (sp_sym)-1; })");
-    else                      buf_puts(b, "; _hk.tag == SP_TAG_INT ? _hk.v.i : SP_INT_NIL; })");
+    else                      buf_puts(b, "; sp_poly_hkey_i(_hk); })");   /* another kind raises (A5) */
     return;
   }
   if (kt == TY_POLY && !kboxed) {
@@ -4823,4 +4849,432 @@ void emit_into_pre_line(Compiler *c, void (*fn)(Compiler *, int, Buf *), int nod
   }
   if (val.p) buf_puts(pre, val.p);
   free(val.p); free(hoist.p);
+}
+
+/* ---- nil out of band: sp_oint / sp_ofloat (codegen_internal.h) ---- */
+
+int oint_kind(TyKind t) { return t == TY_INT || t == TY_FLOAT; }
+const char *oint_ctype(TyKind t) { return t == TY_FLOAT ? "sp_ofloat" : "sp_oint"; }
+const char *oint_nil(TyKind t)   { return t == TY_FLOAT ? "sp_ofloat_nil()" : "sp_oint_nil()"; }
+const char *oint_of(TyKind t)    { return t == TY_FLOAT ? "sp_ofloat_of" : "sp_oint_of"; }
+const char *oint_val(TyKind t)   { return t == TY_FLOAT ? "sp_ofloat_val" : "sp_oint_val"; }
+const char *oint_arg(TyKind t)   { return t == TY_FLOAT ? "sp_ofloat_arg" : "sp_oint_arg"; }
+const char *oint_box(TyKind t)   { return t == TY_FLOAT ? "sp_box_ofloat" : "sp_box_oint"; }
+const char *oint_unbox(TyKind t) { return t == TY_FLOAT ? "sp_unbox_ofloat" : "sp_unbox_oint"; }
+
+/* A local's slot holds its nil beside the value when the analysis says a
+   write can leave nil in it (nullable_int), when only its boxing has to
+   answer nil (box_nullable, a parameter bound from an unset ivar), when a
+   call passes a literal nil to the proc parameter (nil_passed), or when a
+   read can run before any write (or_written / maybe_unset: the slot starts
+   nil). A parameter is bound at entry, so the last two do not apply. */
+int slot_is_oint(const LocalVar *lv) {
+  if (!lv || !oint_kind(lv->type)) return 0;
+  if (lv->nullable_int || lv->box_nullable || lv->nil_passed) return 1;
+  return (lv->or_written || lv->maybe_unset) && !lv->is_param && !lv->is_block_param;
+}
+
+void emit_slot_ctype(Compiler *c, const LocalVar *lv, Buf *b) {
+  if (slot_is_oint(lv)) buf_puts(b, oint_ctype(lv->type));
+  else emit_ctype(c, lv->type, b);
+}
+
+/* An instance ivar carries its nil as a bit in the object's iv__nilbits
+   when a write can leave nil in it (ivar_nullable_int) or initialize does
+   not assign it (an unset ivar reads nil). The bit's index is the ivar's
+   own index, which a subclass shares with its parent (inherit_members keeps
+   the prefix), so the words sit at the same offset in every struct of a
+   hierarchy and hold the largest ivar count in it. */
+int ivar_has_nilbit(Compiler *c, int cid, int iv) {
+  if (cid < 0 || cid >= c->nclasses) return 0;
+  ClassInfo *ci = &c->classes[cid];
+  if (iv < 0 || iv >= ci->nivars || !oint_kind(ci->ivar_types[iv])) return 0;
+  if (ci->ivar_nullable_int && ci->ivar_nullable_int[iv]) return 1;
+  /* a Struct / Data member is assigned by the generated constructor */
+  if ((ci->is_struct || ci->is_data) && iv < ci->nmembers) return 0;
+  return !ivar_assigned_in_initialize(c, cid, ci->ivars[iv]);
+}
+int ivar_nilbit_index(Compiler *c, int cid, int iv) { (void)c; (void)cid; return iv; }
+static int class_root(Compiler *c, int cid) {
+  int hop = 0;
+  while (cid >= 0 && c->classes[cid].parent >= 0 && hop++ < 64) cid = c->classes[cid].parent;
+  return cid;
+}
+int class_nilbit_words(Compiler *c, int cid) {
+  static int *memo = NULL, memo_n = -1;
+  if (cid < 0 || cid >= c->nclasses) return 0;
+  if (memo_n != c->nclasses) {
+    free(memo); memo_n = c->nclasses;
+    memo = (int *)malloc(sizeof(int) * (size_t)(memo_n > 0 ? memo_n : 1));
+    if (!memo) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+    for (int i = 0; i < memo_n; i++) memo[i] = -1;
+  }
+  if (memo[cid] >= 0) return memo[cid];
+  int root = class_root(c, cid), maxn = 0;
+  for (int k = 0; k < c->nclasses; k++) {
+    if (class_root(c, k) != root) continue;
+    ClassInfo *ck = &c->classes[k];
+    for (int iv = 0; iv < ck->nivars; iv++)
+      if (ivar_has_nilbit(c, k, iv) && iv + 1 > maxn) maxn = iv + 1;
+  }
+  int words = (maxn + 63) / 64;
+  for (int k = 0; k < c->nclasses; k++)
+    if (class_root(c, k) == root) memo[k] = words;
+  return words;
+}
+void ivar_nilbit_test(Compiler *c, int cid, int iv, const char *obj, char *out, size_t cap) {
+  int k = ivar_nilbit_index(c, cid, iv);
+  snprintf(out, cap, "(%siv__nilbits[%d] & (1ULL << %d))", obj, k / 64, k % 64);
+}
+void ivar_nilbit_set(Compiler *c, int cid, int iv, const char *obj, char *out, size_t cap) {
+  int k = ivar_nilbit_index(c, cid, iv);
+  snprintf(out, cap, "%siv__nilbits[%d] |= (1ULL << %d)", obj, k / 64, k % 64);
+}
+void ivar_nilbit_clear(Compiler *c, int cid, int iv, const char *obj, char *out, size_t cap) {
+  int k = ivar_nilbit_index(c, cid, iv);
+  snprintf(out, cap, "%siv__nilbits[%d] &= ~(1ULL << %d)", obj, k / 64, k % 64);
+}
+
+/* The ivar an InstanceVariableReadNode / write names, as the read emitter
+   resolves it (emit_ivar_cvar_gvar_expr): the object's field of class
+   `*cid` (kind 1), or the class-level / top-level static civ_C_x (kind 2);
+   0 when the class has no such slot. */
+int ivar_node_slot(Compiler *c, int node, int *cid, int *iv) {
+  HolderRef h;
+  *cid = *iv = -1;
+  Scope *cs = comp_scope_of(c, node);
+  const char *nm = nt_str(c->nt, node, "name");
+  if (!nm) return 0;
+  /* inside an instance_eval / instance_exec splice: the receiver's class */
+  if (cs && cs->class_id < 0 && !cs->is_cmethod && g_ie_class_id >= 0) {
+    for (int k = g_ie_class_id; k >= 0; k = c->classes[k].parent) {
+      int i = comp_ivar_index(&c->classes[k], nm);
+      if (i >= 0) { *cid = k; *iv = i; return 1; }
+    }
+    return 0;
+  }
+  /* a class body outside any def: the class-level static */
+  if (cs && cs->class_id < 0 && !cs->is_cmethod && g_class_body_id >= 0) {
+    int i = comp_ivar_index(&c->classes[g_class_body_id], nm);
+    if (i < 0) return 0;
+    *cid = g_class_body_id; *iv = i; return 2;
+  }
+  if (!holder_of_node_in(c, node, g_class_body_id, &h) || h.idx < 0) return 0;
+  *cid = h.cid; *iv = h.idx;
+  return h.cls_slot ? 2 : 1;
+}
+int ivar_read_slot_is_oint(Compiler *c, int node) {
+  int cid, iv;
+  int kind = ivar_node_slot(c, node, &cid, &iv);
+  if (kind == 1) return ivar_has_nilbit(c, cid, iv);
+  if (kind == 2) return civ_is_oint(c, cid, iv);
+  return 0;
+}
+
+int gvar_seeded_before_read(Compiler *c, const char *gname);   /* analyze_internal.h */
+/* A global starts nil and keeps it until its first write: its static is an
+   sp_oint when a read can see that nil (not seeded before every read) or a
+   write leaves nil in it. A class-level or top-level ivar static starts
+   nil too, and nothing seeds it: always an oint. A class variable read
+   before its write is a NameError in Ruby, so only a nil write makes one. */
+int gvar_is_oint(Compiler *c, const LocalVar *g) {
+  if (!g || !oint_kind(g->type)) return 0;
+  if (g->nullable_int) return 1;
+  return !gvar_seeded_before_read(c, g->name);
+}
+int civ_is_oint(Compiler *c, int cid, int iv) {
+  if (cid < 0 || cid >= c->nclasses || iv < 0 || iv >= c->classes[cid].nivars) return 0;
+  return oint_kind(c->classes[cid].ivar_types[iv]);
+}
+int cvar_is_oint(Compiler *c, int cid, int idx) {
+  if (cid < 0 || cid >= c->nclasses || idx < 0 || idx >= c->classes[cid].ncvars) return 0;
+  ClassInfo *ci = &c->classes[cid];
+  return oint_kind(ci->cvar_types[idx]) && ci->cvar_nullable_int && ci->cvar_nullable_int[idx];
+}
+
+/* The reader method `nm` resolved on class cid: the ivar it answers, when
+   that ivar carries a nil bit (its read is an sp_oint). */
+static int reader_ivar_has_nilbit(Compiler *c, int cid, const char *nm) {
+  int defc = -1;
+  if (cid < 0 || cid >= c->nclasses || !nm || !comp_reader_in_chain(c, cid, nm, &defc)) return 0;
+  char ivb[300];
+  snprintf(ivb, sizeof ivb, "@%s", comp_resolve_alias(c, cid, nm));
+  int k = defc >= 0 ? defc : cid;
+  int iv = comp_ivar_index(&c->classes[k], ivb);
+  return iv >= 0 && ivar_has_nilbit(c, k, iv);
+}
+
+int node_is_oint(Compiler *c, int node) {
+  const NodeTable *nt = c->nt;
+  if (node < 0) return 0;
+  NodeKind k = nt_kind(nt, node);
+  if (k == NK_NilNode) return 1;
+  TyKind t = comp_ntype(c, node);
+  if (!oint_kind(t)) return 0;
+  switch (k) {
+  case NK_LocalVariableReadNode: {
+    /* the slot's own oint, unless a nil guard narrowed this read */
+    const char *ln = nt_str(nt, node, "name");
+    Scope *s = ln ? comp_scope_of(c, node) : NULL;
+    LocalVar *lv = s ? scope_local(s, ln) : NULL;
+    return lv && slot_is_oint(lv) && nullable_int_value(c, node);
+  }
+  case NK_InstanceVariableReadNode:
+  case NK_ClassVariableReadNode:
+  case NK_GlobalVariableReadNode:
+    return nullable_int_value(c, node);
+  case NK_CallNode: {
+    if (nullable_int_value(c, node)) return 1;
+    /* `r&.m`: nil when r is -- except on the safe-navigation emitter's
+       re-entry for the same node (g_sn_skip), which emits the plain call on
+       the guarded receiver and wraps it itself */
+    const char *sop = nt_str(nt, node, "call_operator");
+    if (sop && sp_streq(sop, "&.") && g_sn_skip != node) return 1;
+    const char *nm = nt_str(nt, node, "name");
+    if (!nm) return 0;
+    int blk = nt_ref(nt, node, "block");
+    int r = nt_ref(nt, node, "receiver");
+    /* a proc's result comes back boxed and is unboxed with its nil */
+    if (is_call_or_yield(nm) && r >= 0 && comp_ntype(c, r) == TY_PROC) return 1;
+    /* the runtime functions that answer an sp_oint (RUNTIME-API.md) */
+    if ((sp_streq(nm, "bsearch") || sp_streq(nm, "bsearch_index")) && blk >= 0) return 1;
+    if (sp_streq(nm, "nonzero?") || sp_streq(nm, "infinite?") || sp_streq(nm, "getbyte")) return 1;
+    if (sp_streq(nm, "index") || sp_streq(nm, "rindex") || sp_streq(nm, "delete_at") ||
+        sp_streq(nm, "byteindex") || sp_streq(nm, "byterindex") ||
+        sp_streq(nm, "pop") || sp_streq(nm, "shift") || sp_streq(nm, "delete")) return 1;
+    if (is_range_bound_reader(nm) && r >= 0) {
+      TyKind rrt = comp_ntype(c, r);
+      if (rrt == TY_MATCHDATA || rrt == TY_RANGE || rrt == TY_FLOAT_RANGE) return 1;
+    }
+    /* an attr reader over an ivar with a nil bit answers the ivar's oint */
+    if (r >= 0 && blk < 0) {
+      int a2 = nt_ref(nt, node, "arguments"), an2 = 0;
+      if (a2 >= 0) nt_arr(nt, a2, "arguments", &an2);
+      TyKind rt2 = comp_ntype(c, r);
+      if (an2 == 0 && ty_is_object(rt2) && reader_ivar_has_nilbit(c, ty_object_class(rt2), nm)) return 1;
+    }
+    return 0;
+  }
+  default:
+    return nullable_int_value(c, node);
+  }
+}
+
+int g_want_oint = 0;
+
+/* The slot a leaf read names, when that slot is an oint: the local, the
+   instance ivar with a nil bit, the oint static. */
+static int leaf_slot_is_oint(Compiler *c, int node) {
+  const NodeTable *nt = c->nt;
+  NodeKind k = nt_kind(nt, node);
+  if (k == NK_LocalVariableReadNode) {
+    const char *ln = nt_str(nt, node, "name");
+    Scope *s = ln ? comp_scope_of(c, node) : NULL;
+    return slot_is_oint(s ? scope_local(s, ln) : NULL);
+  }
+  if (k == NK_InstanceVariableReadNode) return ivar_read_slot_is_oint(c, node);
+  if (k == NK_ClassVariableReadNode) {
+    HolderRef h;
+    return holder_of_node_in(c, node, g_class_body_id, &h) && cvar_is_oint(c, h.cid, h.idx);
+  }
+  if (k == NK_GlobalVariableReadNode) {
+    const char *gn = nt_str(nt, node, "name");
+    const char *rn = gn ? comp_resolve_gvar(c, gn + 1) : NULL;
+    return gvar_is_oint(c, rn ? comp_gvar(c, rn) : NULL);
+  }
+  return 0;
+}
+
+/* the method being emitted answers an sp_oint / sp_ofloat (method_ret_is_oint
+   of its scope; set beside g_ret_type) */
+int g_ret_oint = 0;
+
+/* The right-hand side of a store into ivar iv of class cid (an object
+   field with a nil bit; `obj` is the receiver prefix, "self->") from node
+   v, with the bit kept in step: a value that can be nil (an oint form, a
+   boxed value, a nil) stores its value and copies its nil into the bit; a
+   plain value clears the bit. A statement-expression whose value is the
+   field's. */
+void emit_ivar_value_nilbit(Compiler *c, int cid, int iv, const char *obj, int v, Buf *b) {
+  TyKind t = c->classes[cid].ivar_types[iv];
+  char bs[160], bc[160];
+  ivar_nilbit_set(c, cid, iv, obj, bs, sizeof bs);
+  ivar_nilbit_clear(c, cid, iv, obj, bc, sizeof bc);
+  int to = ++g_tmp;
+  if (v < 0 || nt_kind(c->nt, v) == NK_NilNode) { buf_printf(b, "({ %s; (%s)0; })", bs, c_type_name(t)); return; }
+  Repr r = repr_of(c, v);
+  if (node_has_oint_form(c, v) || r.kind == RK_BOXED || r.as_ty == TY_NIL || r.as_ty == TY_VOID ||
+      r.as_ty == TY_UNKNOWN || (oint_kind(r.as_ty) && r.as_ty != t)) {
+    buf_printf(b, "({ %s _t%d = ", oint_ctype(t), to);
+    if (r.as_ty == TY_UNKNOWN) { buf_printf(b, "%s(", oint_unbox(t)); emit_expr(c, v, b); buf_puts(b, ")"); }
+    else emit_oint_expr(c, v, t, b);
+    buf_printf(b, "; if (_t%d.nil) %s; else %s; _t%d.v; })", to, bs, bc, to);
+    return;
+  }
+  buf_printf(b, "({ %s _t%d = ", c_type_name(t), to);
+  emit_coerce(c, v, t, CO_HOLD, "an instance variable write", b);
+  buf_printf(b, "; %s; _t%d; })", bc, to);
+}
+/* the same for a value already rendered as an sp_oint / sp_ofloat text */
+void emit_ivar_text_nilbit(Compiler *c, int cid, int iv, const char *obj, const char *otext, Buf *b) {
+  TyKind t = c->classes[cid].ivar_types[iv];
+  char bs[160], bc[160];
+  ivar_nilbit_set(c, cid, iv, obj, bs, sizeof bs);
+  ivar_nilbit_clear(c, cid, iv, obj, bc, sizeof bc);
+  int to = ++g_tmp;
+  buf_printf(b, "({ %s _t%d = %s; if (_t%d.nil) %s; else %s; _t%d.v; })", oint_ctype(t), to, otext, to, bs, bc, to);
+}
+
+/* The right-hand side of `@x = nil` for an Integer or Float ivar named by
+   write node `id`: a field with a nil bit sets it (the value is its 0), an
+   oint static takes its nil, a plain field (nothing marks it) the TypeError
+   a nil raises where a number is wanted. */
+void emit_ivar_nil_store(Compiler *c, int id, TyKind t, Buf *b) {
+  int cid, iv, k = ivar_node_slot(c, id, &cid, &iv);
+  if (k == 1 && ivar_has_nilbit(c, cid, iv)) {
+    char pfx[128], bs[200];
+    snprintf(pfx, sizeof pfx, "%s%s", g_self, g_self_deref);
+    ivar_nilbit_set(c, cid, iv, pfx, bs, sizeof bs);
+    buf_printf(b, "({ %s; (%s)0; })", bs, c_type_name(t));
+  }
+  else if (k == 2 && civ_is_oint(c, cid, iv)) buf_puts(b, oint_nil(t));
+  else emit_slot_nil_read(c, t, b);
+}
+
+/* A conditional's result slot (an if / case / begin / `||` in value
+   position): an Integer or Float one holds its nil when an arm can answer
+   nil (node_is_oint of the conditional). The C type and the dead value. */
+int cond_res_oint(Compiler *c, int id, TyKind res) {
+  return oint_kind(res) && node_is_oint(c, id);
+}
+void emit_res_ctype(Compiler *c, TyKind res, int res_o, Buf *b) {
+  if (res_o && oint_kind(res)) buf_puts(b, oint_ctype(res)); else emit_ctype(c, res, b);
+}
+const char *res_zero(Compiler *c, TyKind res, int res_o) {
+  if (res_o && oint_kind(res)) return oint_nil(res);
+  return res == TY_RANGE ? "(sp_Range){0}" : default_value_from_compiler(c, res);
+}
+/* the result slot a tail statement fills answers an oint (beside
+   g_result_ty / g_result_var) */
+int g_result_oint = 0;
+
+/* `@x ||= v` / `&&=` at write node `id` (ivar type t, slot text ref): the
+   field's nil bit or the oint static decides the test and keeps the bit */
+void emit_ivar_orw_value(Compiler *c, int id, TyKind t, const char *ref, int v, int is_or, Buf *b) {
+  int cid, iv, k = oint_kind(t) ? ivar_node_slot(c, id, &cid, &iv) : 0;
+  char pfx[128], nt[300];
+  if (k == 1 && ivar_has_nilbit(c, cid, iv)) {
+    snprintf(pfx, sizeof pfx, "%s%s", g_self, g_self_deref);
+    ivar_nilbit_test(c, cid, iv, pfx, nt, sizeof nt);
+    emit_slot_orw_value_o(c, t, ref, v, is_or, nt, cid, iv, pfx, b);
+  }
+  else if (k == 2 && civ_is_oint(c, cid, iv)) {
+    snprintf(nt, sizeof nt, "%s.nil", ref);
+    emit_slot_orw_value_o(c, t, ref, v, is_or, nt, -1, -1, NULL, b);
+  }
+  else emit_slot_orw_value(c, t, ref, v, is_or, b);
+}
+/* `obj.x ||= v` through the attribute's field (class cid, ivar iv, receiver
+   prefix pfx such as "_t3->") */
+void emit_attr_orw_value(Compiler *c, int cid, int iv, const char *pfx, TyKind t, const char *ref,
+                         int v, int is_or, Buf *b) {
+  char nt[300];
+  if (oint_kind(t) && iv >= 0 && ivar_has_nilbit(c, cid, iv)) {
+    ivar_nilbit_test(c, cid, iv, pfx, nt, sizeof nt);
+    emit_slot_orw_value_o(c, t, ref, v, is_or, nt, cid, iv, pfx, b);
+  }
+  else emit_slot_orw_value(c, t, ref, v, is_or, b);
+}
+/* The nil test of ivar iv of class cid behind `ref` ("self->iv_x", the
+   field) for an or-write statement: the bit, the oint's flag, or NULL */
+int ivar_orw_niltest(Compiler *c, int id, const char *ref, char *out, size_t cap, int *cid, int *iv, char *pfx, size_t pcap) {
+  int k = ivar_node_slot(c, id, cid, iv);
+  if (k == 1 && ivar_has_nilbit(c, *cid, *iv)) {
+    snprintf(pfx, pcap, "%s%s", g_self, g_self_deref);
+    ivar_nilbit_test(c, *cid, *iv, pfx, out, cap);
+    return 1;
+  }
+  if (k == 2 && civ_is_oint(c, *cid, *iv)) { snprintf(out, cap, "%s.nil", ref); return 2; }
+  return 0;
+}
+
+void emit_slot_nil_read(Compiler *c, TyKind t, Buf *b) {
+  if (oint_kind(t)) { buf_printf(b, "%s(%s)", oint_arg(t), oint_nil(t)); return; }
+  const char *nv = nil_value(t);
+  buf_puts(b, nv ? nv : default_value_from_compiler(c, t));
+}
+
+int node_has_oint_form(Compiler *c, int node) {
+  return node >= 0 && (node_is_oint(c, node) || leaf_slot_is_oint(c, node));
+}
+
+void emit_oint_expr(Compiler *c, int node, TyKind t, Buf *b) {
+  if (b == g_pre) {
+    /* as emit_into_pre_line, with the kind threaded through */
+    Buf tmp; memset(&tmp, 0, sizeof tmp);
+    emit_oint_expr(c, node, t, &tmp);
+    buf_puts(b, tmp.p ? tmp.p : "");
+    free(tmp.p);
+    return;
+  }
+  if (!oint_kind(t)) t = TY_INT;
+  if (node < 0) { buf_puts(b, oint_nil(t)); return; }
+  const NodeTable *nt = c->nt;
+  NodeKind k = nt_kind(nt, node);
+  if (k == NK_NilNode) { buf_puts(b, oint_nil(t)); return; }
+  Repr r = repr_of(c, node);
+  TyKind vt = r.as_ty;
+  /* a value with no C type of its own: evaluated for its effect, then nil */
+  if (vt == TY_NIL || vt == TY_VOID) {
+    buf_puts(b, "((void)("); emit_expr(c, node, b); buf_printf(b, "), %s)", oint_nil(t));
+    return;
+  }
+  /* a boxed value, or an untyped one (the gate's raising token): unboxed
+     with its nil */
+  if (r.kind == RK_BOXED || vt == TY_POLY || vt == TY_UNKNOWN) {
+    buf_printf(b, "%s(", oint_unbox(t)); emit_expr(c, node, b); buf_puts(b, ")");
+    return;
+  }
+  /* an Integer into a Float slot (or the reverse) converts the value */
+  if (oint_kind(vt) && vt != t) {
+    if (node_is_oint(c, node) || leaf_slot_is_oint(c, node)) {
+      int tn = ++g_tmp;
+      buf_printf(b, "({ %s _t%d = ", oint_ctype(vt), tn);
+      emit_oint_expr(c, node, vt, b);
+      buf_printf(b, "; _t%d.nil ? %s : %s((%s)_t%d.v); })", tn, oint_nil(t), oint_of(t), c_type_name(t), tn);
+    }
+    else {
+      buf_printf(b, "%s((%s)(", oint_of(t), c_type_name(t)); emit_expr(c, node, b); buf_puts(b, "))");
+    }
+    return;
+  }
+  if (node_is_oint(c, node) || leaf_slot_is_oint(c, node)) {
+    /* the bare producer: emit_expr consumes the flag for this node */
+    g_want_oint = 1;
+    emit_expr(c, node, b);
+    g_want_oint = 0;
+    return;
+  }
+  buf_printf(b, "%s(", oint_of(t)); emit_expr(c, node, b); buf_puts(b, ")");
+}
+
+/* Ruby truthiness of an Integer or Float node: a plain one is always
+   truthy (evaluated for its effect); one with an oint form is truthy
+   exactly when it is not nil. */
+void emit_oint_truthy(Compiler *c, int node, TyKind t, Buf *b) {
+  if (node_has_oint_form(c, node)) {
+    buf_puts(b, "(!("); emit_oint_expr(c, node, t, b); buf_puts(b, ").nil)");
+  }
+  else { buf_puts(b, "(("); emit_expr(c, node, b); buf_puts(b, "), 1)"); }
+}
+
+void emit_scalar_operand_op(Compiler *c, int node, const char *op, Buf *b) {
+  TyKind t = comp_ntype(c, node);
+  if (oint_kind(t) && cmp_operand_may_be_nil(c, node)) {
+    buf_printf(b, "%s(", oint_val(t));
+    emit_oint_expr(c, node, t, b);
+    buf_printf(b, ", \"%s\")", op);
+    return;
+  }
+  emit_scalar_operand(c, node, t == TY_FLOAT ? "0.0" : "0", b);
 }

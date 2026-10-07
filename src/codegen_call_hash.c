@@ -11,6 +11,14 @@
 #include "codegen_call_arms.h"
 #include "repr.h"
 
+/* ---- nil out of band: an emitter whose C result is an sp_oint / sp_ofloat
+   leaves it bare when the node is one (node_is_oint: the dispatcher's
+   consumer takes the oint) and otherwise reads it as the plain scalar through
+   sp_oint_arg (TypeError for nil) -- the same wrap the dispatcher applies to an
+   oint producer, applied here because this emitter decides the form. */
+static void oint_open(Compiler *c, int id, TyKind t, Buf *b) { if (!node_is_oint(c, id)) buf_printf(b, "%s(", oint_arg(t)); }
+static void oint_close(Compiler *c, int id, Buf *b) { if (!node_is_oint(c, id)) buf_puts(b, ")"); }
+
 /* any?(pattern) / none? / one? / count with one argument and no block:
    compare each [key, value] pair by == (sp_poly_eq covers array-vs-array
    value equality, which is what a pair pattern is) */
@@ -183,7 +191,7 @@ int emit_op_hash_aref(Compiler *c, const BopCtx *x, Buf *b) {
     int t = ++g_tmp;
     buf_printf(b, "({ %s _t%d = ", c_type_name(rt), t); emit_expr(c, recv, b); buf_puts(b, "; ");
     buf_puts(b, "(void)("); emit_expr(c, argv[0], b); buf_puts(b, "); ");  /* the key still evaluates */
-    if (vt == TY_INT) buf_printf(b, "_t%d ? _t%d->default_v : SP_INT_NIL; })", t, t);
+    if (vt == TY_INT) { oint_open(c, x->id, TY_INT, b); buf_printf(b, "({ %s _d%d = _t%d; (_d%d && !_d%d->default_nil) ? sp_oint_of(_d%d->default_v) : sp_oint_nil(); }); })", c_type_name(rt), t, t, t, t, t); oint_close(c, x->id, b); }
     /* absent means the hash's default, which is nil unless one was
        given -- not the empty string (#3790) */
     else if (vt == TY_STRING) buf_printf(b, "_t%d ? _t%d->default_v : NULL; })", t, t);
@@ -195,10 +203,13 @@ int emit_op_hash_aref(Compiler *c, const BopCtx *x, Buf *b) {
     emit_expr(c, recv, b); buf_puts(b, ", "); emit_boxed(c, argv[0], b); buf_puts(b, ")");
   }
   else {
-    /* int-valued hashes have a nullable get_opt; string-valued use get */
-    const char *getter = ty_hash_val(rt) == TY_INT ? "get_opt" : "get";
-    buf_printf(b, "sp_%sHash_%s(", hn, getter);
+    /* an int-valued hash answers a miss as nil beside the value (oget);
+       a string-valued one as NULL (get) */
+    int oint = ty_hash_val(rt) == TY_INT;
+    if (oint) oint_open(c, x->id, TY_INT, b);
+    buf_printf(b, "sp_%sHash_%s(", hn, oint ? "oget" : "get");
     emit_expr(c, recv, b); buf_puts(b, ", "); emit_hash_key(c, argv[0], ty_hash_key(rt), b); buf_puts(b, ")");
+    if (oint) oint_close(c, x->id, b);
   }
   return 1;
 }
@@ -287,7 +298,7 @@ int emit_op_hash_default(Compiler *c, const BopCtx *x, Buf *b) {
     }
   }
   else if (rt == TY_STR_INT_HASH || rt == TY_INT_INT_HASH) {
-    buf_printf(b, "; (_t%d && _t%d->default_v != SP_INT_NIL) ? sp_box_int(_t%d->default_v) : sp_box_nil(); })", t, t, t);
+    buf_printf(b, "; (_t%d && !_t%d->default_nil) ? sp_box_int(_t%d->default_v) : sp_box_nil(); })", t, t, t);
   }
   else if (rt == TY_STR_STR_HASH || rt == TY_INT_STR_HASH) {
     buf_printf(b, "; (_t%d && _t%d->default_v) ? sp_box_str(_t%d->default_v) : sp_box_nil(); })", t, t, t);
@@ -496,13 +507,15 @@ int emit_op_hash_set_default(Compiler *c, const BopCtx *x, Buf *b) {
      unboxed as a boxed element store's value is (emit_hash_store_val):
      nil and the values' class are kept, another class raises. */
   else if (rt == TY_STR_INT_HASH || rt == TY_INT_INT_HASH) {
-    /* nil is SP_INT_NIL in an Integer slot; nil emitted as an int is 0 */
-    buf_printf(b, " if (_t%d) _t%d->default_v = ", t, t);
-    if (is_nil) buf_puts(b, "SP_INT_NIL");
-    else if (held && at == TY_POLY) buf_printf(b, "sp_poly_hval_i(%s)", av);
-    else if (held) emit_coerce_text(c, argv[0], at, TY_INT, CO_HOLD, av, "a Hash default", b);
-    else emit_coerce(c, argv[0], TY_INT, CO_HOLD, "a Hash default", b);
-    buf_puts(b, ";");
+    /* a nil default is the hash's default_nil flag, not a value */
+    if (is_nil) buf_printf(b, " if (_t%d) { _t%d->default_nil = 1; _t%d->default_v = 0; }", t, t, t);
+    else {
+      buf_printf(b, " if (_t%d) { _t%d->default_nil = 0; _t%d->default_v = ", t, t, t);
+      if (held && at == TY_POLY) buf_printf(b, "sp_poly_hval_i(%s)", av);
+      else if (held) emit_coerce_text(c, argv[0], at, TY_INT, CO_HOLD, av, "a Hash default", b);
+      else emit_coerce(c, argv[0], TY_INT, CO_HOLD, "a Hash default", b);
+      buf_puts(b, "; }");
+    }
   }
   else if (rt == TY_STR_STR_HASH || rt == TY_INT_STR_HASH) {
     buf_printf(b, " if (_t%d) _t%d->default_v = ", t, t);
@@ -596,12 +609,18 @@ int emit_op_hash_delete(Compiler *c, const BopCtx *x, Buf *b) {
   buf_printf(b, "({ %s _t%d = ", c_type_name(rt), th); emit_expr(c, recv, b);
   buf_printf(b, "; if (sp_gc_is_frozen(_t%d)) sp_raise_frozen_hash_at(_t%d, %s);", th, th, hash_box_cls(rt));   /* (#3001) */
   buf_printf(b, " %s _t%d = ", c_type_name(ty_hash_key(rt)), tk); emit_hash_key(c, argv[0], ty_hash_key(rt), b);
-  /* a miss answers nil: the nullable int's SP_INT_NIL, not 0, which
-     read as a deleted value of zero (#4531) */
-  buf_printf(b, "; %s _t%d = sp_%sHash_has_key(_t%d, _t%d) ? sp_%sHash_get(_t%d, _t%d) : %s;",
-             c_type_name(vt), tv, hn, th, tk, hn, th, tk,
-             vt == TY_POLY ? "sp_box_nil()" : vt == TY_INT ? "SP_INT_NIL" : vt == TY_STRING ? "NULL" : default_value_from_compiler(c, vt));
-  buf_printf(b, " sp_%sHash_delete(_t%d, _t%d); _t%d; })", hn, th, tk, tv);
+  /* a miss answers nil: an Integer value's nil is out of band (an sp_oint),
+     not a deleted value of zero (#4531) */
+  if (vt == TY_INT)
+    buf_printf(b, "; sp_oint _t%d = sp_%sHash_has_key(_t%d, _t%d) ? sp_oint_of(sp_%sHash_get(_t%d, _t%d)) : sp_oint_nil();",
+               tv, hn, th, tk, hn, th, tk);
+  else
+    buf_printf(b, "; %s _t%d = sp_%sHash_has_key(_t%d, _t%d) ? sp_%sHash_get(_t%d, _t%d) : %s;",
+               c_type_name(vt), tv, hn, th, tk, hn, th, tk,
+               vt == TY_POLY ? "sp_box_nil()" : vt == TY_STRING ? "NULL" : default_value_from_compiler(c, vt));
+  buf_printf(b, " sp_%sHash_delete(_t%d, _t%d); ", hn, th, tk);
+  if (vt == TY_INT) { oint_open(c, x->id, TY_INT, b); buf_printf(b, "_t%d", tv); oint_close(c, x->id, b); buf_puts(b, "; })"); }
+  else buf_printf(b, "_t%d; })", tv);
   return 1;
 }
 

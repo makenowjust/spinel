@@ -3,6 +3,13 @@
 #include "call_plan.h"
 #include "codegen_call_arms.h"
 
+/* An sp_oint / sp_ofloat expression where the dispatcher wants the node
+   plain is unwrapped here (TypeError for nil); an oint consumer takes it
+   as it is. */
+static void oint_open(Compiler *c, int id, TyKind t, Buf *b) { if (!node_is_oint(c, id)) buf_printf(b, "%s(", oint_arg(t)); }
+static void oint_close(Compiler *c, int id, Buf *b) { if (!node_is_oint(c, id)) buf_puts(b, ")"); }
+static void emit_seedless_fold_answer(Compiler *c, int id, TyKind et, int tn, int tacc, Buf *b);
+
 /* Defined lower in this file; declared here so the collecting emitters above
    its definition (the hash block-walk binder, flat_map) can route a block's
    next-aware value into a caller-declared lvalue. */
@@ -401,7 +408,7 @@ int emit_hash_collect_expr(Compiler *c, int id, Buf *b) {
     }
     else {
       buf_printf(g_pre, "sp_%sHash_set(_t%d, _t%d->order[_t%d], sp_%sHash_%s(_t%d, _t%d->order[_t%d])); }",
-                 hn, tres, trecv, ti, hn, vtt == TY_INT ? "get_opt" : "get", trecv, trecv, ti);
+                 hn, tres, trecv, ti, hn, "get", trecv, trecv, ti);   /* a key the walk is on is present */
     }
     buf_puts(g_pre, "\n");
     emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n");
@@ -758,7 +765,7 @@ int emit_transform_hash_expr(Compiler *c, int id, Buf *b) {
       buf_printf(g_pre, " _t%d = _t%d->order[_t%d];\n", tk2, ts2, ti2);
     emit_indent(g_pre, g_indent + 1);
     { TyKind vt2 = rr.val;
-      const char *nil_v = (vt2 == TY_INT) ? "SP_INT_NIL" :
+      const char *nil_v = (vt2 == TY_INT) ? "sp_oint_arg(sp_oint_nil())" :
                           (vt2 == TY_POLY) ? "sp_box_nil()" : "NULL";
       buf_printf(g_pre, "sp_%sHash_set(_t%d, _t%d, %s);\n", shn, td2, tk2, nil_v); }
     emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n");
@@ -833,7 +840,7 @@ int emit_transform_hash_expr(Compiler *c, int id, Buf *b) {
     else if (dkt == TY_STRING && (bret == TY_POLY || bret == TY_UNKNOWN))
       buf_printf(g_pre, "sp_poly_to_s(%s)", vbp);
     else if (dkt == TY_INT && (bret == TY_POLY || bret == TY_UNKNOWN))
-      buf_printf(g_pre, "sp_poly_to_i_or_nil(%s)", vbp);
+      buf_printf(g_pre, "sp_poly_to_i(%s)", vbp);
     else
       buf_puts(g_pre, vbp);
     buf_puts(g_pre, ", ");
@@ -861,7 +868,7 @@ int emit_transform_hash_expr(Compiler *c, int id, Buf *b) {
       buf_printf(g_pre, "sp_poly_to_s(%s)", vb.p ? vb.p : "sp_box_nil()");
     }
     else if (dvt == TY_INT && (bret == TY_POLY || bret == TY_UNKNOWN)) {
-      buf_printf(g_pre, "sp_poly_to_i_or_nil(%s)", vb.p ? vb.p : "sp_box_nil()");
+      buf_printf(g_pre, "sp_poly_hval_i(%s)", vb.p ? vb.p : "sp_box_nil()");
     }
     else buf_puts(g_pre, vb.p ? vb.p : "0");
   }
@@ -872,7 +879,7 @@ int emit_transform_hash_expr(Compiler *c, int id, Buf *b) {
 }
 
 /* (lo..hi).bsearch { |x| cond } in find-minimum mode: binary search for the
-   smallest member where the block is truthy, or nil (the SP_INT_NIL sentinel)
+   smallest member where the block is truthy, or nil (an sp_oint / sp_ofloat)
    when none qualifies. Loop in the statement prelude; value is the result.
    Returns 1 if handled. */
 int emit_bsearch_expr(Compiler *c, int id, Buf *b) {
@@ -945,7 +952,7 @@ int emit_bsearch_expr(Compiler *c, int id, Buf *b) {
       buf_printf(g_pre, ")%s;\n", (excl && brt9 != TY_NIL) ? " - 1" : "");
       }
       emit_indent(g_pre, g_indent);
-      buf_printf(g_pre, "sp_float _t%d = sp_float_nil();\n", fres);
+      buf_printf(g_pre, "sp_ofloat _t%d = sp_ofloat_nil();\n", fres);
       emit_indent(g_pre, g_indent);
       buf_printf(g_pre, "while (_t%d <= _t%d) {\n", klo, khi);
       emit_indent(g_pre, g_indent + 1);
@@ -973,7 +980,7 @@ int emit_bsearch_expr(Compiler *c, int id, Buf *b) {
         emit_indent(g_pre, g_indent + 2);
         buf_printf(g_pre, "double _c = sp_poly_to_f(_t%d);\n", fv);
         emit_indent(g_pre, g_indent + 2);
-        buf_printf(g_pre, "if (_c == 0.0) { _t%d = _t%d; break; }\n", fres, fx);
+        buf_printf(g_pre, "if (_c == 0.0) { _t%d = sp_ofloat_of(_t%d); break; }\n", fres, fx);
         emit_indent(g_pre, g_indent + 2);
         buf_printf(g_pre, "else if (_c > 0.0) %s\n", up);
         emit_indent(g_pre, g_indent + 2);
@@ -981,19 +988,19 @@ int emit_bsearch_expr(Compiler *c, int id, Buf *b) {
         emit_indent(g_pre, g_indent + 1);
         buf_puts(g_pre, "}\n");
         emit_indent(g_pre, g_indent + 1);
-        buf_printf(g_pre, "else if (sp_poly_truthy(_t%d)) { _t%d = _t%d; %s }\n", fv, fres, fx, down);
+        buf_printf(g_pre, "else if (sp_poly_truthy(_t%d)) { _t%d = sp_ofloat_of(_t%d); %s }\n", fv, fres, fx, down);
         emit_indent(g_pre, g_indent + 1);
         buf_printf(g_pre, "else %s\n", up);
       }
       else {
         emit_indent(g_pre, g_indent + 1);
-        buf_printf(g_pre, "if (%s) { _t%d = _t%d; %s }\n", cb.p ? cb.p : "0", fres, fx, down);
+        buf_printf(g_pre, "if (%s) { _t%d = sp_ofloat_of(_t%d); %s }\n", cb.p ? cb.p : "0", fres, fx, down);
         emit_indent(g_pre, g_indent + 1);
         buf_printf(g_pre, "else %s\n", up);
       }
       free(cb.p);
       emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n");
-      buf_printf(b, "_t%d", fres);
+      oint_open(c, id, TY_FLOAT, b); buf_printf(b, "_t%d", fres); oint_close(c, id, b);
       return 1;
     }
     if ((blt9 == TY_INT || blt9 == TY_FLOAT) && (brt9 == TY_INT || brt9 == TY_FLOAT)) {
@@ -1003,7 +1010,7 @@ int emit_bsearch_expr(Compiler *c, int id, Buf *b) {
       emit_indent(g_pre, g_indent);
       buf_printf(g_pre, "double _t%d = ", fhi); emit_float_expr(c, rright, g_pre); buf_puts(g_pre, ";\n");
       emit_indent(g_pre, g_indent);
-      buf_printf(g_pre, "sp_float _t%d = sp_float_nil(); int _t%d;\n", fres, fi);
+      buf_printf(g_pre, "sp_ofloat _t%d = sp_ofloat_nil(); int _t%d;\n", fres, fi);
       emit_indent(g_pre, g_indent);
       buf_printf(g_pre, "for (_t%d = 0; _t%d < 100; _t%d++) {\n", fi, fi, fi);
       emit_indent(g_pre, g_indent + 1);
@@ -1021,7 +1028,7 @@ int emit_bsearch_expr(Compiler *c, int id, Buf *b) {
         emit_indent(g_pre, g_indent + 1);
         buf_printf(g_pre, "double _t%d = (double)(%s);\n", fcmp, cb.p ? cb.p : "0");
         emit_indent(g_pre, g_indent + 1);
-        buf_printf(g_pre, "if (_t%d == 0.0) { _t%d = _t%d; break; }\n", fcmp, fres, fmid);
+        buf_printf(g_pre, "if (_t%d == 0.0) { _t%d = sp_ofloat_of(_t%d); break; }\n", fcmp, fres, fmid);
         emit_indent(g_pre, g_indent + 1);
         buf_printf(g_pre, "else if (_t%d > 0.0) { _t%d = _t%d; }\n", fcmp, flo, fmid);
         emit_indent(g_pre, g_indent + 1);
@@ -1038,7 +1045,7 @@ int emit_bsearch_expr(Compiler *c, int id, Buf *b) {
         emit_indent(g_pre, g_indent + 2);
         buf_printf(g_pre, "double _c = sp_poly_to_f(_t%d);\n", fv);
         emit_indent(g_pre, g_indent + 2);
-        buf_printf(g_pre, "if (_c == 0.0) { _t%d = _t%d; break; }\n", fres, fmid);
+        buf_printf(g_pre, "if (_c == 0.0) { _t%d = sp_ofloat_of(_t%d); break; }\n", fres, fmid);
         emit_indent(g_pre, g_indent + 2);
         buf_printf(g_pre, "else if (_c > 0.0) { _t%d = _t%d; }\n", flo, fmid);
         emit_indent(g_pre, g_indent + 2);
@@ -1046,21 +1053,21 @@ int emit_bsearch_expr(Compiler *c, int id, Buf *b) {
         emit_indent(g_pre, g_indent + 1);
         buf_puts(g_pre, "}\n");
         emit_indent(g_pre, g_indent + 1);
-        buf_printf(g_pre, "else if (sp_poly_truthy(_t%d)) { _t%d = _t%d; _t%d = _t%d; }\n",
+        buf_printf(g_pre, "else if (sp_poly_truthy(_t%d)) { _t%d = sp_ofloat_of(_t%d); _t%d = _t%d; }\n",
                    fv, fres, fmid, fhi, fmid);
         emit_indent(g_pre, g_indent + 1);
         buf_printf(g_pre, "else { _t%d = _t%d; }\n", flo, fmid);
       }
       else {
         emit_indent(g_pre, g_indent + 1);
-        buf_printf(g_pre, "if (%s) { _t%d = _t%d; _t%d = _t%d; }\n",
+        buf_printf(g_pre, "if (%s) { _t%d = sp_ofloat_of(_t%d); _t%d = _t%d; }\n",
                    cb.p ? cb.p : "0", fres, fmid, fhi, fmid);
         emit_indent(g_pre, g_indent + 1);
         buf_printf(g_pre, "else { _t%d = _t%d; }\n", flo, fmid);
       }
       free(cb.p);
       emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n");
-      buf_printf(b, "_t%d", fres);
+      oint_open(c, id, TY_FLOAT, b); buf_printf(b, "_t%d", fres); oint_close(c, id, b);
       return 1;
     }
   }
@@ -1076,7 +1083,7 @@ int emit_bsearch_expr(Compiler *c, int id, Buf *b) {
   emit_indent(g_pre, g_indent); buf_printf(g_pre, "sp_range_int_only(_t%d, \"Range#bsearch\");\n", tr);
   emit_indent(g_pre, g_indent); buf_printf(g_pre, "sp_int _t%d = _t%d.first;\n", tlo, tr);
   emit_indent(g_pre, g_indent); buf_printf(g_pre, "sp_int _t%d = _t%d.last - _t%d.excl;\n", thi, tr, tr);
-  emit_indent(g_pre, g_indent); buf_printf(g_pre, "sp_int _t%d = SP_INT_NIL;\n", tres);
+  emit_indent(g_pre, g_indent); buf_printf(g_pre, "sp_oint _t%d = sp_oint_nil();\n", tres);
   emit_indent(g_pre, g_indent); buf_printf(g_pre, "while (_t%d <= _t%d) {\n", tlo, thi);
   /* A beginless or endless range spans most of sp_int, so the width and the
      step past the probe are taken unsigned or guarded: `hi - lo` and `mid +
@@ -1095,12 +1102,10 @@ int emit_bsearch_expr(Compiler *c, int id, Buf *b) {
     int tcmp = ++g_tmp;
     emit_indent(g_pre, g_indent + 1);
     buf_printf(g_pre, "sp_int _t%d = %s;\n", tcmp, cb.p ? cb.p : "0");
-    /* an Integer block that also answers nil is the combined dispatch: nil
-       searches right (see the Array form) */
+    /* an Integer block whose answer can be nil arrives plain: the nil
+       raised at its coercion (a boxed block is the combined dispatch) */
     emit_indent(g_pre, g_indent + 1);
-    buf_printf(g_pre, "if (_t%d == SP_INT_NIL) %s\n", tcmp, right);
-    emit_indent(g_pre, g_indent + 1);
-    buf_printf(g_pre, "else if (_t%d == 0) { _t%d = _t%d; break; }\n", tcmp, tres, tmid);
+    buf_printf(g_pre, "if (_t%d == 0) { _t%d = sp_oint_of(_t%d); break; }\n", tcmp, tres, tmid);
     emit_indent(g_pre, g_indent + 1);
     buf_printf(g_pre, "else if (_t%d > 0) %s\n", tcmp, right);
     emit_indent(g_pre, g_indent + 1);
@@ -1116,35 +1121,37 @@ int emit_bsearch_expr(Compiler *c, int id, Buf *b) {
     emit_indent(g_pre, g_indent + 1);
     buf_printf(g_pre, "if (_t%d.tag == SP_TAG_INT) {\n", tv);
     emit_indent(g_pre, g_indent + 2);
-    buf_printf(g_pre, "if (_t%d.v.i == 0) { _t%d = _t%d; break; }\n", tv, tres, tmid);
+    buf_printf(g_pre, "if (_t%d.v.i == 0) { _t%d = sp_oint_of(_t%d); break; }\n", tv, tres, tmid);
     emit_indent(g_pre, g_indent + 2);
     buf_printf(g_pre, "else if (_t%d.v.i > 0) %s\n", tv, right);
     emit_indent(g_pre, g_indent + 2);
     buf_printf(g_pre, "else %s\n", left);
     emit_indent(g_pre, g_indent + 1); buf_puts(g_pre, "}\n");
     emit_indent(g_pre, g_indent + 1);
-    buf_printf(g_pre, "else if (sp_poly_truthy(_t%d)) { _t%d = _t%d; %s }\n", tv, tres, tmid, left);
+    buf_printf(g_pre, "else if (sp_poly_truthy(_t%d)) { _t%d = sp_oint_of(_t%d); %s }\n", tv, tres, tmid, left);
     emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "else %s\n", right);
   }
   else {
     emit_indent(g_pre, g_indent + 1);
-    buf_printf(g_pre, "if (%s) { _t%d = _t%d; %s }\n", cb.p ? cb.p : "0", tres, tmid, left);
+    buf_printf(g_pre, "if (%s) { _t%d = sp_oint_of(_t%d); %s }\n", cb.p ? cb.p : "0", tres, tmid, left);
     emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "else %s\n", right);
   }
   free(cb.p);
   emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n");
-  buf_printf(b, "_t%d", tres);
+  oint_open(c, id, TY_INT, b); buf_printf(b, "_t%d", tres); oint_close(c, id, b);
   return 1;
 }
 
 /* array.max_by / min_by { |x| key } -> the element with the largest/smallest
    (int/float) key. Loop in the statement prelude; value is the best element. */
 /* Emit `src` (a poly sp_RbVal C-expression) coerced to scalar type `dst`. */
-static void flatmap_coerce_from_poly(TyKind dst, const char *src, Buf *out) {
+static void flatmap_coerce_from_poly(TyKind dst, int oint, const char *src, Buf *out) {
   switch (dst) {
-  case TY_INT: buf_printf(out, "sp_poly_to_i_or_nil(%s)", src); break;   /* nil is the slot's sentinel */
+  /* a slot that holds its nil beside the value takes it; a plain one raises
+     the operand TypeError for a nil */
+  case TY_INT: buf_printf(out, "%s(%s)", oint ? "sp_unbox_oint" : "sp_poly_opnd_i", src); break;
   case TY_BOOL: buf_printf(out, "sp_poly_to_i(%s)", src); break;
-  case TY_FLOAT: buf_printf(out, "sp_poly_to_f_or_nil(%s)", src); break;
+  case TY_FLOAT: buf_printf(out, "%s(%s)", oint ? "sp_unbox_ofloat" : "sp_poly_opnd_f", src); break;
   /* a String / Symbol param unboxes the field directly (matching emit_unbox_text);
      without this a `const char *`/`sp_sym` slot took a raw sp_RbVal (#2929) */
   case TY_STRING: buf_printf(out, "sp_poly_unbox_s(%s)", src); break;
@@ -1168,7 +1175,7 @@ void emit_autosplat_params(Compiler *c, int block, int np, int elem_temp, int in
     TyKind pty = lvp ? lvp->type : TY_POLY;
     char src[96]; snprintf(src, sizeof src, "sp_poly_massign_get(_t%d, %d)", elem_temp, pj);
     emit_indent(g_pre, indent); buf_printf(g_pre, "lv_%s = ", pnr);
-    Buf cv; memset(&cv, 0, sizeof cv); flatmap_coerce_from_poly(pty, src, &cv);
+    Buf cv; memset(&cv, 0, sizeof cv); flatmap_coerce_from_poly(pty, slot_is_oint(lvp), src, &cv);
     buf_puts(g_pre, cv.p ? cv.p : src); free(cv.p); buf_puts(g_pre, ";\n");
   }
 }
@@ -1194,7 +1201,7 @@ int emit_tuple_block_params(Compiler *c, int id, int block, const char *tuple_sr
     if (!lvp || lvp->type == TY_UNKNOWN) continue;
     char src[160]; snprintf(src, sizeof src, "sp_poly_massign_get(%s, %d)", tuple_src, pj);
     buf_printf(out, " lv_%s = ", rename_local(pn));
-    Buf cv; memset(&cv, 0, sizeof cv); flatmap_coerce_from_poly(lvp->type, src, &cv);
+    Buf cv; memset(&cv, 0, sizeof cv); flatmap_coerce_from_poly(lvp->type, slot_is_oint(lvp), src, &cv);
     buf_puts(out, cv.p ? cv.p : src); free(cv.p); buf_puts(out, ";");
   }
   return 1;
@@ -1819,10 +1826,10 @@ int emit_sum_block_expr(Compiler *c, int id, Buf *b) {
       buf_puts(b, "(sp_float)("); emit_expr(c, argv[0], b); buf_puts(b, ")");
     }
     else if (acct == TY_FLOAT && init_r.kind == RK_BOXED) {
-      buf_puts(b, "sp_poly_to_f_or_nil("); emit_expr(c, argv[0], b); buf_puts(b, ")");
+      buf_puts(b, "sp_poly_opnd_f("); emit_expr(c, argv[0], b); buf_puts(b, ")");
     }
     else if (acct == TY_INT && init_r.kind == RK_BOXED) {
-      buf_puts(b, "sp_poly_to_i_or_nil("); emit_expr(c, argv[0], b); buf_puts(b, ")");
+      buf_puts(b, "sp_poly_opnd_i("); emit_expr(c, argv[0], b); buf_puts(b, ")");
     }
     else {
       emit_expr(c, argv[0], b);
@@ -1832,17 +1839,6 @@ int emit_sum_block_expr(Compiler *c, int id, Buf *b) {
     buf_puts(b, acct == TY_FLOAT ? "0.0" : "0");
   }
   if (acct == TY_FLOAT) buf_printf(b, "; sp_float _t%d = 0.0", tc);
-  /* A block value that can be its slot's nil is tested before it is added
-     (below). The failure is the accumulator's own: `0 + nil` is Integer#+'s
-     until a Float has been added, however the slot is typed, so an Integer
-     start keeps a flag the first Float value clears. */
-  TyKind vt9 = acct == TY_FLOAT && bn > 0 ? comp_ntype(c, bb[bn - 1]) : TY_UNKNOWN;
-  int vnil = (vt9 == TY_INT || vt9 == TY_FLOAT) && nullable_int_value(c, bb[bn - 1]);
-  int tkind = -1;
-  if (vnil && (argc == 0 || comp_ntype(c, argv[0]) == TY_INT)) {
-    tkind = ++g_tmp;
-    buf_printf(b, "; sp_bool _t%d = 1", tkind);
-  }
   if (acct == TY_STRING) buf_printf(b, "; SP_GC_ROOT(_t%d)", tacc);
   buf_printf(b, "; for (sp_int _t%d = 0; _t%d < _t%d; _t%d++) { ", ti, ti, tn, ti);
   /* A 2+-param block over an array of sub-arrays auto-splats each element into
@@ -1892,21 +1888,9 @@ int emit_sum_block_expr(Compiler *c, int id, Buf *b) {
       buf_printf(b, "_t%d = sp_str_concat(_t%d, %s)", tacc, tacc, valb.p ? valb.p : "\"\"");
     }
     else {
-      /* A block value that can be its slot's nil (an element the block hands
-         back from a nil-holding array) is the accumulator's coercion failure;
-         added, a Float's NaN payload rode through the sum and it read back as
-         nil, and an Integer's sentinel became -9.2e18. */
-      if (vnil) {
-        int tv = ++g_tmp;
-        buf_printf(b, "%s _t%d = %s; ", vt9 == TY_INT ? "sp_int" : "sp_float", tv, valb.p ? valb.p : "0.0");
-        if (vt9 == TY_INT) buf_printf(b, "if (SP_UNLIKELY(_t%d == SP_INT_NIL)) ", tv);
-        else buf_printf(b, "if (SP_UNLIKELY(sp_float_is_nil(_t%d))) ", tv);
-        if (tkind >= 0) buf_printf(b, "{ if (_t%d) sp_raise_nil_int_op(0, 0, \"+\"); sp_raise_nil_float_op(0, \"+\"); } ", tkind);
-        else buf_puts(b, "sp_raise_nil_float_op(0, \"+\"); ");
-        if (tkind >= 0 && vt9 == TY_FLOAT) buf_printf(b, "_t%d = 0; ", tkind);
-        free(valb.p); memset(&valb, 0, sizeof valb);
-        buf_printf(&valb, "_t%d", tv);
-      }
+      /* a block value that can be nil arrives plain: the nil raised at its
+         coercion (the accumulator's TypeError), before it could ride through
+         the sum */
       /* KBN step: fold the low-order bits dropped by _tacc + _tx into _tc. */
       buf_printf(b, "sp_float _t%d = %s; sp_float _t%d = _t%d + _t%d; "
                     "if (fabs(_t%d) >= fabs(_t%d)) _t%d += (_t%d - _t%d) + _t%d; "
@@ -2910,10 +2894,12 @@ int emit_inject_expr(Compiler *c, int id, Buf *b) {
         TyKind want = repr_of(c, id).as_ty;
         char accs[24]; snprintf(accs, sizeof accs, "_t%d", tacc);
         /* no initial value and an empty receiver: nil, as the slot's sentinel */
-        if (init_node < 0 && want == TY_INT)
-          buf_printf(b, "sp_poly_as_int_or_nil(%s)", accs);
-        else if (init_node < 0 && want == TY_FLOAT)
-          buf_printf(b, "sp_poly_as_float_or_nil(%s)", accs);
+        if (init_node < 0 && want == TY_INT) {
+          oint_open(c, id, TY_INT, b); buf_printf(b, "sp_poly_as_int_or_nil(%s)", accs); oint_close(c, id, b);
+        }
+        else if (init_node < 0 && want == TY_FLOAT) {
+          oint_open(c, id, TY_FLOAT, b); buf_printf(b, "sp_poly_as_float_or_nil(%s)", accs); oint_close(c, id, b);
+        }
         else if (want != TY_POLY && want != TY_UNKNOWN && is_scalar_ret(want))
           emit_unbox_text(c, want, accs, b);
         else
@@ -3041,8 +3027,8 @@ int emit_inject_expr(Compiler *c, int id, Buf *b) {
   if (init >= 0) { emit_expr(c, init, b); start = 0; }
   else {
     /* CRuby: a seedless fold over an empty collection is nil */
-    const char *mt = (et == TY_INT) ? "SP_INT_NIL"
-                   : (et == TY_FLOAT) ? "sp_float_nil()"
+    const char *mt = (et == TY_INT) ? "0"
+                   : (et == TY_FLOAT) ? "0.0"
                    : (et == TY_STRING) ? "NULL" : default_value_from_compiler(c, et);
     buf_printf(b, "_t%d > 0 ? sp_%sArray_get(_t%d, 0) : %s", tn, k, ta, mt); start = 1;
   }
@@ -3060,8 +3046,23 @@ int emit_inject_expr(Compiler *c, int id, Buf *b) {
   }
   else /* int_bitop or float direct-op */
     buf_printf(b, "_t%d %s sp_%sArray_get(_t%d, _t%d)", tacc, op, k, ta, ti);
-  buf_printf(b, "; _t%d; })", tacc);
+  buf_puts(b, "; ");
+  emit_seedless_fold_answer(c, id, start == 1 && oint_kind(et) ? et : TY_UNKNOWN, tn, tacc, b);
+  buf_puts(b, "; })");
   return 1;
+}
+
+/* The answer of a seedless fold whose accumulator `tacc` (plain, of kind
+   `et` when it is an Integer or Float) was seeded from the first element:
+   an empty receiver (`tn` elements) answers nil, which an oint consumer
+   takes beside the value and a plain one raises on. Any other kind, or a
+   seeded fold (`et` TY_UNKNOWN), answers the accumulator. */
+static void emit_seedless_fold_answer(Compiler *c, int id, TyKind et, int tn, int tacc, Buf *b) {
+  if (!oint_kind(et)) { buf_printf(b, "_t%d", tacc); return; }
+  if (node_is_oint(c, id))
+    buf_printf(b, "(_t%d > 0 ? %s(_t%d) : %s)", tn, oint_of(et), tacc, oint_nil(et));
+  else
+    buf_printf(b, "(_t%d > 0 ? _t%d : %s(%s))", tn, tacc, oint_arg(et), oint_nil(et));
 }
 
 /* reduce/inject with a block { |acc, elem| body } as an expression.
@@ -3074,7 +3075,7 @@ int emit_reduce_block_expr(Compiler *c, int id, Buf *b) {
   if (recv < 0) return 0;
   /* a literally-empty receiver never runs the block: the whole call IS the
      init argument, or nil without one -- rendered in the call's own type
-     (SP_INT_NIL for an int-typed slot, boxed nil for poly) */
+     (an sp_oint / sp_ofloat for a number-typed slot, boxed nil for poly) */
   if (nt_type(nt, recv) && sp_streq(nt_type(nt, recv), "ArrayNode")) {
     int ren = 0; nt_arr(nt, recv, "elements", &ren);
     if (ren == 0) {
@@ -3104,8 +3105,7 @@ int emit_reduce_block_expr(Compiler *c, int id, Buf *b) {
         else if (selfty == TY_POLY) emit_boxed(c, rav[0], b);
         else emit_expr(c, rav[0], b);
       }
-      else if (selfty == TY_INT) buf_puts(b, "SP_INT_NIL");
-      else if (selfty == TY_FLOAT) buf_puts(b, "sp_float_nil()");
+      else if (oint_kind(selfty)) { oint_open(c, id, selfty, b); buf_puts(b, oint_nil(selfty)); oint_close(c, id, b); }
       else buf_puts(b, "sp_box_nil()");
       return 1;
     }
@@ -3309,7 +3309,7 @@ int emit_reduce_block_expr(Compiler *c, int id, Buf *b) {
     start = 1;
   }
   else { buf_printf(b, "sp_%sArray_length(_t%d) > 0 ? sp_%sArray_get(_t%d, 0) : %s; ", k, ta, k, ta,
-                    acc_ty == TY_INT ? "SP_INT_NIL" : acc_ty == TY_FLOAT ? "sp_float_nil()"
+                    acc_ty == TY_INT ? "0" : acc_ty == TY_FLOAT ? "0.0"
                     : acc_ty == TY_STRING ? "NULL"
                     : acc_ty == TY_POLY ? "sp_box_nil()"
                     : (ty_is_array(acc_ty) || ty_is_object(acc_ty)) ? "NULL" : "0"); start = 1; }
@@ -3379,8 +3379,8 @@ int emit_reduce_block_expr(Compiler *c, int id, Buf *b) {
     Repr rbr = repr_of(c, bb[bn - 1]);
     TyKind rbt = rbr.as_ty;
     int rb_boxed = rbr.kind == RK_BOXED;
-    if (rb_boxed && acc_ty == TY_INT) { buf_puts(&tail, "sp_poly_to_i_or_nil("); emit_expr(c, bb[bn - 1], &tail); buf_puts(&tail, ")"); }
-    else if (rb_boxed && acc_ty == TY_FLOAT) { buf_puts(&tail, "sp_poly_to_f_or_nil("); emit_expr(c, bb[bn - 1], &tail); buf_puts(&tail, ")"); }
+    if (rb_boxed && acc_ty == TY_INT) { buf_puts(&tail, "sp_poly_opnd_i("); emit_expr(c, bb[bn - 1], &tail); buf_puts(&tail, ")"); }
+    else if (rb_boxed && acc_ty == TY_FLOAT) { buf_puts(&tail, "sp_poly_opnd_f("); emit_expr(c, bb[bn - 1], &tail); buf_puts(&tail, ")"); }
     else if (rb_boxed && acc_ty == TY_STRING) { buf_puts(&tail, "sp_poly_to_s("); emit_expr(c, bb[bn - 1], &tail); buf_puts(&tail, ")"); }
     else if (rb_boxed && acc_ty == TY_SYMBOL) { buf_puts(&tail, "(sp_sym)("); emit_expr(c, bb[bn - 1], &tail); buf_puts(&tail, ").v.i"); }
     /* `acc + elem` on an array accumulator answers a BOXED array (the concat
@@ -3408,12 +3408,21 @@ int emit_reduce_block_expr(Compiler *c, int id, Buf *b) {
   g_ie_next_var = sv_nxv; g_ie_res_poly = sv_nxp;
   /* the expression must carry the INFERRED type: a poly-typed reduce
      (e.g. a dyn-send body) boxes its scalar accumulator */
+  int seedless_num = start == 1 && oint_kind(acc_ty);   /* an empty receiver answers nil */
   if (repr_of(c, id).kind == RK_BOXED && acc_ty != TY_POLY) {
     char accn[24]; snprintf(accn, sizeof accn, "_t%d", tacc);
     Buf bx; memset(&bx, 0, sizeof bx);
     emit_boxed_text(c, acc_ty, accn, &bx);
-    buf_printf(b, "%s; })", bx.p ? bx.p : accn);
+    if (seedless_num)
+      buf_printf(b, "(sp_%sArray_length(_t%d) > 0 ? %s : sp_box_nil()); })", k, ta, bx.p ? bx.p : accn);
+    else buf_printf(b, "%s; })", bx.p ? bx.p : accn);
     free(bx.p);
+  }
+  else if (seedless_num) {
+    if (node_is_oint(c, id))
+      buf_printf(b, "(sp_%sArray_length(_t%d) > 0 ? %s(_t%d) : %s); })", k, ta, oint_of(acc_ty), tacc, oint_nil(acc_ty));
+    else
+      buf_printf(b, "(sp_%sArray_length(_t%d) > 0 ? _t%d : %s(%s)); })", k, ta, tacc, oint_arg(acc_ty), oint_nil(acc_ty));
   }
   else buf_printf(b, "_t%d; })", tacc);
   if (rlv0) rlv0->type = rpt0;
@@ -3978,7 +3987,8 @@ int emit_each_with_index_terminal(Compiler *c, int id, Buf *b) {
        nil is a value in this slot, not the absence of one. */
     if (bt == TY_VOID) bt = TY_NIL;
     if (bt == TY_UNKNOWN) bt = TY_INT;
-    int vpoly = (bt == TY_POLY || bt == TY_NIL);
+    /* a number that can be nil is carried boxed, so its nil reads falsy */
+    int vpoly = (bt == TY_POLY || bt == TY_NIL || (oint_kind(bt) && bn > 0 && node_has_oint_form(c, bb[bn - 1])));
     int tv = ++g_tmp; char tvb[24]; snprintf(tvb, sizeof tvb, "_t%d", tv);
     emit_indent(g_pre, din);
     if (vpoly) buf_printf(g_pre, "sp_RbVal _t%d = sp_box_nil();\n", tv);
@@ -3987,13 +3997,11 @@ int emit_each_with_index_terminal(Compiler *c, int id, Buf *b) {
     /* Ruby truthiness of the block value: only nil/false are falsy. C
        zero-falsiness ("(_tN)") would wrongly drop a numeric 0 / 0.0 (or an
        empty string), which Ruby keeps -- so mirror emit_cond's per-type test
-       on the temp: a boxed poly goes through sp_poly_truthy, a nilable scalar
-       tests its sentinel, and every other concrete value is always truthy. */
+       on the temp: a boxed poly goes through sp_poly_truthy, and every
+       concrete value (a plain number is never nil) is always truthy. */
     char truth[48];
     if (vpoly)                        snprintf(truth, sizeof truth, "sp_poly_truthy(_t%d)", tv);
     else if (bt == TY_BOOL)           snprintf(truth, sizeof truth, "(_t%d)", tv);
-    else if (bt == TY_INT)            snprintf(truth, sizeof truth, "(_t%d != SP_INT_NIL)", tv);
-    else if (bt == TY_FLOAT)          snprintf(truth, sizeof truth, "(!sp_float_is_nil(_t%d))", tv);
     else if (bt == TY_SYMBOL)         snprintf(truth, sizeof truth, "(_t%d != (sp_sym)-1)", tv);
     else if (comp_ty_value_obj(c, bt)) snprintf(truth, sizeof truth, "1");
     else if (bt == TY_STRING || ty_is_array(bt) || ty_is_hash(bt) || ty_is_object(bt) ||
@@ -4172,23 +4180,15 @@ int emit_sortby_expr(Compiler *c, int id, Buf *b) {
    and `eb` (C texts of type `et`), from the C answer `ans` of type `cmp_ty`, `boxed` when it is a boxed value.
    A nil answer says the two do not compare, which CRuby reports as
    "comparison of A with b failed" (rb_cmpint): a boxed answer is tested by
-   sp_poly_cmp_ans, and an Integer one that can be nil (`a <=> b` of two
-   boxed or Float operands, `cond ? a <=> b : nil`) by its sentinel, the
-   elements boxed only on that path. An answer that is never nil is the sign
-   as it is. */
+   sp_poly_cmp_ans; an Integer answer arrives plain (a nil it could be was
+   raised at its coercion), and is the sign as it is. */
 static void emit_cmp_block_sign(Compiler *c, int tail, TyKind cmp_ty, int boxed, const char *ans,
                                 TyKind et, const char *ea, const char *eb, Buf *out) {
-  int nil_int = !boxed && cmp_ty == TY_INT && tail >= 0 && repr_nil_scalar(c, tail, TY_INT);
-  if (!boxed && !nil_int) { buf_printf(out, "(%s)", ans); return; }
+  (void)tail; (void)cmp_ty;
+  if (!boxed) { buf_printf(out, "(%s)", ans); return; }
   Buf ba; memset(&ba, 0, sizeof ba); emit_boxed_text(c, et, ea, &ba);
   Buf bb; memset(&bb, 0, sizeof bb); emit_boxed_text(c, et, eb, &bb);
-  if (boxed)
-    buf_printf(out, "sp_poly_cmp_ans(%s, %s, %s)", ans, ba.p ? ba.p : "sp_box_nil()", bb.p ? bb.p : "sp_box_nil()");
-  else {
-    int t = ++g_tmp;
-    buf_printf(out, "({ sp_int _t%d = %s; if (_t%d == SP_INT_NIL) sp_poly_cmp_ans(sp_box_nil(), %s, %s); _t%d; })",
-               t, ans, t, ba.p ? ba.p : "sp_box_nil()", bb.p ? bb.p : "sp_box_nil()", t);
-  }
+  buf_printf(out, "sp_poly_cmp_ans(%s, %s, %s)", ans, ba.p ? ba.p : "sp_box_nil()", bb.p ? bb.p : "sp_box_nil()");
   free(ba.p); free(bb.p);
 }
 
@@ -4415,10 +4415,10 @@ int emit_minmax_cmp_expr(Compiler *c, int id, Buf *b) {
   emit_pre_rooted_recv(c, recv, rt, trv);
   emit_indent(g_pre, g_indent); buf_printf(g_pre, "sp_int _t%d = sp_%sArray_length(_t%d);\n", tn, k, trv);
   emit_indent(g_pre, g_indent); emit_ctype(c, et, g_pre);
-  /* An empty comparator reduction returns nil, so use the carrier's nil
-     sentinel rather than the ordinary zero default for scalar elements. */
+  /* An empty comparator reduction returns nil: a number's answer below
+     carries that case beside the value. */
   buf_printf(g_pre, " _t%d = _t%d > 0 ? sp_%sArray_get(_t%d, 0) : %s;\n", tmin, tn, k, trv,
-             et == TY_INT ? "SP_INT_NIL" : et == TY_FLOAT ? "sp_float_nil()" :
+             et == TY_INT ? "0" : et == TY_FLOAT ? "0.0" :
              et == TY_RANGE ? "(sp_Range){0}" : default_value_from_compiler(c, et));
   emit_indent(g_pre, g_indent); emit_ctype(c, et, g_pre); buf_printf(g_pre, " _t%d = _t%d;\n", tmax, tmin);
   emit_indent(g_pre, g_indent); buf_printf(g_pre, "for (sp_int _t%d = 1; _t%d < _t%d; _t%d++) {\n", ti, ti, tn, ti);
@@ -4459,7 +4459,7 @@ int emit_minmax_cmp_expr(Compiler *c, int id, Buf *b) {
   if (lv_p1) lv_p1->type = saved_p1;
   g_indent = save;
   emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n");
-  buf_printf(b, "_t%d", is_min ? tmin : tmax);
+  emit_seedless_fold_answer(c, id, oint_kind(et) ? et : TY_UNKNOWN, tn, is_min ? tmin : tmax, b);
   return 1;
 }
 
@@ -5280,6 +5280,8 @@ int emit_collect_expr(Compiler *c, int id, Buf *b) {
        element was kept. Carry both boxed. */
     { TyKind nxv = block_next_value_ntype(c, nt_ref(c->nt, block, "body"));
       if (nxv != TY_UNKNOWN && nxv != TY_VOID && nxv != TY_NIL && nxv != cty) cty = TY_POLY; }
+    /* a number that can be nil is carried boxed, so its nil reads falsy */
+    if (oint_kind(cty) && node_has_oint_form(c, bb[bn - 1])) cty = TY_POLY;
     int cond_poly = (cty == TY_POLY);
     int tv = ++g_tmp;
     char tvbuf[24]; snprintf(tvbuf, sizeof tvbuf, "_t%d", tv);
@@ -5288,13 +5290,12 @@ int emit_collect_expr(Compiler *c, int id, Buf *b) {
     else { emit_ctype(c, cty, g_pre); buf_printf(g_pre, " _t%d = %s;\n", tv, default_value_from_compiler(c, cty)); }
     emit_block_value_into(c, block, tvbuf, cond_poly, innerIndent);
     emit_indent(g_pre, innerIndent);
-    /* Ruby truthiness: only nil and false are falsy. A nilable int/float reads
-       falsy at its sentinel, but 0 / 0.0 are truthy -- so a block returning
-       `x % 2` must keep the element. A bool keeps C-truthiness (0/1); a pointer
-       value is falsy only when NULL (nil). Mirrors emit_cond. */
+    /* Ruby truthiness: only nil and false are falsy. A plain int/float is
+       never nil, and 0 / 0.0 are truthy -- so a block returning `x % 2` must
+       keep the element. A bool keeps C-truthiness (0/1); a pointer value is
+       falsy only when NULL (nil). Mirrors emit_cond. */
     if (cond_poly)         buf_printf(g_pre, "if (%ssp_poly_truthy(_t%d)) ", is_rej ? "!" : "", tv);
-    else if (cty == TY_INT)   buf_printf(g_pre, "if (%s(_t%d != SP_INT_NIL)) ", is_rej ? "!" : "", tv);
-    else if (cty == TY_FLOAT) buf_printf(g_pre, "if (%s(!sp_float_is_nil(_t%d))) ", is_rej ? "!" : "", tv);
+    else if (cty == TY_INT || cty == TY_FLOAT) buf_printf(g_pre, "if (%s1) ", is_rej ? "!" : "");
     else                   buf_printf(g_pre, "if (%s(_t%d)) ", is_rej ? "!" : "", tv);
     if (autosplat)
       buf_printf(g_pre, "sp_%sArray_push(_t%d, _t%d);\n", rk, tres, te_split);
@@ -5310,7 +5311,7 @@ int emit_collect_expr(Compiler *c, int id, Buf *b) {
   buf_puts(g_pre, "}\n");
   /* the kept (or mapped-to-itself) elements carry the receiver's nils: an
      element read out of an Integer or Float array is typed as a number even
-     where a gap left the sentinel, so its may_nil is handed on whole */
+     where a gap left a nil, so its nil bits are handed on whole */
   if (!range_recv && k && rk && sp_streq(rk, k) && (is_numeric_literal_tag(k))) {
     emit_indent(g_pre, g_indent);
     buf_printf(g_pre, "sp_%sArray_nil_from(_t%d, _t%d);\n", k, tres, trecv);
@@ -5784,7 +5785,7 @@ int emit_find_index_poly_expr(Compiler *c, int id, Buf *b) {
   emit_indent(g_pre, g_indent);
   buf_printf(g_pre, "sp_int _t%d = sp_poly_arr_len_ex(_t%d);\n", tlen, trecv);
   emit_indent(g_pre, g_indent);
-  buf_printf(g_pre, "sp_int _t%d = SP_INT_NIL;\n", tres);
+  buf_printf(g_pre, "sp_oint _t%d = sp_oint_nil();\n", tres);
   emit_indent(g_pre, g_indent);
   if (rev)
     buf_printf(g_pre, "for (sp_int _t%d = _t%d - 1; _t%d >= 0; _t%d--) {\n", ti, tlen, ti, ti);
@@ -5820,15 +5821,15 @@ int emit_find_index_poly_expr(Compiler *c, int id, Buf *b) {
   if (bvt == TY_NIL || bvt == TY_VOID)
     buf_printf(g_pre, "(void)(%s);\n", cb.p ? cb.p : "0");
   else if (bvr.kind == RK_BOXED || bvt == TY_UNKNOWN)
-    buf_printf(g_pre, "if (sp_poly_truthy(%s)) { _t%d = _t%d; break; }\n", cb.p ? cb.p : "0", tres, ti);
+    buf_printf(g_pre, "if (sp_poly_truthy(%s)) { _t%d = sp_oint_of(_t%d); break; }\n", cb.p ? cb.p : "0", tres, ti);
   else if (bvt == TY_BOOL)
-    buf_printf(g_pre, "if (%s) { _t%d = _t%d; break; }\n", cb.p ? cb.p : "0", tres, ti);
+    buf_printf(g_pre, "if (%s) { _t%d = sp_oint_of(_t%d); break; }\n", cb.p ? cb.p : "0", tres, ti);
   else
-    buf_printf(g_pre, "{ (void)(%s); _t%d = _t%d; break; }\n", cb.p ? cb.p : "0", tres, ti);
+    buf_printf(g_pre, "{ (void)(%s); _t%d = sp_oint_of(_t%d); break; }\n", cb.p ? cb.p : "0", tres, ti);
   free(cb.p);
   emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n");
-  if (repr_of(c, id).as_ty == TY_INT) buf_printf(b, "_t%d", tres);
-  else buf_printf(b, "(_t%d == SP_INT_NIL ? sp_box_nil() : sp_box_int(_t%d))", tres, tres);
+  if (repr_of(c, id).as_ty == TY_INT) { oint_open(c, id, TY_INT, b); buf_printf(b, "_t%d", tres); oint_close(c, id, b); }
+  else buf_printf(b, "sp_box_oint(_t%d)", tres);
   return 1;
 }
 
@@ -6891,11 +6892,15 @@ static void emit_arg_or_default_fill(Compiler *c, Scope *m, int idx, int provide
            coerce, else the generated C assigns sp_RbVal to a const char* /
            sp_int / sp_float / sp_<Class>* slot. */
         const char *ptn = c_type_name(pt);
-        /* a literal/derived nil argument into a nullable scalar param carries
-           the type's nil sentinel, exactly like a nil DEFAULT does below --
-           a plain emit rendered nil as 0 and the callee saw an integer (#2438) */
-        if (at == TY_NIL && pt == TY_INT) { buf_puts(out, "((void)("); emit_expr(c, provided, out); buf_puts(out, "), SP_INT_NIL)"); }
-        else if (at == TY_NIL && pt == TY_FLOAT) { buf_puts(out, "((void)("); emit_expr(c, provided, out); buf_puts(out, "), sp_float_nil())"); }
+        /* a literal/derived nil argument into a number param: the slot's
+           oint when it holds its nil beside the value, exactly like a nil
+           DEFAULT does below; a plain slot raises the operand TypeError (a
+           plain emit rendered nil as 0 and the callee saw an integer, #2438) */
+        if (at == TY_NIL && oint_kind(pt)) {
+          buf_puts(out, "((void)("); emit_expr(c, provided, out);
+          if (slot_is_oint(p)) buf_printf(out, "), %s)", oint_nil(pt));
+          else buf_printf(out, "), %s(%s))", oint_arg(pt), oint_nil(pt));
+        }
         else if (at == TY_NIL && pt == TY_STRING) { buf_puts(out, "((void)("); emit_expr(c, provided, out); buf_puts(out, "), NULL)"); }
         else if (at == TY_POLY && pt == TY_STRING) { buf_puts(out, "sp_poly_to_s_or_nil("); emit_expr(c, provided, out); buf_puts(out, ")"); }
         /* An unresolved call typed TY_UNKNOWN whose emitted value is the gate's
@@ -6906,7 +6911,7 @@ static void emit_arg_or_default_fill(Compiler *c, Scope *m, int idx, int provide
         else if (at == TY_UNKNOWN && pt != TY_POLY && pt != TY_UNKNOWN) {
           emit_unresolved_coerced(c, provided, pt, out);
         }
-        else if (at == TY_POLY && pt == TY_FLOAT) { buf_puts(out, "sp_poly_to_f_or_nil("); emit_expr(c, provided, out); buf_puts(out, ")"); }
+        else if (at == TY_POLY && pt == TY_FLOAT) { buf_puts(out, slot_is_oint(p) ? "sp_unbox_ofloat(" : "sp_poly_opnd_f("); emit_expr(c, provided, out); buf_puts(out, ")"); }
         else if (at == TY_POLY && pt == TY_SYMBOL) { buf_puts(out, "(sp_sym)sp_poly_to_i("); emit_expr(c, provided, out); buf_puts(out, ")"); }
         /* the Range value types are boxed behind a pointer: dereference rather
            than assigning the box to the struct slot (#3619) */
@@ -6922,7 +6927,7 @@ static void emit_arg_or_default_fill(Compiler *c, Scope *m, int idx, int provide
            sentinel just above; this is the case where nil-ness is only known at
            run time -- an element of a mixed array, a Hash miss, an untyped call
            (#3465). bool keeps the plain conversion: it has no sentinel. */
-        else if (at == TY_POLY && pt == TY_INT) { buf_puts(out, "sp_poly_to_i_or_nil("); emit_expr(c, provided, out); buf_puts(out, ")"); }
+        else if (at == TY_POLY && pt == TY_INT) { buf_puts(out, slot_is_oint(p) ? "sp_unbox_oint(" : "sp_poly_opnd_i("); emit_expr(c, provided, out); buf_puts(out, ")"); }
         else if (at == TY_POLY && pt == TY_BOOL) { buf_puts(out, "sp_poly_to_i("); emit_expr(c, provided, out); buf_puts(out, ")"); }
         /* poly arg into an object or other pointer-backed param (array, proc,
            ...): unbox the pointer via emit_unbox_text (a nil box has v.p ==
@@ -6948,14 +6953,11 @@ static void emit_arg_or_default_fill(Compiler *c, Scope *m, int idx, int provide
            token (`html_escape(obj.details)` on an unknown receiver): emit_str_expr
            passes a real string through and coerces the token to the slot. */
         else if (pt == TY_STRING) emit_str_expr(c, provided, out);
-        else if (pt == TY_INT && m && idx >= 0 && idx < m->nparams && m->pnames[idx] &&
-                 scope_local(m, m->pnames[idx]) && scope_local(m, m->pnames[idx])->nullable_int &&
-                 int_slot_store_needs_ck(c, provided, TY_INT, 1)) {
-          /* a parameter that can also be nil: -2^63 would arrive as nil */
-          buf_puts(out, "sp_int_slot_ck(");
-          emit_coerce(c, provided, pt, CO_HOLD, "a method argument", out);
-          buf_puts(out, ")");
-        }
+        /* a parameter that holds its nil beside the value takes the
+           argument's oint form */
+        else if (oint_kind(pt) && m && idx >= 0 && idx < m->nparams && m->pnames[idx] &&
+                 slot_is_oint(scope_local(m, m->pnames[idx])))
+          emit_oint_expr(c, provided, pt, out);
         else {
           emit_obj_upcast_prefix(c, pt, at, out);
           emit_coerce(c, provided, pt, CO_HOLD, "a method argument", out);
@@ -7001,9 +7003,10 @@ static void emit_arg_or_default_fill(Compiler *c, Scope *m, int idx, int provide
     else buf_puts(out, pt == TY_RANGE ? "(sp_Range){0}" : default_value_from_compiler(c, pt));
   }
 else if (dty && sp_streq(dty, "NilNode")) {
-    /* nil default: emit the nil sentinel for the type */
-    if (pt == TY_INT)    buf_puts(out, "SP_INT_NIL");
-    else if (pt == TY_FLOAT) buf_puts(out, "sp_float_nil()");
+    /* nil default: the slot's own nil beside the value, or a plain slot's
+       operand TypeError */
+    if (oint_kind(pt) && slot_is_oint(p)) buf_puts(out, oint_nil(pt));
+    else if (oint_kind(pt)) buf_printf(out, "%s(%s)", oint_arg(pt), oint_nil(pt));
     else if (pt == TY_STRING) buf_puts(out, "NULL");
     else buf_puts(out, pt == TY_RANGE ? "(sp_Range){0}" : default_value_from_compiler(c, pt));
   }
@@ -7030,8 +7033,8 @@ else if (dty && sp_streq(dty, "NilNode")) {
     emit_boxed(c, dv, &db);
     const char *dx = db.p ? db.p : "sp_box_nil()";
     switch (pt) {
-    case TY_INT: buf_printf(out, "sp_poly_to_i_or_nil(%s)", dx); break;
-    case TY_FLOAT: buf_printf(out, "sp_poly_to_f_or_nil(%s)", dx); break;
+    case TY_INT: buf_printf(out, "%s(%s)", slot_is_oint(p) ? "sp_unbox_oint" : "sp_poly_opnd_i", dx); break;
+    case TY_FLOAT: buf_printf(out, "%s(%s)", slot_is_oint(p) ? "sp_unbox_ofloat" : "sp_poly_opnd_f", dx); break;
     case TY_STRING: buf_printf(out, "sp_poly_to_s_or_nil(%s)", dx); break;
     case TY_SYMBOL: buf_printf(out, "(sp_sym)sp_poly_to_i(%s)", dx); break;
     case TY_BOOL: buf_printf(out, "sp_poly_to_i(%s)", dx); break;
@@ -7339,16 +7342,14 @@ void emit_rest_pack_kwh(Compiler *c, int from, int pos_argc, const int *argv, in
       if (inner >= 0 && reads_arr) emit_expr(c, inner, &arr);
       else if (inner < 0 && emit_anon_rest_ref(c, argv[i], &arr)) { at = TY_POLY_ARRAY; ar.elem = TY_POLY; }  /* anonymous `*` */
       const char *ap = arr.p ? arr.p : "NULL";
-      Buf snf; memset(&snf, 0, sizeof snf);
-      if (ar.elem == TY_INT || ar.elem == TY_FLOAT) emit_may_nil_text(c, inner, at, "_sa", &snf);
       if (ar.elem == TY_INT)
-        buf_printf(b, " { sp_IntArray *_sa = %s; int _snf = %s; for (sp_int _si = 0; _si < _sa->len; _si++) sp_PolyArray_push(_t%d, %s(_snf, _sa->data[_sa->start+_si])); }",
-                   ap, snf.p, t, typed_elem_box_fn(at));
+        buf_printf(b, " { sp_IntArray *_sa = %s; for (sp_int _si = 0; _si < _sa->len; _si++) sp_PolyArray_push(_t%d, sp_IntArray_box_elem(_sa, _si)); }",
+                   ap, t);
       else if (ar.elem == TY_STRING)
         buf_printf(b, " { sp_StrArray *_sa = %s; for (sp_int _si = 0; _si < _sa->len; _si++) sp_PolyArray_push(_t%d, sp_box_str(_sa->data[_si])); }", ap, t);
       else if (ar.elem == TY_FLOAT)
-        buf_printf(b, " { sp_FloatArray *_sa = %s; int _snf = %s; for (sp_int _si = 0; _si < _sa->len; _si++) sp_PolyArray_push(_t%d, %s(_snf, _sa->data[_si])); }",
-                   ap, snf.p, t, typed_elem_box_fn(at));
+        buf_printf(b, " { sp_FloatArray *_sa = %s; for (sp_int _si = 0; _si < _sa->len; _si++) sp_PolyArray_push(_t%d, sp_FloatArray_box_elem(_sa, _si)); }",
+                   ap, t);
       else if (ar.elem == TY_POLY)
         buf_printf(b, " { sp_PolyArray *_sa = %s; for (sp_int _si = 0; _si < _sa->len; _si++) sp_PolyArray_push(_t%d, _sa->data[_si]); }", ap, t);
       /* a boxed operand is an array only at run time: the splat's lowering
@@ -7371,10 +7372,10 @@ void emit_rest_pack_kwh(Compiler *c, int from, int pos_argc, const int *argv, in
       else { /* scalar splat: single element */
         Buf el; memset(&el, 0, sizeof el);
         emit_boxed(c, inner, &el);
-        /* ... or none, when the scalar is nil: a String's NULL, or the
-           sentinel of an Integer or Float slot that can hold one. `*x` of
-           such a nil went in as one nil element, where CRuby's `*nil` is
-           empty (`r(*x)` gave [nil]) */
+        /* ... or none, when the scalar is nil: a String's NULL, or the nil
+           an Integer or Float slot holds beside its value. `*x` of such a
+           nil went in as one nil element, where CRuby's `*nil` is empty
+           (`r(*x)` gave [nil]) */
         int may_nil = at == TY_STRING ||
                       ((at == TY_INT || at == TY_FLOAT) && call_returns_nullable_int(c, inner));
         if (may_nil)
@@ -7383,7 +7384,7 @@ void emit_rest_pack_kwh(Compiler *c, int from, int pos_argc, const int *argv, in
         else buf_printf(b, " sp_PolyArray_push(_t%d, %s);", t, el.p ? el.p : "sp_box_nil()");
         free(el.p);
       }
-      free(arr.p); free(snf.p);
+      free(arr.p);
     }
 else {
       Buf el; memset(&el, 0, sizeof el);
@@ -7746,8 +7747,8 @@ static int kw_splat_operand_nilable(Compiler *c, int node, TyKind t) {
     }
     default: break;
   }
-  /* the reading emit_boxed boxes a scalar by: its sentinel where the value
-     is nilable */
+  /* the reading emit_boxed boxes a scalar by: its nil beside the value
+     where the value is nilable */
   if (t == TY_INT)
     return call_returns_nullable_int(c, node) || box_nullable_arg(c, node) ||
            nt_kind(c->nt, node) == NK_InstanceVariableReadNode;

@@ -859,12 +859,11 @@ static TyKind an_unpack1_lit_type(const NodeTable *nt, int arg) {
   while (*p >= '0' && *p <= '9') p++;
   if (*p == '*') p++;
   if (*p) return TY_POLY;  /* further directives: not this one's type */
-  /* The 64-bit pair is the exception: `Q` above 2**63-1 is a Bignum, and
-     `q`'s INT64_MIN is the value an sp_int slot spells as nil. An sp_int
-     slot holds neither, so they keep the boxed answer the runtime already
-     hands back -- typed int, the Bignum truncated and the INT64_MIN read
-     back as nil (#4588). The narrower directives all fit. */
-  if (strchr("cCsSlLnNvV", d)) return TY_INT;
+  /* `Q` above 2**63-1 is a Bignum, which an sp_int slot cannot hold, so it
+     keeps the boxed answer the runtime hands back (#4588); `q` and the
+     narrower directives all fit (INT64_MIN included: no pattern of the word
+     is nil). */
+  if (strchr("cCsSlLnNvVq", d)) return TY_INT;
   if (strchr("dDfFeEgG", d)) return TY_FLOAT;
   return TY_POLY;
 }
@@ -1322,7 +1321,16 @@ static int infer_int_shl_overflows(long long base, long long amount) {
   if (base == 0 || amount <= 0) return 0;
   long long r = base;
   for (long long i = 0; i < amount; i++)
-    if (__builtin_mul_overflow(r, 2, &r)) return 1;
+    if (__builtin_mul_overflow(r, 2, &r)) {
+      /* a product that lands exactly on 2**63 (`1 << 63`, `3 << 62`'s does
+         not) has the bit pattern of -2**63, which is an sp_int: in raise
+         mode the runtime helper raises its RangeError, in wrap mode the
+         value is -2**63. Only promote mode keeps the Bignum. */
+      if (!g_promote_mode && amount < 64 && base > 0 &&
+          (unsigned long long)base == (1ULL << (63 - amount)))
+        return 0;
+      return 1;
+    }
   return 0;
 }
 
@@ -3886,7 +3894,7 @@ static int infer_string_recv_call(Compiler *c, int id, const NodeTable *nt, cons
     }
     if (sp_streq(name, "unpack1") && (argc == 1 || argc == 2)) { *out = an_unpack1_lit_type(nt, argv[0]); return 1; }
     /* byteindex/byterindex over a String or Regexp needle -> byte offset or
-       nil (SP_INT_NIL). */
+       nil. */
     if ((sp_streq(name, "byteindex") || sp_streq(name, "byterindex")) &&
         (argc == 1 || argc == 2) &&
         (comp_ntype(c, argv[0]) == TY_STRING || comp_ntype(c, argv[0]) == TY_REGEX))
@@ -9474,7 +9482,7 @@ TyKind infer_type(Compiler *c, int id) {
      the reference objects have NULL, so those keep their concrete type and
      the guard uses that nil (the array trio of #3461 is this same rule).
      The receiver's type does not narrow this. A miss on a specialized
-     container is the element type's C nil -- a NULL string, SP_INT_NIL --
+     container is the element type's C nil -- a NULL string, a nil bit --
      not a poly nil, so `h["zz"]&.empty?` reached the guard with a concrete
      receiver and answered `false` where CRuby answers nil (#4070). `&.` is
      the program saying nil is possible; the answer has to be able to hold
