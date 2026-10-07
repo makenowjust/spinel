@@ -16246,6 +16246,10 @@ void emit_index_op_write(Compiler *c, int id, Buf *b, int indent) {
     /* a Float element that may be nil is the operator's receiver: read with
        its nil and unwrapped (NoMethodError for nil, as `a[i] + x`) */
     if (fnil) snprintf(slot, sizeof slot, "sp_ofloat_val(sp_FloatArray_oget(_t%d, _t%d), \"%s\")", ta, tb, op);
+    /* an Integer element read the long way (one past the end, a gap) is nil
+       for the operator too: `e[3] += 1` is nil + 1 */
+    else if (rt == TY_INT_ARRAY)
+      snprintf(slot, sizeof slot, "sp_oint_val(sp_IntArray_oget(_t%d, _t%d), \"%s\")", ta, tb, op);
     if (rt == TY_STR_ARRAY && (sp_streq(op, "+") || sp_streq(op, "<<"))) {
       /* String slots take String ops only: `+`/`<<` concatenate, `*` repeats
          (String#*). The native fallthrough (`char* << char*`, `char* * int`)
