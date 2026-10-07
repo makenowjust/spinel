@@ -6656,6 +6656,79 @@ static TyKind infer_symbol_call(Compiler *c, int id, const NodeTable *nt, const 
   return TY_UNKNOWN;
 }
 
+/* --int-overflow=promote: an Integer Array's or Range's sum, and its
+   inject / reduce with :+ or :*, can leave the word, and CRuby answers the
+   Bignum. Typed poly (the boxed fold promotes) unless every operand is a
+   constant the program wrote and the exact result fits an sp_int. */
+static int promote_red_const(const NodeTable *nt, int n, long long *v) {
+  return n >= 0 && nt_kind(nt, n) == NK_IntegerNode && infer_const_int_node(nt, n, v);
+}
+static int promote_red_fits(Compiler *c, int recv, int is_mul, int seed, int has_seed) {
+  const NodeTable *nt = c->nt;
+  int rn = an_unparen(nt, recv);
+  __int128 acc = has_seed ? 0 : (is_mul ? 1 : 0);
+  if (has_seed) { long long sv; if (!promote_red_const(nt, seed, &sv)) return 0; acc = sv; }
+  if (rn >= 0 && nt_kind(nt, rn) == NK_ArrayNode) {
+    int en = 0; const int *el = nt_arr(nt, rn, "elements", &en);
+    int first = !has_seed;
+    for (int i = 0; i < en; i++) {
+      long long v; if (!promote_red_const(nt, el[i], &v)) return 0;
+      if (first) { acc = v; first = 0; }
+      else acc = is_mul ? acc * v : acc + v;
+      if (acc > (__int128)INTPTR_MAX || acc < (__int128)INTPTR_MIN) return 0;
+    }
+    return 1;
+  }
+  if (rn >= 0 && nt_kind(nt, rn) == NK_RangeNode && !is_mul) {
+    long long lo, hi;
+    if (!promote_red_const(nt, nt_ref(nt, rn, "left"), &lo) ||
+        !promote_red_const(nt, nt_ref(nt, rn, "right"), &hi)) return 0;
+    if (nt_int(nt, rn, "flags", 0) & 4) hi--;
+    if (hi >= lo) acc += ((__int128)lo + hi) * ((__int128)hi - lo + 1) / 2;
+    return acc <= (__int128)INTPTR_MAX && acc >= (__int128)INTPTR_MIN;
+  }
+  return 0;
+}
+static int infer_promote_reducer(Compiler *c, int id, TyKind rt, TyKind *out) {
+  if (!g_promote_mode || (rt != TY_INT_ARRAY && rt != TY_RANGE)) return 0;
+  const NodeTable *nt = c->nt;
+  const char *name = nt_str(nt, id, "name");
+  if (!name || nt_ref(nt, id, "block") >= 0) return 0;
+  int recv = nt_ref(nt, id, "receiver");
+  int args = nt_ref(nt, id, "arguments"), argc = 0;
+  const int *argv = args >= 0 ? nt_arr(nt, args, "arguments", &argc) : NULL;
+  int is_mul = 0, seed = -1;
+  /* a Range's count / size: 2**63 + 1 for (-2**63..0) */
+  if (rt == TY_RANGE && argc == 0 && (sp_streq(name, "count") || sp_streq(name, "size"))) {
+    int rn = an_unparen(nt, recv);
+    long long lo, hi;
+    if (rn >= 0 && nt_kind(nt, rn) == NK_RangeNode &&
+        promote_red_const(nt, nt_ref(nt, rn, "left"), &lo) &&
+        promote_red_const(nt, nt_ref(nt, rn, "right"), &hi) &&
+        (__int128)hi - lo + 1 <= (__int128)INTPTR_MAX) return 0;
+    /* an endless literal's count is Infinity, typed by the Range rules */
+    if (rn >= 0 && nt_kind(nt, rn) == NK_RangeNode &&
+        (nt_ref(nt, rn, "left") < 0 || nt_ref(nt, rn, "right") < 0)) return 0;
+    *out = TY_POLY;
+    return 1;
+  }
+  if (sp_streq(name, "sum")) {
+    if (argc > 1) return 0;
+    if (argc == 1) { if (infer_type(c, argv[0]) != TY_INT) return 0; seed = argv[0]; }
+  }
+  else if (is_reduce_alias(name)) {
+    if (argc < 1 || argc > 2 || nt_kind(nt, argv[argc - 1]) != NK_SymbolNode) return 0;
+    const char *op = nt_str(nt, argv[argc - 1], "value");
+    if (!op || !(sp_streq(op, "+") || sp_streq(op, "*"))) return 0;
+    is_mul = sp_streq(op, "*");
+    if (argc == 2) { if (infer_type(c, argv[0]) != TY_INT) return 0; seed = argv[0]; }
+  }
+  else return 0;
+  if (promote_red_fits(c, recv, is_mul, seed, seed >= 0)) return 0;
+  *out = TY_POLY;
+  return 1;
+}
+
 static TyKind infer_call_inner(Compiler *c, int id) {
   /* the call is inferred afresh: only the row this pass answers with counts */
   /* the builtin-only re-derivation (an_builtin_answer) asks what the call
@@ -7102,6 +7175,8 @@ static TyKind infer_call_inner(Compiler *c, int id) {
       if (ymi >= 0 && c->scopes[ymi].yields) return TY_POLY;
     }
   }
+  /* promote: a reducer whose total can leave the word (above) */
+  { TyKind pr; if (infer_promote_reducer(c, id, rt, &pr)) return pr; }
   /* Range receivers (analyze_infer_recv.c). */
   { TyKind rr; if (infer_range_call(c, id, rt, &rr)) return rr; }
   /* A Range Enumerable method spinel serves by materializing to an int array:

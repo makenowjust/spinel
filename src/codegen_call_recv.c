@@ -1645,6 +1645,14 @@ static int emit_kind_array_iter_call(Compiler *c, int id, Buf *b, const NodeTabl
   }
   if (sp_streq(name, "sum") && argc == 1 && nt_ref(nt, id, "block") < 0) {
     TyKind init_t = fold_seed_ntype(c, argv[0]);
+    /* promote typed the sum poly: the total can leave the word */
+    if (rt == TY_INT_ARRAY && init_t == TY_INT && repr_of(c, id).kind == RK_BOXED) {
+      int tf = ++g_tmp;
+      buf_printf(b, "({ sp_RbVal _t%d = ", tf); emit_boxed(c, argv[0], b);
+      buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); sp_IntArray_fold_v(", tf); emit_expr(c, recv, b);
+      buf_printf(b, ", _t%d, 0); })", tf);
+      { *out = 1; return 1; }
+    }
     /* a String initial value concatenates (["a","b"].sum("") == "ab") */
     if (rt == TY_STR_ARRAY && init_t == TY_STRING) {
       Buf rss;
@@ -11274,8 +11282,17 @@ int emit_range_call(Compiler *c, int id, Buf *b) {
         }
         else buf_printf(b, "(_t%d.last)", t);
       }
+      else if (is_size_or_count(name) && repr_of(c, id).kind == RK_BOXED)   /* promote: past the word */
+        buf_printf(b, "sp_range_count_v(_t%d, %d)", t, sp_streq(name, "size"));
       else if (is_size_or_count(name))
         buf_printf(b, "sp_range_count_open(_t%d, %d)", t, sp_streq(name, "size"));
+      /* promote typed the sum poly: the total can leave the word */
+      else if (sp_streq(name, "sum") && argc <= 1 && repr_of(c, id).kind == RK_BOXED &&
+               (argc == 0 || comp_ntype(c, argv[0]) == TY_INT)) {
+        buf_printf(b, "sp_IntArray_fold_v(sp_range_to_ia(_t%d), ", t);
+        if (argc == 1) emit_boxed(c, argv[0], b); else buf_puts(b, "sp_box_int(0)");
+        buf_puts(b, ", 0)");
+      }
       else if (sp_streq(name, "sum") && argc == 1 && comp_ntype(c, argv[0]) == TY_FLOAT) {
         buf_puts(b, "(("); emit_expr(c, argv[0], b);
         buf_printf(b, ") + (double)sp_IntArray_sum(sp_range_to_ia(_t%d), 0))", t);

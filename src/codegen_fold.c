@@ -2958,6 +2958,21 @@ int emit_inject_expr(Compiler *c, int id, Buf *b) {
      operator folds through sp_poly_binop_sym -- the static arms below only
      serve the concretely-typed element kinds. This is what lets an array of
      lambdas fold with reduce(:>>) (#2880). */
+  /* --int-overflow=promote typed an Integer sum / product poly: the boxed
+     fold carries a total past the word as the Bignum (sp_IntArray_fold_v) */
+  if (g_promote_mode && op && et == TY_INT && k && sp_streq(k, "Int") &&
+      (sp_streq(op, "+") || sp_streq(op, "*")) && repr_of(c, id).kind == RK_BOXED &&
+      (init < 0 || comp_ntype(c, init) == TY_INT)) {
+    int mul = sp_streq(op, "*");
+    if (init >= 0) {
+      int tf = ++g_tmp;
+      buf_printf(b, "({ sp_RbVal _t%d = ", tf); emit_boxed(c, init, b);
+      buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); sp_IntArray_fold_v(", tf); emit_expr(c, recv, b);
+      buf_printf(b, ", _t%d, %d); })", tf, mul);
+    }
+    else { buf_puts(b, "sp_IntArray_fold1_v("); emit_expr(c, recv, b); buf_printf(b, ", %d)", mul); }
+    return 1;
+  }
   int runtime_sym = (!op && block < 0 && argc >= 1 &&
                      (comp_ntype(c, argv[argc - 1]) == TY_SYMBOL ||
                       repr_of(c, argv[argc - 1]).kind == RK_BOXED));
