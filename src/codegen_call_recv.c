@@ -1478,13 +1478,15 @@ static int emit_kind_array_iter_call(Compiler *c, int id, Buf *b, const NodeTabl
       IterStep st; emit_iter_step_open(c, block, 0, g_indent + 1, &st);
       int sv = g_indent; g_indent++;
       Buf vb; memset(&vb, 0, sizeof vb); emit_iter_step_tail(c, &st, &vb); g_indent = sv;
-      emit_indent(g_pre, g_indent + 1);
       { const char *msfx = nil_store_sfx(c, k, bb[bn - 1]);
-        buf_printf(g_pre, "sp_%sArray_set%s(_t%d, _t%d, ", k, msfx, trecv, ti);
+        /* the value first: what it hoists lands in g_pre ahead of the store */
+        Buf sv2; memset(&sv2, 0, sizeof sv2);
         /* the _nilable store takes the block value with its nil */
-        if (msfx[0]) emit_oint_expr(c, bb[bn - 1], et, g_pre);
-        else emit_typed_sink_text(c, bb[bn - 1], et, vb.p ? vb.p : "0", g_pre);
-        buf_puts(g_pre, ");\n"); }
+        if (msfx[0]) emit_oint_expr(c, bb[bn - 1], et, &sv2);
+        else emit_typed_sink_text(c, bb[bn - 1], et, vb.p ? vb.p : "0", &sv2);
+        emit_indent(g_pre, g_indent + 1);
+        buf_printf(g_pre, "sp_%sArray_set%s(_t%d, _t%d, %s);\n", k, msfx, trecv, ti, sv2.p ? sv2.p : "0");
+        free(sv2.p); }
       free(vb.p);
       emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n");
       if (mlv) mlv->type = msaved;

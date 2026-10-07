@@ -4036,7 +4036,9 @@ int emit_each_with_index_terminal(Compiler *c, int id, Buf *b) {
     emit_indent(g_pre, din);
     if (bp_slot_oint(c, block, vo, k)) buf_printf(g_pre, "%s lv_%s = sp_%sArray_oget(_t%d, _t%d);\n", oint_ctype(elem_t), rename_local(vo), k, ta, ti);
     else { emit_ctype(c, elem_t, g_pre); buf_printf(g_pre, " lv_%s = sp_%sArray_get(_t%d, _t%d);\n", rename_local(vo), k, ta, ti); }
-    emit_indent(g_pre, din); buf_printf(g_pre, "sp_int lv_%s = _t%d;\n", rename_local(io), tidx);
+    /* the index into a slot that holds its nil (a promote-widened param) */
+    if (bp_slot_oint(c, block, io, "Int")) { emit_indent(g_pre, din); buf_printf(g_pre, "sp_oint lv_%s = sp_oint_of(_t%d);\n", rename_local(io), tidx); }
+    else { emit_indent(g_pre, din); buf_printf(g_pre, "sp_int lv_%s = _t%d;\n", rename_local(io), tidx); }
   }
 
   int body = block >= 0 ? nt_ref(nt, block, "body") : -1;
