@@ -27502,6 +27502,10 @@ int nullable_int_value(Compiler *c, int v) {
   }
   if (nt_kind(nt, v) == NK_LocalVariableOrWriteNode)
     return nullable_int_value(c, nt_ref(nt, v, "value"));
+  /* `@x &&= v` answers @x's nil when it is nil (unset); `@x ||= v` answers v
+     where it assigns */
+  if (nt_kind(nt, v) == NK_InstanceVariableAndWriteNode) return 1;
+  if (nt_kind(nt, v) == NK_InstanceVariableOrWriteNode) return nullable_int_value(c, nt_ref(nt, v, "value"));
   /* `h[k] &&= v` answers the element when it is nil (a miss); `h[k] ||= v`
      answers v when it assigns */
   if (nt_kind(nt, v) == NK_IndexAndWriteNode) return 1;

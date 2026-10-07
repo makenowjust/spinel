@@ -4938,6 +4938,8 @@ static void emit_expr_node(Compiler *c, int id, Buf *b) {
     if (g_pre) {
       emit_stmt(c, id, g_pre, g_indent);
       buf_puts(b, ref);
+      /* an oint static answers its value: an `op=` that returned is never nil */
+      { int ocid, oiv; if (ivar_node_slot(c, id, &ocid, &oiv) == 2 && civ_is_oint(c, ocid, oiv)) buf_puts(b, ".v"); }
     }
     else {
       TyKind vt = TY_UNKNOWN;

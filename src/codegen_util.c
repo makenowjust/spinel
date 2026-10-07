@@ -5489,14 +5489,21 @@ int g_result_oint = 0;
 void emit_ivar_orw_value(Compiler *c, int id, TyKind t, const char *ref, int v, int is_or, Buf *b) {
   int cid, iv, k = oint_kind(t) ? ivar_node_slot(c, id, &cid, &iv) : 0;
   char pfx[128], nt[300];
+  /* the expression's form (node_is_oint): the field beside its bit, or the
+     oint static, where the value can be nil; the value otherwise */
+  int want_o = oint_kind(t) && node_is_oint(c, id);
   if (k == 1 && ivar_has_nilbit(c, cid, iv)) {
     snprintf(pfx, sizeof pfx, "%s%s", g_self, g_self_deref);
     ivar_nilbit_test(c, cid, iv, pfx, nt, sizeof nt);
+    if (want_o) buf_puts(b, "({ (void)(");
     emit_slot_orw_value_o(c, t, ref, v, is_or, nt, cid, iv, pfx, b);
+    if (want_o) buf_printf(b, "); ((%s){ %s, %s != 0 }); })", oint_ctype(t), ref, nt);
   }
   else if (k == 2 && civ_is_oint(c, cid, iv)) {
     snprintf(nt, sizeof nt, "%s.nil", ref);
+    if (!want_o) buf_puts(b, "(");
     emit_slot_orw_value_o(c, t, ref, v, is_or, nt, -1, -1, NULL, b);
+    if (!want_o) buf_puts(b, ").v");
   }
   else emit_slot_orw_value(c, t, ref, v, is_or, b);
 }
