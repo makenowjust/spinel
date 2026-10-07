@@ -8732,7 +8732,8 @@ void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar) 
       /* an empty else clause is still the begin's value: nil */
       TyKind bt = repr_of(c, id).as_ty;
       emit_indent(b, indent + 1);
-      buf_printf(b, "%s = %s;\n", resultvar, bt == TY_POLY ? "sp_box_nil()" : default_value_from_compiler(c, bt));
+      if (oint_kind(bt) && !cond_res_oint(c, id, bt)) refuse_nil_store(c, id, bt, "an empty else clause");
+      buf_printf(b, "%s = %s;\n", resultvar, bt == TY_POLY ? "sp_box_nil()" : res_zero(c, bt, cond_res_oint(c, id, bt)));
     }
     emit_indent(b, indent); buf_puts(b, "}\n");
     emit_indent(b, indent); buf_puts(b, "else {\n");
@@ -8902,7 +8903,8 @@ void emit_begin(Compiler *c, int id, Buf *b, int indent, const char *resultvar) 
     /* an empty else clause is still the begin's value: nil */
     TyKind bt = repr_of(c, id).as_ty;
     emit_indent(b, indent + 1);
-    buf_printf(b, "%s = %s;\n", resultvar, bt == TY_POLY ? "sp_box_nil()" : default_value_from_compiler(c, bt));
+    if (oint_kind(bt) && !cond_res_oint(c, id, bt)) refuse_nil_store(c, id, bt, "an empty else clause");
+    buf_printf(b, "%s = %s;\n", resultvar, bt == TY_POLY ? "sp_box_nil()" : res_zero(c, bt, cond_res_oint(c, id, bt)));
   }
 
   if (ensure_stmts >= 0) emit_stmts(c, ensure_stmts, b, indent + 1);

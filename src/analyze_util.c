@@ -1697,6 +1697,28 @@ TyKind yield_value_type(Compiler *c, int mi) {
    first concrete one: the caller ORs the results, and a single nilable block
    anywhere is enough to make the slot nilable. Writes at most `max` ids and
    returns how many. */
+/* With yield_block_tails_next set, a literal block's `next v` (and a bare
+   `next`) is one of its values too: the NextNode ids follow its tail (the
+   nested blocks', lambdas', defs' and loops' own `next` excluded). Only the
+   nil question asks for them (nullable_int_value). */
+int yield_block_tails_next = 0;
+static int ybt_collect_next(const NodeTable *nt, int id, int *out, int max, int depth) {
+  if (id < 0 || max <= 0 || depth > 200) return 0;
+  NodeKind k = nt_kind(nt, id);
+  if (k == NK_NextNode) { out[0] = id; return 1; }
+  if (k == NK_DefNode || k == NK_ClassNode || k == NK_ModuleNode || k == NK_WhileNode ||
+      k == NK_UntilNode || k == NK_LambdaNode || k == NK_ForNode || k == NK_BlockNode) return 0;
+  int n = 0;
+  int nr = nt_num_refs(nt, id);
+  for (int i = 0; i < nr && n < max; i++) n += ybt_collect_next(nt, nt_ref_at(nt, id, i), out + n, max - n, depth + 1);
+  int na = nt_num_arrs(nt, id);
+  for (int i = 0; i < na && n < max; i++) {
+    int an = 0; const int *ids = nt_arr_at(nt, id, i, &an);
+    for (int j = 0; j < an && n < max; j++) n += ybt_collect_next(nt, ids[j], out + n, max - n, depth + 1);
+  }
+  return n;
+}
+
 int yield_block_tails(Compiler *c, int mi, int *out, int max) {
   if (max <= 0) return 0;
   for (int i = 0; i < g_yvt_depth; i++)
@@ -1733,6 +1755,7 @@ int yield_block_tails(Compiler *c, int mi, int *out, int max) {
     int bb = nt_ref(nt, blk, "body");
     int bn = 0; const int *bd = bb >= 0 ? nt_arr(nt, bb, "body", &bn) : NULL;
     if (bd && bn > 0) out[n++] = bd[bn - 1];
+    if (yield_block_tails_next && bb >= 0 && n < max) n += ybt_collect_next(nt, bb, out + n, max - n, 0);
   }
   g_yvt_depth--;
   return n;

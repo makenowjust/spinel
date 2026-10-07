@@ -27228,10 +27228,18 @@ void nn_inference_round(Compiler *c) {
   nn_epoch++;
 }
 
+extern int yield_block_tails_next;   /* analyze_util.c */
 int nullable_int_value(Compiler *c, int v) {
   const NodeTable *nt = c->nt;
   if (v < 0) return 0;
   if (nt_kind(nt, v) == NK_NilNode) return 1;
+  /* `next v` hands the block's caller v; a bare `next`, nil */
+  if (nt_kind(nt, v) == NK_NextNode) {
+    int na = nt_ref(nt, v, "arguments");
+    int nn = 0; const int *nav = na >= 0 ? nt_arr(nt, na, "arguments", &nn) : NULL;
+    if (nn == 0) return 1;
+    return nav && nn == 1 ? nullable_int_value(c, nav[0]) : 0;
+  }
   /* `return e` / `(e)` carry their inner value unchanged; a block tail can be
      either, and so can a method's own tail statement. A bare `return` answers
      nil, which an Integer or Float return carries as the sentinel. */
@@ -27325,8 +27333,11 @@ int nullable_int_value(Compiler *c, int v) {
     Scope *ys = comp_scope_of(c, v);
     int ymi = ys ? (int)(ys - c->scopes) : -1;
     if (ymi < 0) return 0;
-    int tails[32];
+    int tails[64];
+    /* a block's `next v` is one of its values too */
+    int sv_ybn = yield_block_tails_next; yield_block_tails_next = 1;
     int n = yield_block_tails(c, ymi, tails, (int)(sizeof tails / sizeof tails[0]));
+    yield_block_tails_next = sv_ybn;
     /* no literal block in sight (an escaping &blk called through the proc ABI):
        its value arrives boxed, so nothing unboxed carries a sentinel */
     for (int i = 0; i < n; i++) if (nullable_int_value(c, tails[i])) return 1;

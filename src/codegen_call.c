@@ -2328,6 +2328,19 @@ void emit_rat_coerce(Compiler *c, int node, Buf *b) {
   emit_coerce(c, node, TY_INT, CO_HOLD, "a Rational's numerator", b);
   buf_puts(b, "), 1)");
 }
+/* A Complex component from `node`: its Float value. A number that can be
+   nil is Ruby's TypeError at run time (`Complex(nil, 1)`), not a store the
+   program is refused for. */
+static void emit_complex_component(Compiler *c, int node, Buf *b) {
+  if (oint_kind(comp_ntype(c, node)) && node_may_be_nil(c, node)) {
+    int t = ++g_tmp;
+    buf_printf(b, "({ sp_ofloat _t%d = ", t); emit_oint_expr(c, node, TY_FLOAT, b);
+    buf_printf(b, "; if (_t%d.nil) sp_raise_cls(\"TypeError\", \"can't convert nil into Complex\"); _t%d.v; })", t, t);
+    return;
+  }
+  emit_coerce(c, node, TY_FLOAT, CO_HOLD, "a Complex component", b);
+}
+
 /* Emit a node as an sp_Complex: a Complex stays as-is, an Integer/Float
    becomes re+0i (a Float operand marks the real component Float-classed). */
 void emit_complex_coerce(Compiler *c, int node, Buf *b) {
@@ -2347,12 +2360,7 @@ void emit_complex_coerce(Compiler *c, int node, Buf *b) {
     return;
   }
   buf_puts(b, "((sp_Complex){(sp_float)(");
-  /* a number that can be nil is Ruby's TypeError at run time, not a store
-     the program is refused for */
-  if (oint_kind(comp_ntype(c, node)) && node_may_be_nil(c, node)) {
-    buf_puts(b, "sp_ofloat_arg("); emit_oint_expr(c, node, TY_FLOAT, b); buf_puts(b, ")");
-  }
-  else emit_coerce(c, node, TY_FLOAT, CO_HOLD, "a Complex component", b);
+  emit_complex_component(c, node, b);
   buf_printf(b, "), 0, %d})", comp_ntype(c, node) == TY_FLOAT ? 1 : 0);
 }
 
@@ -3966,11 +3974,11 @@ static int emit_complex_rational_call(Compiler *c, int id, Buf *b) {
     buf_puts(b, "((sp_Complex){");
     buf_puts(b, re_rat ? "sp_rational_to_f(" : "(sp_float)(");
     if (re_rat) emit_expr(c, argv[0], b);
-    else emit_coerce(c, argv[0], TY_FLOAT, CO_HOLD, "a Complex component", b);
+    else emit_complex_component(c, argv[0], b);
     buf_puts(b, "), ");
     buf_puts(b, im_rat ? "sp_rational_to_f(" : "(sp_float)(");
     if (argc >= 2 && im_rat) emit_expr(c, argv[1], b);
-    else if (argc >= 2) emit_coerce(c, argv[1], TY_FLOAT, CO_HOLD, "a Complex component", b);
+    else if (argc >= 2) emit_complex_component(c, argv[1], b);
     else buf_puts(b, "0");
     buf_printf(b, "), %d})", fl);
     return 1;
@@ -4155,9 +4163,9 @@ static int emit_complex_rational_call(Compiler *c, int id, Buf *b) {
       int fl = (comp_ntype(c, argv[0]) == TY_FLOAT ? 1 : 0) |
                (argc == 2 && comp_ntype(c, argv[1]) == TY_FLOAT ? 2 : 0);
       buf_puts(b, "((sp_Complex){(sp_float)(");
-      emit_coerce(c, argv[0], TY_FLOAT, CO_HOLD, "a Complex component", b);
+      emit_complex_component(c, argv[0], b);
       buf_puts(b, "), (sp_float)(");
-      if (argc == 2) emit_coerce(c, argv[1], TY_FLOAT, CO_HOLD, "a Complex component", b);
+      if (argc == 2) emit_complex_component(c, argv[1], b);
       else buf_puts(b, "0");
       buf_printf(b, "), %d})", fl);
       return 1;
@@ -23422,7 +23430,11 @@ void emit_bound_method_call(Compiler *c, int id, int recv, int target, Buf *b) {
   /* the fn cast: the target's own C signature */
   Buf cast; memset(&cast, 0, sizeof cast);
   buf_puts(&cast, "((");
+  /* a target answering an oint (method_ret_is_oint) is called as one, and
+     the call answers it (node_is_oint answers the target's form here) */
+  int ret_o = !is_void && oint_kind(tret) && method_ret_is_oint(tm);
   if (is_void) buf_puts(&cast, "void");
+  else if (ret_o) buf_puts(&cast, oint_ctype(tret));
   else emit_ctype(c, tret, &cast);
   buf_puts(&cast, " (*)(");
   int np = 0;
@@ -23442,7 +23454,7 @@ void emit_bound_method_call(Compiler *c, int id, int recv, int target, Buf *b) {
   /* A pointer's NULL is cast to it: after the comma it is no null pointer
      constant, and the conditional took void * (`m.call(5).v` did not build).
      A by-value object's zero is its struct's (default_value_from_compiler). */
-  const char *dflt = default_value_from_compiler(c, is_void ? repr_of(c, id).as_ty : tret);
+  const char *dflt = ret_o ? oint_nil(tret) : default_value_from_compiler(c, is_void ? repr_of(c, id).as_ty : tret);
   Buf dcast; memset(&dcast, 0, sizeof dcast);
   if (!is_void && sp_streq(dflt, "NULL")) {
     buf_puts(&dcast, "("); emit_ctype(c, tret, &dcast); buf_puts(&dcast, ")");
