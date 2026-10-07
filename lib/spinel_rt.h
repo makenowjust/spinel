@@ -10285,6 +10285,11 @@ static sp_RbVal sp_poly_index_poly(sp_RbVal recv, sp_RbVal idx) {
   /* nil is no array index: CRuby's TypeError, not element 0 */
   if (idx.tag == SP_TAG_NIL && recv.tag == SP_TAG_OBJ && sp_poly_is_array_kind(recv.cls_id))
     sp_raise_cls("TypeError", "no implicit conversion from nil to integer");
+  if (recv.tag == SP_TAG_OBJ && sp_poly_is_array_kind(recv.cls_id) && idx.tag != SP_TAG_BIGINT &&
+      !(idx.tag == SP_TAG_OBJ && idx.cls_id == SP_BUILTIN_RANGE)) {
+    if (idx.tag == SP_TAG_FLT) return sp_poly_arr_get_hash(recv, (sp_int)idx.v.f);
+    sp_raise_cls("TypeError", sp_sprintf("no implicit conversion of %s into Integer", sp_poly_class_name(idx)));
+  }
   /* heterogeneous-key hash: any key kind (incl. Method) looks up directly. */
   if (recv.tag == SP_TAG_OBJ && recv.cls_id == SP_BUILTIN_POLY_POLY_HASH)
     return sp_PolyPolyHash_get((sp_PolyPolyHash *)recv.v.p, idx);
@@ -11240,14 +11245,20 @@ static sp_RbVal sp_poly_str_aset_key(sp_RbVal v, sp_RbVal key, sp_RbVal val) {
   if (re) out = sp_str_splice_re((mrb_regexp_pattern *)key.v.p, cur, rep);
   else if (key.tag == SP_TAG_INT) out = sp_str_splice_at(cur, key.v.i, 1, rep, 0);
   else if (rng) {
-    /* the bounds as the typed `s[r] = v` reads them: a beginless one 0, an
-       endless one the last index */
-    sp_Range r = *(sp_Range *)key.v.p;
+    /* the span as CRuby's rb_range_beg_len reads it: a Float end through
+       to_int, a beginless one from 0, an endless one (noend) to the
+       end without the e - a + 1 that overflows, and a begin outside the
+       String a RangeError naming the Range */
+    sp_Range r0 = *(sp_Range *)key.v.p, r = sp_range_ix(r0);
     sp_int len = (sp_int)sp_str_length(cur);
     sp_int a = r.nobeg ? 0 : (r.first < 0 ? r.first + len : r.first);
-    int oe = r.noend;
-    sp_int e = oe ? len - 1 : (r.last < 0 ? r.last + len : r.last);
-    sp_int n = e - a + ((r.excl && !oe) ? 0 : 1);
+    if (a < 0 || a > len) sp_raise_cls("RangeError", sp_sprintf("%s out of range", sp_range_str(r0)));
+    sp_int n;
+    if (r.noend) n = len - a;
+    else {
+      sp_int e = r.last < 0 ? r.last + len : r.last;
+      n = e - a + (r.excl ? 0 : 1);
+    }
     out = sp_str_splice_at(cur, a, n < 0 ? 0 : n, rep, 1);
   }
   else {

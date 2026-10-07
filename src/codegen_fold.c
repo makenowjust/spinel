@@ -143,8 +143,13 @@ static int emit_blk_proc_tmp(Compiler *c, int blk_node) {
    NULL. A callee that yields takes none. */
 void emit_callee_block_arg(Compiler *c, int id, const Scope *m, Buf *b) {
   if (!m || !m->blk_param || !m->blk_param[0] || m->yields) return;
-  int blk_node = resolve_forwarded_block(c, nt_ref(c->nt, id, "block"));
+  int blk0 = nt_ref(c->nt, id, "block");
+  int blk_node = resolve_forwarded_block(c, blk0);
+  /* a `&blk` / `&` forwarding the block of an inlined body that was handed
+     a real proc (`fw(&pr)`) passes that proc; it passed NULL */
+  const char *fwd = forwarded_real_proc(blk0, blk_node);
   if (blk_node >= 0) buf_printf(b, ", _t%d", emit_blk_proc_tmp(c, blk_node));
+  else if (fwd) buf_printf(b, ", %s", fwd);
   else buf_puts(b, ", NULL");
 }
 
@@ -190,12 +195,17 @@ void emit_method_call(Compiler *c, int id, Buf *b) {
        resolve it to the caller's inlined block. Without this, forwarding `&blk`
        into a callee that keeps a real proc param (e.g. one that nil-checks the
        block) is rejected as "proc literal without a block". */
-    int blk_node = resolve_forwarded_block(c, nt_ref(nt, id, "block"));
+    int blk0 = nt_ref(nt, id, "block");
+    int blk_node = resolve_forwarded_block(c, blk0);
+    /* ...or, inside a body inlined for a caller that handed it a real
+       proc (`fw(&pr)`), to that proc: it passed NULL */
+    const char *fwd = forwarded_real_proc(blk0, blk_node);
     int wrote_args = m->nparams > 0;
     if (wrote_args) buf_puts(b, ", ");
     if (blk_node >= 0) {
       buf_printf(b, "_t%d", emit_blk_proc_tmp(c, blk_node));
     }
+    else if (fwd) buf_puts(b, fwd);
     else {
       buf_puts(b, "NULL");
     }
@@ -11480,7 +11490,9 @@ else {
            parameter nothing reassigns is held by the parameter's own root:
            Interp#visit passed its env on through a pushed and popped root at
            every recursive call. */
-        int held = provided >= 0 && repr_of(c, provided).as_ty == att && read_of_fixed_param(c, provided);
+        int held = (att == TY_POLY || needs_root(att)) &&
+                   provided >= 0 && repr_of(c, provided).as_ty == att &&
+                   read_of_fixed_param(c, provided);
         if (held) {}
         else if (att == TY_POLY) { emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT_RBVAL(_t%d);\n", atmp[k]); }
         else if (needs_root(att)) { emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", atmp[k]); }

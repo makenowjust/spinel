@@ -6743,7 +6743,16 @@ static void emit_poly_arg_temp(Compiler *c, int node, TyKind ty, int boxed, int 
   Buf val; memset(&val, 0, sizeof val);
   Buf *sv_pre = g_pre;
   if (ran && subtree_has_side_effect(c, node)) g_pre = &pre;
+  /* a handle parameter filled by a node marked to hand out the handle whose
+     own emitter may answer the plain String (`+""`, `"".dup`, an interpolation:
+     the mark only asks for it, #7833): the value is taken as the handle, or
+     wrapped in a fresh one */
+  int as_handle = !boxed && ty == TY_STRBUF && c->strbuf_box[node] &&
+                  nt_kind(c->nt, node) != NK_LocalVariableReadNode &&
+                  nt_kind(c->nt, node) != NK_InstanceVariableReadNode;
+  if (as_handle) buf_puts(&val, "SP_AS_STRING_HANDLE(");
   if (boxed) emit_boxed(c, node, &val); else emit_expr(c, node, &val);
+  if (as_handle) buf_puts(&val, ")");
   g_pre = sv_pre;
   if (pre.p) buf_puts(b, pre.p);
   if (boxed) buf_puts(b, "sp_RbVal"); else emit_ctype(c, ty, b);
@@ -7849,7 +7858,7 @@ static int emit_poly_method_dispatch(Compiler *c, int id, Buf *b) {
       /* Root the receiver temp across the arms, as the zero-arg dispatch does:
          an arm's callee may allocate and collect the otherwise-unreferenced
          receiver out from under itself (#3476). */
-      buf_printf(b, "({ sp_RbVal _t%d = ", tv); emit_expr(c, recv, b);
+      buf_printf(b, "({ sp_RbVal _t%d = ", tv); emit_poly_str_aset_recv(c, recv, &ps, argv, b);
       buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); ", tv);
       emit_poly_vis_precheck(c, id, tv, b);
       /* something with an effect has run: a later argument's prelude is held
@@ -14795,9 +14804,13 @@ int class_value_responds(Compiler *c, int tv, const char *qm, Buf *b) {
    otherwise the call's literal block (if any) is lowered here. */
 void emit_cmethod_block_arg(Compiler *c, int id, Scope *cm, int blk_tmp, Buf *b) {
   if (!cm->blk_param || !cm->blk_param[0] || cm->yields) return;
-  int blk_node = resolve_forwarded_block(c, nt_ref(c->nt, id, "block"));
+  int blk0 = nt_ref(c->nt, id, "block");
+  int blk_node = resolve_forwarded_block(c, blk0);
   if (cm->nparams > 0 || cmethod_takes_self_cls(c, (int)(cm - c->scopes))) buf_puts(b, ", ");
-  if (blk_node < 0) { buf_puts(b, "NULL"); return; }
+  /* a forwarded block inside a body inlined for a caller that handed it a
+     real proc (`fw(&pr)`) is that proc (forwarded_real_proc) */
+  const char *fwd = forwarded_real_proc(blk0, blk_node);
+  if (blk_node < 0) { buf_puts(b, fwd ? fwd : "NULL"); return; }
   /* `inner(child, &block)` from a REAL function (not a yield-inline splice):
      the caller's &blk is a live sp_Proc* local -- pass it through instead of
      lowering (a BlockArgumentNode is not a proc literal). An anonymous `&`

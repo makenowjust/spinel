@@ -2614,12 +2614,21 @@ static int cond_operand_testable(Compiler *c, int v) {
   TyKind vt = comp_ntype(c, v);
   return v >= 0 && vt != TY_UNKNOWN && vt != TY_VOID;
 }
+static int cond_is_andor(const NodeTable *nt, int n) {
+  NodeKind k = nt_kind(nt, an_unparen(nt, n));
+  return k == NK_AndNode || k == NK_OrNode;
+}
 static int emit_cond_andor(Compiler *c, int id, TyKind t, Buf *b) {
   const NodeTable *nt = c->nt;
   NodeKind k = nt_kind(nt, id);
   if ((k != NK_AndNode && k != NK_OrNode) || t == TY_BOOL) return 0;
   int l = nt_ref(nt, id, "left"), r = nt_ref(nt, id, "right");
   if (!cond_operand_testable(c, l) || !cond_operand_testable(c, r)) return 0;
+  /* two boxed operands, neither itself a chain: the value form builds no box,
+     and it stays the C the chain had */
+  if (t == TY_POLY && comp_ntype(c, l) == TY_POLY && comp_ntype(c, r) == TY_POLY &&
+      !cond_is_andor(nt, l) && !cond_is_andor(nt, r))
+    return 0;
   /* the right operand's prelude (a rooted temp it hoists) runs inside the
      short circuit, after the left and only when Ruby evaluates the right,
      as the value form keeps it (#1773) */
@@ -4633,12 +4642,26 @@ static const char *pm_target_name(const NodeTable *nt, int pat) {
   return NULL;
 }
 
-static void emit_pattern_bind(Compiler *c, int id, const char *lnm, TyKind pt, int t, int indent, Buf *b) {
+/* A local bound to the whole subject (`in t`, `in String => t`) that is
+   the shared String handle (--share-strings: the share facts join it with
+   the subject) takes the subject's own handle when the subject is a
+   variable that holds it, so a change through the local is the subject's;
+   any other String subject is a new one, which a fresh handle wraps. */
+static void emit_pattern_bind_handle(Compiler *c, int subj, int t, Buf *b) {
+  NodeKind sk = subj >= 0 ? nt_kind(c->nt, subj) : NK_NONE;
+  int var = sk == NK_LocalVariableReadNode || sk == NK_InstanceVariableReadNode ||
+            sk == NK_GlobalVariableReadNode;
+  if (var && emit_handle_var_ref(c, subj, b)) return;
+  buf_printf(b, "sp_String_new_shared(_t%d)", t);
+}
+
+static void emit_pattern_bind(Compiler *c, int id, int subj, const char *lnm, TyKind pt, int t, int indent, Buf *b) {
   if (!lnm) return;
   emit_indent(b, indent);
   buf_printf(b, "lv_%s = ", rename_local(lnm));
   LocalVar *plv = scope_local(comp_scope_of(c, id), lnm);
   if (plv && plv->type == TY_POLY && pt != TY_POLY && pt != TY_UNKNOWN) emit_boxed_tmp(c, pt, t, b);
+  else if (plv && pt == TY_STRING && repr_of_slot(c, plv).handle) emit_pattern_bind_handle(c, subj, t, b);
   else buf_printf(b, "_t%d", t);
   buf_puts(b, ";\n");
 }
@@ -5138,7 +5161,7 @@ void emit_case_match(Compiler *c, int id, Buf *b, int indent, int tail, int valu
 
     if (sp_streq(pty, "LocalVariableTargetNode")) {
       const char *lnm = nt_str(nt, pat, "name");
-      emit_pattern_bind(c, id, lnm, pt, t, body_indent, b);
+      emit_pattern_bind(c, id, pred, lnm, pt, t, body_indent, b);
     }
     else if (sp_streq(pty, "IfNode")) {
       guard = nt_ref(nt, pat, "predicate");
@@ -5150,7 +5173,7 @@ void emit_case_match(Compiler *c, int id, Buf *b, int indent, int tail, int valu
           const char *bty = nt_type(nt, body[k]);
           if (bty && sp_streq(bty, "LocalVariableTargetNode")) {
             const char *lnm = nt_str(nt, body[k], "name");
-            emit_pattern_bind(c, id, lnm, pt, t, body_indent, b);
+            emit_pattern_bind(c, id, pred, lnm, pt, t, body_indent, b);
           }
         }
       }
@@ -5160,7 +5183,7 @@ void emit_case_match(Compiler *c, int id, Buf *b, int indent, int tail, int valu
       if (tgt >= 0 && nt_type(nt, tgt) &&
           sp_streq(nt_type(nt, tgt), "LocalVariableTargetNode")) {
         const char *lnm = nt_str(nt, tgt, "name");
-        emit_pattern_bind(c, id, lnm, pt, t, body_indent, b);
+        emit_pattern_bind(c, id, pred, lnm, pt, t, body_indent, b);
       }
       int val = nt_ref(nt, pat, "value");
       if (val >= 0 && nt_type(nt, val) && sp_streq(nt_type(nt, val), "ArrayPatternNode"))

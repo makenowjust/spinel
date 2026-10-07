@@ -616,7 +616,7 @@ int emit_call_poly_io_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
             /* a buffer that is also appended to is a mutable String handle:
                replace its contents, where assigning the bytes to the handle
                did not compile (#7314) */
-            if (sbp && strbuf_slot_ref(c, argv[1], hr, sizeof hr)) buf_printf(b, "; sp_String_replace(%s, _t%d)", hr, tsp);
+            if (sbp && strbuf_slot_ref(c, argv[1], hr, sizeof hr)) buf_printf(b, "; sp_String_set_read_bytes(%s, _t%d)", hr, tsp);
             else if (sbp) buf_printf(b, "; lv_%s = _t%d", rename_local(sbp), tsp); }
             buf_printf(b, "; _t%d", tsp);
           }
@@ -953,7 +953,16 @@ int emit_call_io_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const ch
         buf_printf(b, "sp_sock_setsockopt(%s, ", r);
         emit_int_expr(c, argv[0], b); buf_puts(b, ", ");
         emit_int_expr(c, argv[1], b); buf_puts(b, ", ");
-        emit_int_expr(c, argv[2], b); buf_puts(b, ")");
+        /* the value is an Integer, true/false (1/0) or the option's packed
+           bytes, as CRuby takes it; only an Integer converts directly */
+        TyKind vty = comp_ntype(c, argv[2]);
+        if (vty == TY_INT) emit_int_expr(c, argv[2], b);
+        else {
+          buf_puts(b, "sp_sock_optval(");
+          emit_boxed(c, argv[2], b);
+          buf_puts(b, ")");
+        }
+        buf_puts(b, ")");
         free(rb.p); return 1;
       }
       if (sp_streq(name, "getsockopt") && argc == 2) {
@@ -1068,7 +1077,7 @@ int emit_call_io_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const ch
         int tob = ++g_tmp;
         if (ob >= 0) {
           char hr[1024];
-          if (strbuf_slot_ref(c, ob, hr, sizeof hr)) snprintf(obset, sizeof obset, "sp_String_replace(%s, _t%d); ", hr, tob);
+          if (strbuf_slot_ref(c, ob, hr, sizeof hr)) snprintf(obset, sizeof obset, "sp_String_set_read_bytes(%s, _t%d); ", hr, tob);
           else snprintf(obset, sizeof obset, "lv_%s = _t%d; ", rename_local(nt_str(nt, ob, "name")), tob);
         }
         if (no_exc8) {
@@ -1136,7 +1145,7 @@ int emit_call_io_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const ch
           /* a buffer that is also appended to is a mutable String handle:
              replace its contents, where assigning the bytes to the handle
              did not compile (#7314) */
-          if (sbn && strbuf_slot_ref(c, argv[1], hr, sizeof hr)) buf_printf(b, "; sp_String_replace(%s, _t%d)", hr, tsr);
+          if (sbn && strbuf_slot_ref(c, argv[1], hr, sizeof hr)) buf_printf(b, "; sp_String_set_read_bytes(%s, _t%d)", hr, tsr);
           else if (sbn) buf_printf(b, "; lv_%s = _t%d", rename_local(sbn), tsr); }
         buf_printf(b, "; _t%d; })", tsr);
       }
