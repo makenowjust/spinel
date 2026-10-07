@@ -4114,7 +4114,7 @@ int emit_tap_then_expr(Compiler *c, int id, Buf *b) {
 
   /* a then result temp is declared outside the (optional) shadow block so the
      block value escapes it. */
-  int tres = 0; TyKind rett = TY_VOID;
+  int tres = 0, tres_o = 0; TyKind rett = TY_VOID;
   if (is_then) {
     rett = repr_of(c, id).as_ty;
     /* A body that always `break`s completes normally nowhere, so it publishes
@@ -4125,8 +4125,12 @@ int emit_tap_then_expr(Compiler *c, int id, Buf *b) {
        type has no C slot either -- emit_ctype spells it `void` (#4028). */
     if (rett == TY_VOID || rett == TY_UNKNOWN || rett == TY_NIL) rett = TY_POLY;
     tres = ++g_tmp;
-    emit_indent(g_pre, g_indent); emit_ctype(c, rett, g_pre);
-    buf_printf(g_pre, " _t%d = %s;\n", tres, default_value_from_compiler(c, rett));
+    /* a number the block can answer nil for (a `next`, a nil tail): the
+       slot is its oint, the substrate stores that form (g_bv_dest_oint) */
+    tres_o = oint_kind(rett) && node_is_oint(c, id);
+    emit_indent(g_pre, g_indent);
+    if (tres_o) buf_puts(g_pre, oint_ctype(rett)); else emit_ctype(c, rett, g_pre);
+    buf_printf(g_pre, " _t%d = %s;\n", tres, tres_o ? oint_nil(rett) : default_value_from_compiler(c, rett));
     if (needs_root(rett)) { emit_indent(g_pre, g_indent); emit_gc_root_tmp(c, rett, tres, g_pre); buf_puts(g_pre, "\n"); }
   }
 
@@ -4198,6 +4202,7 @@ int emit_tap_then_expr(Compiler *c, int id, Buf *b) {
     Repr tailr = repr_of(c, bb[bn - 1]);
     TyKind tailt = tailr.as_ty;
     g_bv_dest_ty = (rett == TY_POLY_ARRAY && tailr.elem != TY_POLY && array_to_poly_fn(tailt)) ? rett : TY_UNKNOWN;
+    if (tres_o) g_bv_dest_oint = 1;
     emit_block_value_into(c, block, destbuf, rett == TY_POLY, din);
   }
   else {
