@@ -7772,7 +7772,8 @@ static int int_arms_round_divide(Compiler *c, int id, Buf *b, const NodeTable *n
   /* promote typed the pair poly: the quotient can be the Bignum 2**63 */
   else if (sp_streq(name, "divmod") && argc == 1 && repr_of(c, id).as_ty == TY_POLY_ARRAY &&
            comp_ntype(c, argv[0]) == TY_INT) {
-    buf_printf(b, "sp_poly_divmod(sp_box_int(%s), ", r); emit_boxed(c, argv[0], b); buf_puts(b, ")");
+    /* the pair as the slot holds it: an Array, not its box */
+    buf_printf(b, "sp_poly_to_poly_array(sp_poly_divmod(sp_box_int(%s), ", r); emit_boxed(c, argv[0], b); buf_puts(b, "))");
   }
   /* a divisor known only at run time: the pair Numeric#divmod makes for its
      kind (a Rational's is exact, sp_rat_mod_v). It was read as an Integer,
