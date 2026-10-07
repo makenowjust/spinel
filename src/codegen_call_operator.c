@@ -1160,8 +1160,14 @@ int emit_call_operator_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
          the common `-x` keeps its tight spelling (#4008). */
       Buf ub; memset(&ub, 0, sizeof ub); emit_expr(c, recv, &ub);
       const char *ut = ub.p ? ub.p : "";
+      /* +@ is the receiver itself: a value that can be nil passes through
+         as its oint where the call's consumer takes one (unwrapped, nil's
+         TypeError, otherwise) */
+      if (name[0] == '+' && (rt == TY_FLOAT || rt == TY_INT) && node_has_oint_form(c, recv)) {
+        oint_open(c, id, rt, b); emit_oint_expr(c, recv, rt, b); oint_close(c, id, b);
+      }
       /* a nullable Integer or Float slot's nil has no -@ */
-      if (name[0] == '-' && (rt == TY_FLOAT || rt == TY_INT) && cmp_operand_may_be_nil(c, recv)) {
+      else if (name[0] == '-' && (rt == TY_FLOAT || rt == TY_INT) && cmp_operand_may_be_nil(c, recv)) {
         buf_printf(b, "(%c", name[0]); emit_scalar_operand_op(c, recv, name, b); buf_puts(b, ")");
       }
       else buf_printf(b, "(%c%s%s)", name[0], ut[0] == name[0] ? " " : "", ut);

@@ -3513,6 +3513,10 @@ sp_bool sp_range_include(sp_Range *r, sp_int x){SP_GC_ROOT(r);
   }
   /* a Float end: an Integer is in it when the walk reaches it */
   if (r->fe) return x >= r->first && (r->excl ? x < r->last : x <= r->last);
+  /* a plain (step 1) range compares x against its bounds directly: its
+     count overflows the word for a span past 2**63 ((-2**63..0) has
+     2**63 + 1 members), and the empty-range test read that as empty */
+  if (r->step == 0 || r->step == 1) return x >= r->first && (r->excl ? x < r->last : x <= r->last);
   if(sp_range_count(*r)<=0)return FALSE;
   sp_oint lo=sp_range_min_v(*r),hi=sp_range_max_v(*r);
   return !lo.nil && !hi.nil && lo.v<=x && x<=hi.v;

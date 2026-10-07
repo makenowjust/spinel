@@ -2722,6 +2722,36 @@ static sp_RbVal sp_poly_sub(sp_RbVal a, sp_RbVal b) { /* Two plain numbers are w
   if (a.tag == SP_TAG_OBJ && sp_poly_is_array_kind(a.cls_id) && b.tag == SP_TAG_OBJ && sp_poly_is_array_kind(b.cls_id)) { SP_GC_ROOT_RBVAL(a); SP_GC_ROOT_RBVAL(b); sp_PolyArray *pa = sp_poly_to_poly_array(a); SP_GC_ROOT(pa); sp_PolyArray *pb = sp_poly_to_poly_array(b); SP_GC_ROOT(pb); return sp_box_poly_array(sp_PolyArray_difference(pa, pb)); }
   return sp_poly_binop_bad("-", a, b); }
 static sp_RbVal sp_poly_mul(sp_RbVal a, sp_RbVal b) { /* Two plain numbers are what a boxed arithmetic loop actually holds, and the tower checks below cannot match either tag: answer them first rather than after eight of them (#3984). */ if (a.tag == SP_TAG_FLT && b.tag == SP_TAG_FLT) return sp_box_float(a.v.f * b.v.f); if (a.tag == SP_TAG_INT && b.tag == SP_TAG_INT) return SP_POLY_INT_OP(mul, a.v.i, b.v.i); if (a.tag == SP_TAG_FLT && b.tag == SP_TAG_INT) return sp_box_float(a.v.f * (sp_float)b.v.i); if (a.tag == SP_TAG_INT && b.tag == SP_TAG_FLT) return sp_box_float((sp_float)a.v.i * b.v.f); /* a user object on either side belongs to the binop hook and the coerce protocol, not to the tower branches below -- those match on the RECEIVER kind and would convert the object to a number of that kind */ if (SP_UNLIKELY(sp_poly_is_user_obj(a) || sp_poly_is_user_obj(b))) return sp_poly_binop_bad("*", a, b); /* A shared-mutable string handle behaves as its live string VALUE for every non-mutating operator, so it has to become one BEFORE the rules below read its kind -- reached as a handle it is neither a String nor a number, and the guard reported a missing method for an operator String has. */ if (SP_UNLIKELY(sp_poly_is_strbuf(a) || sp_poly_is_strbuf(b))) return sp_poly_mul(sp_poly_strbuf_deref(a), sp_poly_strbuf_deref(b)); if (SP_UNLIKELY(sp_poly_tower_mismatch(a, b))) return sp_poly_binop_bad("*", a, b); if ((a.tag == SP_TAG_OBJ && a.cls_id == SP_BUILTIN_COMPLEX) || (b.tag == SP_TAG_OBJ && b.cls_id == SP_BUILTIN_COMPLEX)) return sp_box_complex(sp_complex_mul(sp_poly_as_complex(a), sp_poly_as_complex(b))); if ((sp_poly_is_brat(a) || sp_poly_is_brat(b))) { if (a.tag == SP_TAG_FLT || b.tag == SP_TAG_FLT) return sp_box_float(sp_poly_to_f(a) * sp_poly_to_f(b)); return sp_brat_mul_poly(a, b); } if ((sp_poly_is_rational(a) || sp_poly_is_rational(b)) && a.tag != SP_TAG_FLT && b.tag != SP_TAG_FLT) return sp_box_rational(sp_rational_mul(sp_poly_as_rational(a), sp_poly_as_rational(b))); if ((sp_poly_is_rational(a) || sp_poly_is_rational(b)) && (a.tag == SP_TAG_FLT || b.tag == SP_TAG_FLT)) return sp_box_float(sp_poly_to_f_with_rational(a) * sp_poly_to_f_with_rational(b)); if (a.tag == SP_TAG_BIGINT || b.tag == SP_TAG_BIGINT) { if (a.tag == SP_TAG_FLT || b.tag == SP_TAG_FLT) return sp_box_float(sp_poly_to_f(a) * sp_poly_to_f(b)); return sp_box_bigint(sp_bigint_mul(sp_poly_as_bigint(a), sp_poly_as_bigint(b))); } if (a.tag == SP_TAG_INT && b.tag == SP_TAG_INT) return SP_POLY_INT_OP(mul, a.v.i, b.v.i); if (a.tag == SP_TAG_FLT && b.tag == SP_TAG_FLT) return sp_box_float(a.v.f * b.v.f); if (a.tag == SP_TAG_INT && b.tag == SP_TAG_FLT) return sp_box_float((sp_float)a.v.i * b.v.f); if (a.tag == SP_TAG_FLT && b.tag == SP_TAG_INT) return sp_box_float(a.v.f * (sp_float)b.v.i); if (a.tag == SP_TAG_STR && b.tag == SP_TAG_INT) return a.v.s ? sp_box_str(sp_str_repeat(a.v.s, b.v.i)) : a; /* String#*; NULL is the empty string */ /* Array#*: an Integer repeats, a String joins (#4834). A boxed Array fell to the bad-operand report, which read as the argument failing to convert into an Array. */ if (a.tag == SP_TAG_OBJ && sp_poly_is_array_kind(a.cls_id)) { if (b.tag == SP_TAG_STR) return sp_box_str(sp_poly_join(a, b.v.s ? b.v.s : sp_str_empty)); if (b.tag == SP_TAG_INT) return sp_box_poly_array(sp_poly_array_repeat(a, b.v.i)); } return sp_poly_binop_bad("*", a, b); }
+
+/* An Integer array's sum (mul 0) or product (mul 1) folded boxed from acc:
+   each step through the mode's checked operation, so --int-overflow=promote
+   carries a total past the word as the Bignum, as CRuby does; raise mode
+   raises and wrap wraps. A nil element reaches the operator's own raise. */
+static SP_UNUSED sp_RbVal sp_IntArray_fold_v(sp_IntArray *a, sp_RbVal acc, int mul) {
+  SP_GC_ROOT(a); SP_GC_ROOT_RBVAL(acc);
+  for (sp_int i = 0; a && i < a->len; i++) {
+    if (SP_UNLIKELY(sp_IntArray_elem_nil(a, i))) { acc = mul ? sp_poly_mul(acc, sp_box_nil()) : sp_poly_add(acc, sp_box_nil()); continue; }
+    sp_int x = a->data[a->start + i];
+    if (acc.tag == SP_TAG_INT) acc = mul ? SP_POLY_INT_OP(mul, acc.v.i, x) : SP_POLY_INT_OP(add, acc.v.i, x);
+    else acc = mul ? sp_poly_mul(acc, sp_box_int(x)) : sp_poly_add(acc, sp_box_int(x));
+  }
+  return acc;
+}
+/* the same without a seed (inject / reduce with only the operator): the
+   first element starts the fold, and an empty array answers nil */
+static SP_UNUSED sp_RbVal sp_IntArray_fold1_v(sp_IntArray *a, int mul) {
+  if (!a || a->len == 0) return sp_box_nil();
+  SP_GC_ROOT(a);
+  sp_RbVal acc = sp_IntArray_box_elem(a, 0);
+  SP_GC_ROOT_RBVAL(acc);
+  for (sp_int i = 1; i < a->len; i++) {
+    if (SP_UNLIKELY(sp_IntArray_elem_nil(a, i))) { acc = mul ? sp_poly_mul(acc, sp_box_nil()) : sp_poly_add(acc, sp_box_nil()); continue; }
+    sp_int x = a->data[a->start + i];
+    if (acc.tag == SP_TAG_INT) acc = mul ? SP_POLY_INT_OP(mul, acc.v.i, x) : SP_POLY_INT_OP(add, acc.v.i, x);
+    else acc = mul ? sp_poly_mul(acc, sp_box_int(x)) : sp_poly_add(acc, sp_box_int(x));
+  }
+  return acc;
+}
 static SP_NOINLINE sp_int sp_poly_to_i_cold(sp_RbVal v);
 /* Int and float are what an unboxed integer slot is fed in a hot loop; every
    other kind -- bigint, a numeric string, a Rational, a Time -- goes out of
@@ -3611,6 +3641,27 @@ static SP_UNUSED sp_int sp_range_count_open(sp_Range r, int is_size) {
     sp_raise_cls("NotImplementedError", is_size ? "Range#size of an endless Range is Infinity, which spinel answers only for a range literal"
                                                  : "Range#count of a beginless or endless Range is Infinity, which spinel answers only for a range literal");
   return sp_range_count(r);
+}
+/* The same count boxed, for --int-overflow=promote: (-2**63..0).count is
+   2**63 + 1, past the word, and CRuby answers the Bignum. Computed in 128
+   bits; a count that fits is the Integer. */
+static SP_UNUSED sp_RbVal sp_range_count_v(sp_Range r, int is_size) {
+  if (r.nobeg && is_size) sp_raise_cls("TypeError", "can't iterate from NilClass");
+  if (r.nobeg || r.noend)
+    sp_raise_cls("NotImplementedError", is_size ? "Range#size of an endless Range is Infinity, which spinel answers only for a range literal"
+                                                 : "Range#count of a beginless or endless Range is Infinity, which spinel answers only for a range literal");
+  __int128 s = sp_range_step(r);
+  __int128 lastv = r.excl ? ((__int128)r.last - (s > 0 ? 1 : -1)) : (__int128)r.last;
+  __int128 n = (lastv - (__int128)r.first) / s + 1;
+  if (n < 0) n = 0;
+  if (n <= (__int128)INTPTR_MAX) return sp_box_int((sp_int)n);
+  sp_Bigint *acc = sp_bigint_new_int(0); SP_GC_ROOT(acc);
+  while (n > 0) {
+    __int128 part = n > (__int128)INTPTR_MAX ? (__int128)INTPTR_MAX : n;
+    acc = sp_bigint_add(acc, sp_bigint_new_int((int64_t)part));
+    n -= part;
+  }
+  return sp_box_bigint(acc);
 }
 /* A boxed Float Range's readers, as the typed ones answer: an Integer end
    (the literal 1.5..5) reads back as one, an open side raises or is nil. */

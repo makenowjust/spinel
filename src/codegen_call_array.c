@@ -832,6 +832,11 @@ int emit_op_array_sum0(Compiler *c, const BopCtx *x, Buf *b) {
   const char *k = array_kind(rt);
   int block = nt_ref(nt, id, "block");
   (void)name; (void)a0; (void)k; (void)block; (void)argv;
+  /* promote typed an Integer sum poly: the total can leave the word */
+  if (rt == TY_INT_ARRAY && argc == 0 && block < 0 && repr_of(c, id).kind == RK_BOXED) {
+    buf_puts(b, "sp_IntArray_fold_v("); emit_expr(c, recv, b); buf_puts(b, ", sp_box_int(0), 0)");
+    return 1;
+  }
   if (rt == TY_POLY_ARRAY) {
     if (rt == TY_POLY_ARRAY && sp_streq(name, "sum") && argc == 0 && nt_ref(nt, id, "block") < 0) {
       /* fold via sp_poly_add so a Float (or Rational/Bignum) element promotes
