@@ -3899,7 +3899,8 @@ int emit_pm_cond(Compiler *c, int pat, int t, TyKind pt, Buf *b) {
        nil too, as in the is_a? fold. A String slot holds nil as NULL. */
     if ((t == g_pm_sentinel_t || pt == TY_STRING) && !is_object_root(cn2) &&
         (yes > 0 || sp_streq(cn2, "NilClass"))) {
-      char ref[24]; snprintf(ref, sizeof ref, "_o%d", t);   /* the subject's oint (emit_case_match) */
+      /* the sentinel subject's oint (emit_case_match); a String subject is its pointer */
+      char ref[24]; snprintf(ref, sizeof ref, t == g_pm_sentinel_t ? "_o%d" : "_t%d", t);
       if (!sp_streq(cn2, "NilClass")) emit_slot_truthy(pt, ref, b);
       else { buf_puts(b, "!"); emit_slot_truthy(pt, ref, b); }
       return 1;
@@ -8127,9 +8128,13 @@ void emit_return(Compiler *c, int id, Buf *b, int indent) {
     }
     int tr = ++g_tmp;
     TyKind r0 = ret_arg_ntype(c, a[0]);
-    buf_puts(b, "{ "); emit_ctype(c, g_ret_type == TY_UNKNOWN ? TY_INT : g_ret_type, b);
+    buf_puts(b, "{ ");
+    /* a method answering an oint returns the value with its nil */
+    if (g_ret_oint && oint_kind(g_ret_type)) buf_puts(b, oint_ctype(g_ret_type));
+    else emit_ctype(c, g_ret_type == TY_UNKNOWN ? TY_INT : g_ret_type, b);
     buf_printf(b, " _t%d = ", tr);
-    if (g_ret_type == TY_POLY && r0 != TY_POLY) emit_boxed(c, a[0], b);
+    if (g_ret_oint && oint_kind(g_ret_type)) emit_oint_expr(c, a[0], g_ret_type, b);
+    else if (g_ret_type == TY_POLY && r0 != TY_POLY) emit_boxed(c, a[0], b);
         else if (emit_ret_hash_widen_conv(c, g_ret_type, r0, a[0], b)) { }
         else if (emit_ret_poly_array_conv(c, g_ret_type, r0, a[0], b)) { }
     else if (tail_needs_unbox(r0, g_ret_type)) emit_unbox_node(c, g_ret_type, a[0], b);

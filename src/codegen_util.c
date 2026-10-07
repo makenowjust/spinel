@@ -5080,12 +5080,9 @@ int node_is_oint(Compiler *c, int node) {
   case NK_GlobalVariableReadNode:
     return nullable_int_value(c, node);
   case NK_InstanceVariableWriteNode:
-  case NK_InstanceVariableOrWriteNode:
-  case NK_InstanceVariableAndWriteNode:
-  case NK_InstanceVariableOperatorWriteNode:
-    /* `@x = v` (`||=`, `&&=`, `op=`) as an expression answers the slot it
-       wrote: its oint where the field carries a nil bit (or the static is
-       an oint) */
+    /* `@x = v` as an expression answers the slot it wrote: its oint where
+       the field carries a nil bit (or the static is an oint); the `||=` /
+       `&&=` / `op=` value forms answer by the analysis (default) */
     return ivar_read_slot_is_oint(c, node);
   case NK_GlobalVariableWriteNode:
   case NK_GlobalVariableOrWriteNode:
@@ -5093,7 +5090,8 @@ int node_is_oint(Compiler *c, int node) {
   case NK_GlobalVariableOperatorWriteNode: {
     /* a global's write answers its static: the oint where that is one */
     const char *gn = nt_str(nt, node, "name");
-    LocalVar *g = gn ? comp_gvar(c, gn) : NULL;
+    const char *grn = gn && gn[0] == '$' ? comp_resolve_gvar(c, gn + 1) : gn;
+    LocalVar *g = grn ? comp_gvar(c, grn) : NULL;
     return g && gvar_is_oint(c, g);
   }
   case NK_ClassVariableWriteNode:

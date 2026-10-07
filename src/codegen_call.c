@@ -264,6 +264,8 @@ int emit_ctor_yield_inline(Compiler *c, int id, int ci, Buf *b) {
              c->classes[ci].c_name, ctor_init_proc_form(c, ci) >= 0 ? "_noinit" : "");
   for (int i = 0; i < m->nparams; i++) {
     LocalVar *p = scope_local(m, m->pnames[i]);
+    /* a parameter slot holding its nil is declared as the oint */
+    if (p && oint_kind(p->type) && slot_is_oint(p)) { buf_puts(b, i ? ", " : ""); buf_puts(b, oint_nil(p->type)); continue; }
     buf_puts(b, i ? ", (" : "(");
     emit_ctype(c, (p && p->type != TY_UNKNOWN) ? p->type : TY_POLY, b);
     buf_puts(b, "){0}");
