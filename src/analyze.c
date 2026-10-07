@@ -25569,7 +25569,10 @@ static int nullable_elem_mutation(Compiler *c, int call, int depth) {
     if (an == 3 || rng) {
       if (!index_write_in_range(c, call, rng ? range_write_start(c, av[0]) : av[0])) return 1;
     }
-    else if (an == 2 && index_write_gaps(c, call, av[0])) return 1;
+    /* a single-index write past the end nil-fills the gap before it: any
+       index the in-range proof does not cover can leave one (nil out of
+       band: a plain slot reading the gap would see a silent 0) */
+    else if (an == 2 && (index_write_gaps(c, call, av[0]) || !index_write_in_range(c, call, av[0]))) return 1;
     if (ty_is_array(infer_type(c, av[an - 1]))) return nullable_int_elem_expr(c, av[an - 1], depth + 1);
     from = an - 1;
   }
