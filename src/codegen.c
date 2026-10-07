@@ -2025,9 +2025,17 @@ static int is_heavy_brk_call(Compiler *c, int id) {
 
 /* A node that emits a setjmp around its own subtree: a begin, an
    `x rescue y` modifier, a `loop {}`, or a heavy break-carrying call. */
+/* A `begin` with no rescue, else or ensure -- the `begin ... end while`
+   do-while -- emits no handler frame (emit_begin), so no setjmp */
+static int begin_has_handler(const NodeTable *nt, int id) {
+  int else_c = nt_ref(nt, id, "else_clause"), ensure_c = nt_ref(nt, id, "ensure_clause");
+  return nt_ref(nt, id, "rescue_clause") >= 0 ||
+         (else_c >= 0 && nt_ref(nt, else_c, "statements") >= 0) ||
+         (ensure_c >= 0 && nt_ref(nt, ensure_c, "statements") >= 0);
+}
 static int is_setjmp_construct(Compiler *c, int id) {
   NodeKind k = nt_kind(c->nt, id);
-  return k == NK_BeginNode || k == NK_RescueModifierNode ||
+  return (k == NK_BeginNode && begin_has_handler(c->nt, id)) || k == NK_RescueModifierNode ||
          is_stopiter_loop(c, id) || is_heavy_brk_call(c, id);
 }
 
