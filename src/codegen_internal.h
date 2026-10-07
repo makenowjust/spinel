@@ -799,6 +799,16 @@ void emit_unbox_nilable_text(Compiler *c, TyKind t, const char *expr, Buf *b);
    caller's direct-ivar shapes alone. See codegen_expr.c. */
 void emit_orw_guard(Compiler *c, int v, TyKind slot, const char *cond, const char *lhs, int value_form, int indent, Buf *b);
 void emit_slot_orw_value(Compiler *c, TyKind t, const char *ref, int v, int is_or, Buf *b);
+/* the same for an Integer / Float slot that holds its nil: `niltest` (its
+   nil's C test, NULL = never nil), and a field's class / ivar / prefix so
+   the store keeps the nil bit (codegen_expr.c) */
+void emit_slot_orw_value_o(Compiler *c, TyKind t, const char *ref, int v, int is_or,
+                           const char *niltest, int cid, int iv, const char *pfx, Buf *b);
+/* `@x ||= v` at write node id; `obj.x ||= v` through the field (codegen_util.c) */
+void emit_ivar_orw_value(Compiler *c, int id, TyKind t, const char *ref, int v, int is_or, Buf *b);
+void emit_attr_orw_value(Compiler *c, int cid, int iv, const char *pfx, TyKind t, const char *ref,
+                         int v, int is_or, Buf *b);
+int ivar_orw_niltest(Compiler *c, int id, const char *ref, char *out, size_t cap, int *cid, int *iv, char *pfx, size_t pcap);
 int emit_empty_literal_as(Compiler *c, int v, TyKind slot, Buf *b);
 int emit_call_or_write_via_methods(Compiler *c, int id, int is_or, Buf *b);
 /* Wrap a boxed expression in the --rbs seed assertion (a no-op macro without
@@ -2014,8 +2024,15 @@ extern int g_oint_read;
    and for an Integer or Float, whose plain scalar has no nil, the TypeError
    a nil raises where an Integer is wanted (sp_oint_arg(sp_oint_nil())). */
 void emit_slot_nil_read(Compiler *c, TyKind t, Buf *b);
-/* the method being emitted answers an oint (set beside g_ret_type) */
+/* the method being emitted answers an oint (set beside g_ret_type); the
+   result slot a tail fills does (beside g_result_ty) */
 extern int g_ret_oint;
+extern int g_result_oint;
+/* a conditional's result slot holds its nil (node_is_oint of it): its C
+   type and dead value */
+int cond_res_oint(Compiler *c, int id, TyKind res);
+void emit_res_ctype(Compiler *c, TyKind res, int res_o, Buf *b);
+const char *res_zero(Compiler *c, TyKind res, int res_o);
 /* a store's right-hand side into an ivar with a nil bit, the bit kept in
    step (codegen_util.c): from node v, or from an sp_oint text */
 void emit_ivar_value_nilbit(Compiler *c, int cid, int iv, const char *obj, int v, Buf *b);

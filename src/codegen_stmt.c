@@ -3453,7 +3453,27 @@ static Buf *g_pm_hash_sink = NULL;
    its bindings read, and asks the sentinel in the arms that test a class, nil
    or a range (g_pm_sentinel_t). */
 static int case_subject_boxes_sentinel(Compiler *c, int pred, TyKind pt) {
-  return pred >= 0 && (pt == TY_INT || pt == TY_FLOAT) && call_returns_nullable_int(c, pred);
+  return pred >= 0 && (pt == TY_INT || pt == TY_FLOAT) && node_is_oint(c, pred);
+}
+/* The case scrutinee temp `_tN` whose sp_oint sits beside it as `_oN`
+   (an Integer or Float scrutinee that can be nil), or -1: `when nil` tests
+   the oint's flag, and the plain `_tN` compares the value. */
+static int g_case_scrut_oint = -1;
+static void case_nil_test(int t, int want_nil, Buf *b) {
+  if (g_case_scrut_oint == t) buf_printf(b, "(%s_o%d.nil)", want_nil ? "" : "!", t);
+  else buf_puts(b, want_nil ? "0" : "1");
+}
+/* the scrutinee's binding: `sp_oint _oN = <oint>; sp_int _tN = _oN.v;` for
+   one that can be nil, the plain value otherwise */
+static void emit_case_scrutinee(Compiler *c, int pred, TyKind pt, int t, const char *term, Buf *b) {
+  if (case_subject_boxes_sentinel(c, pred, pt)) {
+    buf_printf(b, "%s _o%d = ", oint_ctype(pt), t); emit_oint_expr(c, pred, pt, b);
+    buf_printf(b, "; %s _t%d = _o%d.v%s", c_type_name(pt), t, t, term);
+    g_case_scrut_oint = t;
+  }
+  else {
+    emit_ctype(c, pt, b); buf_printf(b, " _t%d = ", t); emit_expr(c, pred, b); buf_puts(b, term);
+  }
 }
 /* The subject temp of the enclosing `case/in` when it is such a scalar, or -1.
    Only the subject itself: a sub-pattern's element temp has its own number. */
@@ -5694,8 +5714,9 @@ static int emit_when_scalar_class(TyKind pt, const char *cn, int t, Buf *b) {
   int nilcls = sp_streq(cn, "NilClass");
   int univ = is_object_root(cn);
   if (yes < 0 || (!nilcls && (!yes || univ))) return 0;
-  /* an Integer or Float scrutinee's temp is its sp_oint (emit_case_scrutinee) */
-  if (oint_kind(pt)) buf_printf(b, "(%s_t%d.nil)", nilcls ? "" : "!", t);
+  /* an Integer or Float scrutinee that can be nil has its sp_oint beside
+     the temp (emit_case_scrutinee); a plain one is never nil */
+  if (oint_kind(pt)) case_nil_test(t, nilcls, b);
   else buf_printf(b, "(_t%d %s NULL)", t, nilcls ? "==" : "!=");
   return 1;
 }
@@ -5706,7 +5727,7 @@ static int emit_when_typed_test(Compiler *c, int cond, int t, TyKind pt, Buf *b)
      compared as a number, nil read as 0 and matched a 0. A String
      scrutinee holds nil as NULL. */
   if (nt_kind(c->nt, cond) == NK_NilNode && (pt == TY_INT || pt == TY_FLOAT || pt == TY_STRING)) {
-    if (oint_kind(pt)) buf_printf(b, "(_t%d.nil)", t);
+    if (oint_kind(pt)) case_nil_test(t, 1, b);
     else buf_printf(b, "(_t%d == NULL)", t);
   }
   else if (reidx >= 0 && pt == TY_STRING) {
@@ -5871,12 +5892,7 @@ void emit_case(Compiler *c, int id, Buf *b, int indent) {
       emit_ctype(c, TY_POLY, b); buf_printf(b, " _t%d = ", t); emit_boxed(c, pred, b);
       buf_puts(b, ";\n"); pt = TY_POLY;
     }
-    else {
-      emit_ctype(c, pt, b);
-      buf_printf(b, " _t%d = ", t);
-      emit_expr(c, pred, b);
-      buf_puts(b, ";\n");
-    }
+    else emit_case_scrutinee(c, pred, pt, t, ";\n", b);
     if (case_subject_needs_root(c, pt, whens, nw)) {
       emit_indent(b, indent);
       emit_gc_root_tmp(c, pt, t, b);
@@ -5888,7 +5904,7 @@ void emit_case(Compiler *c, int id, Buf *b, int indent) {
      (jump table) instead of an O(n) sp_poly_eq / int-compare if-chain. This is
      the optcarrot CPU opcode dispatch (~256 whens); the poly if-chain made
      sp_poly_eq ~50% of runtime. */
-  if (pred >= 0 && (pt == TY_POLY || pt == TY_INT) && nw > 0) {
+  if (pred >= 0 && (pt == TY_POLY || pt == TY_INT) && nw > 0 && g_case_scrut_oint != t) {
     int all_int = 1;
     for (int w = 0; w < nw && all_int; w++) {
       int wc = 0; const int *conds = nt_arr(nt, whens[w], "conditions", &wc);
@@ -5965,8 +5981,7 @@ void emit_case(Compiler *c, int id, Buf *b, int indent) {
   if (case_subject_boxes_sentinel(c, pred, pt)) {
     int bt = ++g_tmp;
     emit_indent(b, indent);
-    buf_printf(b, "sp_RbVal _t%d = %s(_t%d);\n", bt,
-               pt == TY_INT ? "sp_box_int_or_nil" : "sp_box_float_or_nil", t);
+    buf_printf(b, "sp_RbVal _t%d = %s(_o%d);\n", bt, oint_box(pt), t);
     t = bt; pt = TY_POLY;
   }
 
@@ -6216,8 +6231,11 @@ static int emit_when_lambda_inline(Compiler *c, int cond, int t, TyKind pt, int 
 
 /* Emit `_crN = <branch's last value>` (boxed to the case's result type when
    that is poly), after the branch's leading statements. */
+/* the case expression being emitted answers an oint (cond_res_oint) */
+static int g_case_res_oint = 0;
 void emit_case_branch_value(Compiler *c, int stmts, TyKind rt, int cr, Buf *b) {
   const NodeTable *nt = c->nt;
+  int res_o = g_case_res_oint && oint_kind(rt);
   int n = 0;
   const int *bb = stmts >= 0 ? nt_arr(nt, stmts, "body", &n) : NULL;
   /* an arm of a conditional value into a shared String slot: the handle
@@ -6270,7 +6288,7 @@ void emit_case_branch_value(Compiler *c, int stmts, TyKind rt, int cr, Buf *b) {
      through emit_expr, which has no expression form for it. */
   if (n > 0 && (lt == TY_NIL || lt == TY_VOID || lt == TY_UNKNOWN)) {
     emit_stmt(c, bb[n - 1], b, 0);
-    buf_printf(b, "_cr%d = %s; ", cr, rt == TY_POLY ? "sp_box_nil()" : default_value_from_compiler(c, rt));
+    buf_printf(b, "_cr%d = %s; ", cr, rt == TY_POLY ? "sp_box_nil()" : res_zero(c, rt, res_o));
     return;
   }
   /* Emit the tail value with a CAPTURED prelude: a tail whose lowering hoists
@@ -6288,8 +6306,8 @@ void emit_case_branch_value(Compiler *c, int stmts, TyKind rt, int cr, Buf *b) {
      temp, which is an integer reinterpreted as a pointer */
   if (n > 0 && rt == TY_BIGINT && comp_ntype(c, bb[n - 1]) != TY_BIGINT)
     emit_bigint_operand_ext(c, bb[n - 1], &val);
-  else if (n > 0) { if (rt == TY_POLY) emit_boxed(c, bb[n - 1], &val); else emit_expr(c, bb[n - 1], &val); }
-  else buf_puts(&val, rt == TY_POLY ? "sp_box_nil()" : default_value_from_compiler(c, rt));
+  else if (n > 0) { if (rt == TY_POLY) emit_boxed(c, bb[n - 1], &val); else if (res_o) emit_oint_expr(c, bb[n - 1], rt, &val); else emit_expr(c, bb[n - 1], &val); }
+  else buf_puts(&val, rt == TY_POLY ? "sp_box_nil()" : res_zero(c, rt, res_o));
   g_pre = sv_pre;
   if (pre.p) buf_puts(b, pre.p);
   buf_printf(b, "_cr%d = ", cr);
@@ -6300,7 +6318,14 @@ void emit_case_branch_value(Compiler *c, int stmts, TyKind rt, int cr, Buf *b) {
 
 /* `case` in expression position: a GCC statement-expression yielding the
    matched branch's value (or the result type's nil/default on no match). */
+void emit_case_expr(Compiler *c, int id, Buf *b);
+static void emit_case_expr_in(Compiler *c, int id, Buf *b);
 void emit_case_expr(Compiler *c, int id, Buf *b) {
+  int sro = g_case_res_oint, sso = g_case_scrut_oint;
+  emit_case_expr_in(c, id, b);
+  g_case_res_oint = sro; g_case_scrut_oint = sso;
+}
+static void emit_case_expr_in(Compiler *c, int id, Buf *b) {
   const NodeTable *nt = c->nt;
   TyKind rt = id == g_strbuf_case_node ? TY_STRBUF : repr_of(c, id).as_ty;
   /* a void/nil-typed case (arms are writer calls or nil) has no C storage
@@ -6313,9 +6338,11 @@ void emit_case_expr(Compiler *c, int id, Buf *b) {
   const int *whens = nt_arr(nt, id, "conditions", &nw);
   int else_c = nt_ref(nt, id, "else_clause");
   int cr = ++g_tmp;
+  int res_o = cond_res_oint(c, id, rt);
+  g_case_res_oint = res_o;
   buf_puts(b, "({ ");
-  emit_ctype(c, rt, b);
-  buf_printf(b, " _cr%d = %s; ", cr, rt == TY_RANGE ? "(sp_Range){0}" : default_value_from_compiler(c, rt));
+  emit_res_ctype(c, rt, res_o, b);
+  buf_printf(b, " _cr%d = %s; ", cr, res_zero(c, rt, res_o));
   int t = -1;
   TyKind pt = TY_UNKNOWN;
   if (pred >= 0) {
@@ -6328,7 +6355,7 @@ void emit_case_expr(Compiler *c, int id, Buf *b) {
       emit_ctype(c, TY_POLY, b); buf_printf(b, " _t%d = ", t); emit_boxed(c, pred, b); buf_puts(b, "; ");
       pt = TY_POLY;
     }
-    else { emit_ctype(c, pt, b); buf_printf(b, " _t%d = ", t); emit_expr(c, pred, b); buf_puts(b, "; "); }
+    else emit_case_scrutinee(c, pred, pt, t, "; ", b);
     if (case_subject_needs_root(c, pt, whens, nw)) { emit_gc_root_tmp(c, pt, t, b); buf_puts(b, " "); }
   }
 
@@ -6337,7 +6364,7 @@ void emit_case_expr(Compiler *c, int id, Buf *b) {
      -- the slab-AST `case @nd_type[id] when <int>` interpreter-dispatch shape
      (#282). INT only: the poly path keeps sp_poly_eq (`===`), since
      sp_poly_to_i on a non-numeric subject would mis-match `case 0`. */
-  if (pred >= 0 && pt == TY_INT && nw > 0) {
+  if (pred >= 0 && pt == TY_INT && nw > 0 && g_case_scrut_oint != t) {
     int all_int = 1, ndup = 0;
     long long vals[512];
     for (int w = 0; w < nw && all_int; w++) {
@@ -6377,8 +6404,7 @@ void emit_case_expr(Compiler *c, int id, Buf *b) {
   int typed_t = t; TyKind typed_pt = pt;
   if (case_subject_boxes_sentinel(c, pred, pt)) {
     int bt = ++g_tmp;
-    buf_printf(b, "sp_RbVal _t%d = %s(_t%d); ", bt,
-               pt == TY_INT ? "sp_box_int_or_nil" : "sp_box_float_or_nil", t);
+    buf_printf(b, "sp_RbVal _t%d = %s(_o%d); ", bt, oint_box(pt), t);
     t = bt; pt = TY_POLY;
   }
 
@@ -7481,7 +7507,7 @@ static void emit_ret_nil(Compiler *c, TyKind t, Buf *b) {
   /* an Integer or Float return that answers nil is an sp_oint (g_ret_oint);
      a plain one has no nil, and a nil there is the TypeError a nil raises
      where an Integer is wanted */
-  else if (oint_kind(t)) buf_puts(b, g_ret_oint ? oint_nil(t) : "sp_oint_arg(sp_oint_nil())");
+  else if (oint_kind(t)) buf_puts(b, (g_result_var ? g_result_oint : g_ret_oint) ? oint_nil(t) : "sp_oint_arg(sp_oint_nil())");
   else if (t == TY_STRING || ty_is_object(t)) buf_puts(b, "NULL");
   else {
     const char *cn = c_type_name(t);
@@ -7695,6 +7721,8 @@ static void emit_tail_value(Compiler *c, int node, Buf *b) {
      the numeric 0 of a void call. Evaluate it, then spell the sentinel. */
   {
     TyKind slot = g_result_var ? g_result_ty : g_ret_type;
+    /* a slot that holds its nil takes the value's oint form, nil and all */
+    if (oint_kind(slot) && (g_result_var ? g_result_oint : g_ret_oint)) { emit_oint_expr(c, node, slot, b); return; }
     if (slot == TY_INT || slot == TY_FLOAT) {
       if (nt_kind(c->nt, node) == NK_NilNode) { emit_ret_nil(c, slot, b); return; }
       TyKind nvt = repr_of(c, node).as_ty;
@@ -7705,8 +7733,8 @@ static void emit_tail_value(Compiler *c, int node, Buf *b) {
       }
       /* an Integer value answered through a Float slot: its nil is the
          Integer sentinel, which has to become the Float one */
-      if (slot == TY_FLOAT && nvt == TY_INT && nullable_int_value(c, node)) {
-        buf_puts(b, "sp_int_to_f_or_nil("); emit_expr(c, node, b); buf_puts(b, ")");
+      if (slot == TY_FLOAT && nvt == TY_INT) {
+        buf_puts(b, "(sp_float)("); emit_expr(c, node, b); buf_puts(b, ")");
         return;
       }
     }
@@ -10053,11 +10081,12 @@ static int emit_multi_write_scalar(Compiler *c, int id, Buf *b, int indent, cons
           buf_puts(b, bx.p ? bx.p : "sp_box_nil()"); free(bx.p);
           buf_puts(b, ")");
         }
+        /* an Integer or Float element: with its nil (past the end, a nil
+           element) into a slot that holds one, the plain value otherwise */
+        else if (sp_streq(k, "Int") || sp_streq(k, "Float"))
+          buf_printf(b, "sp_%sArray_%s(_t%d, _t%d)", k, rllv && slot_is_oint(rllv) ? "oget" : "get", tarr, tix);
         else {
-          const char *nilv = sp_streq(k, "Poly") ? "sp_box_nil()"
-                           : sp_streq(k, "Int") ? "SP_INT_NIL"
-                           : sp_streq(k, "Float") ? "sp_float_nil()"
-                           : "NULL";
+          const char *nilv = sp_streq(k, "Poly") ? "sp_box_nil()" : "NULL";
           buf_printf(b, "(_t%d >= _t%d->len ? %s : %s)", tix, tarr, nilv, rgx);
         }
         buf_puts(b, ";\n");
@@ -10087,11 +10116,16 @@ static int emit_multi_write_scalar(Compiler *c, int id, Buf *b, int indent, cons
           buf_puts(b, bx2.p ? bx2.p : "sp_box_nil()"); free(bx2.p);
           buf_puts(b, ")");
         }
+        else if ((sp_streq(k, "Int") || sp_streq(k, "Float")) && iv_rt2 >= 0 && ivar_has_nilbit(c, iv_home_cid, iv_rt2)) {
+          /* the element with its nil into the field's nil bit */
+          char og2[160]; snprintf(og2, sizeof og2, "sp_%sArray_oget(_t%d, _t%d)", k, tarr, tix);
+          size_t pn = strlen(iv_lhs) - strlen(iv_c(ivnm2 + 1)) - 3;
+          char ipfx[300]; snprintf(ipfx, sizeof ipfx, "%.*s", (int)pn, iv_lhs);
+          emit_ivar_text_nilbit(c, iv_home_cid, iv_rt2, ipfx, og2, b);
+        }
+        else if (sp_streq(k, "Int") || sp_streq(k, "Float")) buf_puts(b, get_expr2);
         else {
-          const char *nilv = sp_streq(k, "Poly") ? "sp_box_nil()"
-                           : sp_streq(k, "Int") ? "SP_INT_NIL"
-                           : sp_streq(k, "Float") ? "sp_float_nil()"
-                           : "NULL";
+          const char *nilv = sp_streq(k, "Poly") ? "sp_box_nil()" : "NULL";
           buf_printf(b, "(_t%d >= _t%d->len ? %s : %s)", tix, tarr, nilv, get_expr2);
         }
         buf_puts(b, ";\n");
@@ -10101,9 +10135,11 @@ static int emit_multi_write_scalar(Compiler *c, int id, Buf *b, int indent, cons
         emit_indent(b, indent);
         buf_printf(b, "sp_int _t%d = (_t%d->len - %dLL + %dLL) > %dLL ? (_t%d->len - %dLL + %dLL) : %dLL;\n",
                    tix, tarr, rn, j, ln + j, tarr, rn, j, ln + j);
+        /* a plain Integer or Float target reads 0 past the end (a target
+           that can hold nil is marked and bound above) */
         const char *nilv = sp_streq(k, "Poly") ? "sp_box_nil()"
-                         : sp_streq(k, "Int") ? "SP_INT_NIL"
-                         : sp_streq(k, "Float") ? "sp_float_nil()"
+                         : sp_streq(k, "Int") ? "0"
+                         : sp_streq(k, "Float") ? "0.0"
                          : "NULL";
         if (sp_streq(lty, "MultiTargetNode")) {
           char gx[80]; snprintf(gx, sizeof gx, "sp_%sArray_get(_t%d, _t%d)", k, tarr, tix);
@@ -11108,8 +11144,11 @@ static int emit_call_stmt(Compiler *c, int id, Buf *b, int indent, const NodeTab
               }
               if (ivt == TY_POLY && repr_of(c, argv[0]).kind != RK_BOXED) emit_boxed(c, argv[0], b);
               /* nil into a scalar slot is that slot's sentinel, as `@x = nil` writes it */
-              else if (nt_kind(nt, argv[0]) == NK_NilNode && (ivt == TY_FLOAT || ivt == TY_INT))
-                buf_puts(b, ivt == TY_FLOAT ? "sp_float_nil()" : "SP_INT_NIL");
+              else if (oint_kind(ivt) && iv >= 0 && ivar_has_nilbit(c, defc < 0 ? rc : defc, iv)) {
+                Buf spf; memset(&spf, 0, sizeof spf);   /* the field's nil bit, through the receiver's temp or its plain read */
+                if (fo) buf_printf(&spf, "_t%d->", tw); else { buf_puts(&spf, "("); emit_expr(c, recv, &spf); buf_puts(&spf, ")->"); }
+                emit_ivar_value_nilbit(c, defc < 0 ? rc : defc, iv, spf.p, argv[0], b); free(spf.p);
+              }
               /* A genuinely poly rhs narrowing into a concrete slot takes
                  the same unboxing the local-assignment path uses. The slot
                  is concrete because an --rbs signature said so while the
@@ -12654,6 +12693,7 @@ void emit_stmt_inner(Compiler *c, int id, Buf *b, int indent) {
   }
   if (sp_streq(ty, "InstanceVariableOrWriteNode") || sp_streq(ty, "InstanceVariableAndWriteNode")) {
     int is_or = sp_streq(ty, "InstanceVariableOrWriteNode");
+    int onk = 0, ocid = -1, oiv = -1; char ont[300] = "", opfx[128] = "";   /* an Integer / Float slot's nil test */
     const char *nm = nt_str(nt, id, "name");
     int v = nt_ref(nt, id, "value");
     Scope *cws2 = comp_scope_of(c, id);
@@ -12708,16 +12748,24 @@ void emit_stmt_inner(Compiler *c, int id, Buf *b, int indent) {
       else if (ivt2 == TY_BIGINT && comp_ntype(c, v) != TY_BIGINT && ty_is_numeric(comp_ntype(c, v))) {
         buf_puts(&vval, "sp_bigint_new_int("); emit_int_expr(c, v, &vval); buf_puts(&vval, ")");
       }
+      /* an Integer or Float slot holding its nil: the bit kept in step, or the oint */
+      else if (oint_kind(ivt2) && (onk = ivar_orw_niltest(c, id, ref2, ont, sizeof ont, &ocid, &oiv, opfx, sizeof opfx)) == 1)
+        emit_ivar_value_nilbit(c, ocid, oiv, opfx, v, &vval);
+      else if (oint_kind(ivt2) && onk == 2) emit_oint_expr(c, v, ivt2, &vval);
       else emit_coerce(c, v, ivt2, CO_HOLD, "an instance variable's `||=` or `&&=`", &vval);
       g_pre = saved_pre;
     }
     switch (ivt2) {
     case TY_POLY: snprintf(cond2, sizeof cond2, "%ssp_poly_truthy(%s)", is_or ? "!" : "", ref2); break;
     case TY_BOOL: case TY_STRING: case TY_STRBUF: snprintf(cond2, sizeof cond2, "%s%s", is_or ? "!" : "", ref2); break;
-    case TY_INT: snprintf(cond2, sizeof cond2, "%s %s= SP_INT_NIL", ref2, is_or ? "=" : "!"); break;
+    /* an Integer or Float: its nil bit or oint flag; a plain one is never nil */
+    case TY_INT: case TY_FLOAT:
+      if (!onk) onk = ivar_orw_niltest(c, id, ref2, ont, sizeof ont, &ocid, &oiv, opfx, sizeof opfx);
+      if (onk) snprintf(cond2, sizeof cond2, "%s%s", is_or ? "" : "!", ont);
+      else snprintf(cond2, sizeof cond2, "%s", is_or ? "0" : "1");
+      break;
     case TY_SYMBOL: snprintf(cond2, sizeof cond2, "%s %s= (sp_sym)-1", ref2, is_or ? "=" : "!"); break;   /* nilable symbol: (sp_sym)-1 is the nil sentinel */
     case TY_CLASS: snprintf(cond2, sizeof cond2, "%ssp_class_nil_p(%s)", is_or ? "" : "!", ref2); break;
-    case TY_FLOAT: snprintf(cond2, sizeof cond2, "%ssp_float_is_nil(%s)", is_or ? "" : "!", ref2); break;   /* nil is SP_FLOAT_NIL */
     default: break;
     }
     /* a pointer-backed ivar (fiber/proc/object/array/hash/...) reads falsy
@@ -12773,7 +12821,8 @@ void emit_stmt_inner(Compiler *c, int id, Buf *b, int indent) {
        it, and the guard is the ivar's own: a pointer-backed attribute that
        was never assigned is NULL, not truthy (#5428). */
     char lhs[300]; snprintf(lhs, sizeof lhs, "_t%d->iv_%s", tr, iv_c(attr));
-    buf_puts(b, "(void)"); emit_slot_orw_value(c, ivt, lhs, v, is_or, b); buf_puts(b, "; }\n");
+    char apfx[32]; snprintf(apfx, sizeof apfx, "_t%d->", tr);
+    buf_puts(b, "(void)"); emit_attr_orw_value(c, class_id, iidx, apfx, ivt, lhs, v, is_or, b); buf_puts(b, "; }\n");
     return;
   }
   if (emit_ivar_cvar_write_stmt(c, id, b, indent, nt, ty)) return;
@@ -13342,9 +13391,10 @@ void emit_stmt_tail_inner(Compiler *c, int id, Buf *b, int indent) {
       if (ec >= 0 && nt_ref(nt, ec, "statements") >= 0 && ty_gc_rootable(c, rt)) { buf_puts(b, " "); emit_gc_root_tmp(c, rt, t, b); }
       buf_puts(b, "\n");
       int sp = g_result_poly; g_result_poly = (rt == TY_POLY);
-      TyKind srt = g_result_ty; g_result_ty = rt;   /* the arms' nil is this slot's (a scalar's sentinel) */
+      TyKind srt = g_result_ty; g_result_ty = rt;   /* the arms' nil is this slot's */
+      int sro = g_result_oint; g_result_oint = cond_res_oint(c, id, rt);
       emit_begin(c, id, b, indent, rv);
-      g_result_poly = sp; g_result_ty = srt;
+      g_result_poly = sp; g_result_ty = srt; g_result_oint = sro;
       emit_indent(b, indent); emit_tail_lead(b);
       /* the begin's scalar result temp feeds a poly tail slot (return type or an
          outer poly result var widened under promote): box it to match. */

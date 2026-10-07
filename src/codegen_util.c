@@ -5120,6 +5120,63 @@ void emit_ivar_nil_store(Compiler *c, int id, TyKind t, Buf *b) {
   else emit_slot_nil_read(c, t, b);
 }
 
+/* A conditional's result slot (an if / case / begin / `||` in value
+   position): an Integer or Float one holds its nil when an arm can answer
+   nil (node_is_oint of the conditional). The C type and the dead value. */
+int cond_res_oint(Compiler *c, int id, TyKind res) {
+  return oint_kind(res) && node_is_oint(c, id);
+}
+void emit_res_ctype(Compiler *c, TyKind res, int res_o, Buf *b) {
+  if (res_o && oint_kind(res)) buf_puts(b, oint_ctype(res)); else emit_ctype(c, res, b);
+}
+const char *res_zero(Compiler *c, TyKind res, int res_o) {
+  if (res_o && oint_kind(res)) return oint_nil(res);
+  return res == TY_RANGE ? "(sp_Range){0}" : default_value_from_compiler(c, res);
+}
+/* the result slot a tail statement fills answers an oint (beside
+   g_result_ty / g_result_var) */
+int g_result_oint = 0;
+
+/* `@x ||= v` / `&&=` at write node `id` (ivar type t, slot text ref): the
+   field's nil bit or the oint static decides the test and keeps the bit */
+void emit_ivar_orw_value(Compiler *c, int id, TyKind t, const char *ref, int v, int is_or, Buf *b) {
+  int cid, iv, k = oint_kind(t) ? ivar_node_slot(c, id, &cid, &iv) : 0;
+  char pfx[128], nt[300];
+  if (k == 1 && ivar_has_nilbit(c, cid, iv)) {
+    snprintf(pfx, sizeof pfx, "%s%s", g_self, g_self_deref);
+    ivar_nilbit_test(c, cid, iv, pfx, nt, sizeof nt);
+    emit_slot_orw_value_o(c, t, ref, v, is_or, nt, cid, iv, pfx, b);
+  }
+  else if (k == 2 && civ_is_oint(c, cid, iv)) {
+    snprintf(nt, sizeof nt, "%s.nil", ref);
+    emit_slot_orw_value_o(c, t, ref, v, is_or, nt, -1, -1, NULL, b);
+  }
+  else emit_slot_orw_value(c, t, ref, v, is_or, b);
+}
+/* `obj.x ||= v` through the attribute's field (class cid, ivar iv, receiver
+   prefix pfx such as "_t3->") */
+void emit_attr_orw_value(Compiler *c, int cid, int iv, const char *pfx, TyKind t, const char *ref,
+                         int v, int is_or, Buf *b) {
+  char nt[300];
+  if (oint_kind(t) && iv >= 0 && ivar_has_nilbit(c, cid, iv)) {
+    ivar_nilbit_test(c, cid, iv, pfx, nt, sizeof nt);
+    emit_slot_orw_value_o(c, t, ref, v, is_or, nt, cid, iv, pfx, b);
+  }
+  else emit_slot_orw_value(c, t, ref, v, is_or, b);
+}
+/* The nil test of ivar iv of class cid behind `ref` ("self->iv_x", the
+   field) for an or-write statement: the bit, the oint's flag, or NULL */
+int ivar_orw_niltest(Compiler *c, int id, const char *ref, char *out, size_t cap, int *cid, int *iv, char *pfx, size_t pcap) {
+  int k = ivar_node_slot(c, id, cid, iv);
+  if (k == 1 && ivar_has_nilbit(c, *cid, *iv)) {
+    snprintf(pfx, pcap, "%s%s", g_self, g_self_deref);
+    ivar_nilbit_test(c, *cid, *iv, pfx, out, cap);
+    return 1;
+  }
+  if (k == 2 && civ_is_oint(c, *cid, *iv)) { snprintf(out, cap, "%s.nil", ref); return 2; }
+  return 0;
+}
+
 void emit_slot_nil_read(Compiler *c, TyKind t, Buf *b) {
   if (oint_kind(t)) { buf_printf(b, "%s(%s)", oint_arg(t), oint_nil(t)); return; }
   const char *nv = nil_value(t);
