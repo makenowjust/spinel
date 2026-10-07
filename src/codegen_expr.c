@@ -1452,8 +1452,11 @@ void emit_expr(Compiler *c, int id, Buf *b) {
      (TypeError for nil), and a leaf read of an oint slot as its `.v`. */
   int want_o = g_want_oint; g_want_oint = 0;
   TyKind ot = comp_ntype(c, id);
-  int is_o = oint_kind(ot) && node_is_oint(c, id);
-  int leaf_o = want_o && !is_o && node_has_oint_form(c, id);
+  /* a node bound to a hoisted temp (view_bind) is that plain temp */
+  int bound = 0;
+  for (int i = g_n_argov - 1; i >= 0 && !bound; i--) if (g_argov_node[i] == id) bound = 1;
+  int is_o = !bound && oint_kind(ot) && node_is_oint(c, id);
+  int leaf_o = !bound && want_o && !is_o && node_has_oint_form(c, id);
   NodeKind ok = nt_kind(c->nt, id);
   g_oint_read = (is_o || leaf_o) &&
                 (ok == NK_LocalVariableReadNode || ok == NK_InstanceVariableReadNode ||
@@ -2008,7 +2011,7 @@ static int emit_local_ivar_write_expr(Compiler *c, int id, Buf *b, const NodeTab
     static int orw_boxing_id = -1;
     if ((t == TY_INT || t == TY_FLOAT) && repr_of(c, id).kind == RK_BOXED && orw_boxing_id != id) {
       int sv = orw_boxing_id; orw_boxing_id = id;
-      buf_puts(b, t == TY_INT ? "sp_box_int_or_nil(" : "sp_box_float_or_nil(");
+      buf_printf(b, "%s(", slot_is_oint(lv) ? oint_box(t) : ty_box_fn(t));
       emit_expr_node(c, id, b);
       buf_puts(b, ")");
       orw_boxing_id = sv;
@@ -2206,6 +2209,9 @@ static int emit_ivar_cvar_gvar_expr(Compiler *c, int id, Buf *b, const NodeTable
       }
       holder_slot_text(c, &h, sref, sizeof sref);
       buf_puts(b, sref);
+      /* an oint static read as a plain scalar is its value */
+      { int want = g_oint_read; g_oint_read = 0;
+        if (cvar_is_oint(c, h.cid, h.idx) && !want) buf_puts(b, ".v"); }
       return 1;
     }
     unsupported(c, id, "class variable read (no class scope)");
@@ -2234,11 +2240,13 @@ static int emit_ivar_cvar_gvar_expr(Compiler *c, int id, Buf *b, const NodeTable
       buf_puts(b, ")");
       return 1;
     }
-    /* an Integer or Float class variable some write leaves nil in: its oint */
+    /* an Integer or Float class variable some write leaves nil in: its oint;
+       the write's value is the slot's oint where the write can be nil, its
+       value otherwise */
     if (cvar_is_oint(c, cid, idx)) {
       emit_oint_expr(c, v, ct, b);
       emit_cvar_set_flag_after(c, cid, nm, b);
-      buf_printf(b, ", %s)", sref);
+      buf_printf(b, node_is_oint(c, id) ? ", %s)" : ", %s.v)", sref);
       return 1;
     }
     if (emit_empty_container_for_slot(c, v, ct, b)) { /* emitted at the slot's type */ }
@@ -2428,7 +2436,12 @@ static int emit_ivar_cvar_gvar_expr(Compiler *c, int id, Buf *b, const NodeTable
         emit_strbuf_slot_read(c, id, repr_of(c, id), sref, b);
         return 1;
       }
-      if (gv) { buf_printf(b, "gv_%s", rn); return 1; }
+      if (gv) {
+        /* an oint global read as a plain scalar is its value */
+        int want = g_oint_read; g_oint_read = 0;
+        buf_printf(b, gvar_is_oint(c, gv) && !want ? "gv_%s.v" : "gv_%s", rn);
+        return 1;
+      }
     }
     unsupported(c, id, "global variable read");
   }

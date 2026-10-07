@@ -5034,8 +5034,6 @@ int node_is_oint(Compiler *c, int node) {
     if (!nm) return 0;
     int blk = nt_ref(nt, node, "block");
     int r = nt_ref(nt, node, "receiver");
-    /* a boxed receiver's size is sp_poly_size: nil for an Enumerator's */
-    if (sp_streq(nm, "size") && r >= 0 && comp_ntype(c, r) == TY_POLY && blk < 0) return 1;
     /* a proc's result comes back boxed and is unboxed with its nil */
     if (is_call_or_yield(nm) && r >= 0 && comp_ntype(c, r) == TY_PROC) return 1;
     /* the runtime functions that answer an sp_oint (RUNTIME-API.md) */
