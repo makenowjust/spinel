@@ -28444,13 +28444,113 @@ static void mark_nullable_int_locals(Compiler *c) {
       if (ci->ivar_types[iv] != TY_INT && ci->ivar_types[iv] != TY_FLOAT) continue;
       if (nullable_int_value(c, v) || infer_type(c, v) == TY_POLY) { ci->ivar_nullable_int[iv] = 1; changed = 1; }
     }
+    /* ... and through a multiple assignment: a target the right side can
+       leave nil (`@@g, @@h = 7`, `bx.v, bx.w = nil, 6`, `o.x, o.y = 3`)
+       holds that nil -- a class variable, an ivar, an attribute's ivar */
+    NT_FOREACH_KIND(nt, NK_MultiWriteNode, mw) {
+      int mv = nt_ref(nt, mw, "value");
+      int ln = 0; const int *ls = nt_arr(nt, mw, "lefts", &ln);
+      int rn2 = 0; const int *rs2 = nt_arr(nt, mw, "rights", &rn2);
+      int mrest = nt_ref(nt, mw, "rest");
+      int lit = mv >= 0 && nt_kind(nt, mv) == NK_ArrayNode;
+      int en = 0; const int *ev = lit ? nt_arr(nt, mv, "elements", &en) : NULL;
+      int has_splat = 0;
+      for (int e = 0; e < en; e++) if (nt_kind(nt, ev[e]) == NK_SplatNode) has_splat = 1;
+      TyKind mvt = mv >= 0 ? infer_type(c, mv) : TY_UNKNOWN;
+      int scalar_rhs = !lit && mv >= 0 && !ty_is_array(mvt) && mvt != TY_POLY && mvt != TY_UNKNOWN;
+      for (int pass = 0; pass < 2; pass++) {
+        int n = pass ? rn2 : ln; const int *tg = pass ? rs2 : ls;
+        for (int j = 0; j < n; j++) {
+          int t = tg[j];
+          NodeKind tk = nt_kind(nt, t);
+          if (tk != NK_ClassVariableTargetNode && tk != NK_InstanceVariableTargetNode && tk != NK_CallTargetNode) continue;
+          /* can this position be nil */
+          int may_nil;
+          if (lit && !has_splat) {
+            /* a left takes element j; a right after the rest counts from the
+               end, and an element the lefts took leaves it nil */
+            int pos = pass ? (en - rn2 + j) : j;
+            may_nil = (pos < 0 || pos >= en || (pass && pos < ln)) ? 1 : nullable_int_value(c, ev[pos]);
+          }
+          else if (scalar_rhs) may_nil = pass || j > 0 || nullable_int_value(c, mv);
+          else may_nil = 1;   /* an array of unknown length, or a boxed value */
+          if (!may_nil) continue;
+          ClassInfo *ci = NULL; int iv = -1, is_cv = 0;
+          if (tk == NK_ClassVariableTargetNode) { iv = cvar_slot(c, t, &ci); is_cv = 1; }
+          else if (tk == NK_InstanceVariableTargetNode) {
+            Scope *s = comp_scope_of(c, t);
+            int cid = s ? s->class_id : -1;
+            if (ie_class_of(c, t) >= 0) cid = ie_class_of(c, t);
+            if (cid < 0) cid = comp_class_index(c, "Toplevel");
+            if (cid >= 0 && cid < c->nclasses) { ci = &c->classes[cid]; iv = comp_ivar_index(ci, nt_str(nt, t, "name")); }
+          }
+          else {
+            int trc = nt_ref(nt, t, "receiver");
+            const char *wn = nt_str(nt, t, "name");
+            size_t wl = wn ? strlen(wn) : 0;
+            TyKind rt = trc >= 0 ? infer_type(c, trc) : TY_UNKNOWN;
+            if (!ty_is_object(rt) || wl < 2 || wl > 255) continue;
+            int cid = ty_object_class(rt), defc = -1;
+            char base[256]; memcpy(base, wn, wn[wl - 1] == '=' ? wl - 1 : wl); base[wn[wl - 1] == '=' ? wl - 1 : wl] = '\0';
+            if (comp_writer_in_chain(c, cid, base, &defc)) {
+              char ivb[300];
+              snprintf(ivb, sizeof ivb, "@%s", comp_resolve_alias(c, cid, base));
+              ci = &c->classes[defc >= 0 ? defc : cid];
+              iv = comp_ivar_index(ci, ivb);
+            }
+            else iv = struct_member_slot(c, cid, base, &ci);
+          }
+          if (iv < 0 || !ci) continue;
+          if (is_cv) {
+            if (ci->cvar_nullable_int[iv]) continue;
+            if (ci->cvar_types[iv] != TY_INT && ci->cvar_types[iv] != TY_FLOAT) continue;
+            ci->cvar_nullable_int[iv] = 1; changed = 1;
+          }
+          else {
+            if (ci->ivar_nullable_int[iv]) continue;
+            if (ci->ivar_types[iv] != TY_INT && ci->ivar_types[iv] != TY_FLOAT) continue;
+            ci->ivar_nullable_int[iv] = 1; changed = 1;
+          }
+        }
+      }
+    }
+    /* ... and `o.send(:x=, v)`: the attr writer's ivar takes v */
+    NT_FOREACH_KIND(nt, NK_CallNode, id) {
+      const char *sn = nt_str(nt, id, "name");
+      if (!sn || (!sp_streq(sn, "send") && !sp_streq(sn, "public_send") && !sp_streq(sn, "__send__"))) continue;
+      int recv = nt_ref(nt, id, "receiver");
+      int ca = nt_ref(nt, id, "arguments");
+      int an = 0; const int *av = ca >= 0 ? nt_arr(nt, ca, "arguments", &an) : NULL;
+      if (recv < 0 || an != 2 || nt_kind(nt, av[0]) != NK_SymbolNode) continue;
+      const char *wn = nt_str(nt, av[0], "value");
+      size_t wl = wn ? strlen(wn) : 0;
+      if (wl < 2 || wl > 255 || wn[wl - 1] != '=') continue;
+      TyKind rt = infer_type(c, recv);
+      if (!ty_is_object(rt)) continue;
+      int cid = ty_object_class(rt), defc = -1;
+      char base[256]; memcpy(base, wn, wl - 1); base[wl - 1] = '\0';
+      ClassInfo *ci = NULL; int iv = -1;
+      if (comp_writer_in_chain(c, cid, base, &defc)) {
+        char ivb[300];
+        snprintf(ivb, sizeof ivb, "@%s", comp_resolve_alias(c, cid, base));
+        ci = &c->classes[defc >= 0 ? defc : cid];
+        iv = comp_ivar_index(ci, ivb);
+      }
+      if (iv < 0 || !ci || ci->ivar_nullable_int[iv]) continue;
+      if (ci->ivar_types[iv] != TY_INT && ci->ivar_types[iv] != TY_FLOAT) continue;
+      if (nullable_int_value(c, av[1])) { ci->ivar_nullable_int[iv] = 1; changed = 1; }
+    }
     /* ... and through a setter that is no ivar write in the program: an
        attr_writer's or a Struct member's `o.x = v` */
     NT_FOREACH_KIND(nt, NK_CallNode, id) {
       const char *wn = nt_str(nt, id, "name");
       int recv = nt_ref(nt, id, "receiver");
       size_t wl = wn ? strlen(wn) : 0;
-      if (recv < 0 || wl < 2 || wl > 255 || wn[wl - 1] != '=' || !call_is_setter_assign(nt, id)) continue;
+      /* a writer called by name (`o.send(:x=, v)` desugars to it) as well
+         as the assignment syntax; the comparison operators are no writers */
+      if (recv < 0 || wl < 2 || wl > 255 || wn[wl - 1] != '=' ||
+          sp_streq(wn, "==") || sp_streq(wn, "!=") || sp_streq(wn, "<=") || sp_streq(wn, ">=") || sp_streq(wn, "===") ||
+          sp_streq(wn, "[]=")) continue;
       int ca = nt_ref(nt, id, "arguments");
       int an = 0; const int *av = ca >= 0 ? nt_arr(nt, ca, "arguments", &an) : NULL;
       TyKind rt = infer_type(c, recv);

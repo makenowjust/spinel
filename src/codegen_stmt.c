@@ -9556,7 +9556,9 @@ static int masgn_store(Compiler *c, int id, int tgt, const char *val, TyKind vt,
       /* a boxed value a typed array cannot hold is refused, as the single
          store refuses it (#4481) */
       TyKind et = rt == TY_POLY_ARRAY ? TY_POLY : ty_array_elem(rt);
-      if (val && vt == TY_POLY && (et == TY_INT || et == TY_FLOAT || et == TY_STRING))
+      /* the _nilable store takes the element with its nil */
+      if (oint_kind(et) && nil_store_sfx(c, k, NIL_STORE_BOXED)[0]) masgn_conv_o(c, et, vt, val, b);
+      else if (val && vt == TY_POLY && (et == TY_INT || et == TY_FLOAT || et == TY_STRING))
         buf_printf(b, "sp_poly_elem_%c(%s)", et == TY_INT ? 'i' : et == TY_FLOAT ? 'f' : 's', val);
       else masgn_conv(c, id, et, vt, val, b);
       buf_puts(b, ");\n");
@@ -9652,10 +9654,23 @@ static int masgn_store(Compiler *c, int id, int tgt, const char *val, TyKind vt,
       /* attr_writer convention: name matches the backing ivar */
       char base[256]; snprintf(base, sizeof base, "%.*s", (int)(snl - 1), nm);
       char ivn[260]; snprintf(ivn, sizeof ivn, "@%s", base);
-      int ix = comp_ivar_index(&c->classes[crc], ivn);
-      buf_puts(b, "("); emit_node_or_tmp(c, crecv, recv_tmp, b);
-      buf_printf(b, ")->iv_%s = ", iv_c(base));
-      masgn_conv(c, id, ix >= 0 ? c->classes[crc].ivar_types[ix] : vt, vt, val, b);
+      int wdc = -1; comp_writer_in_chain(c, crc, base, &wdc);
+      int wcls = wdc >= 0 ? wdc : crc;
+      int ix = comp_ivar_index(&c->classes[wcls], ivn);
+      TyKind ivt = ix >= 0 ? c->classes[wcls].ivar_types[ix] : vt;
+      Buf rb; memset(&rb, 0, sizeof rb);
+      emit_node_or_tmp(c, crecv, recv_tmp, &rb);
+      buf_printf(b, "(%s)->iv_%s = ", rb.p ? rb.p : "", iv_c(base));
+      /* a field with a nil bit takes the value with its nil, the bit kept in step */
+      if (ix >= 0 && oint_kind(ivt) && ivar_has_nilbit(c, wcls, ix)) {
+        char pfx[320]; snprintf(pfx, sizeof pfx, "(%s)->", rb.p ? rb.p : "");
+        Buf ob; memset(&ob, 0, sizeof ob);
+        masgn_conv_o(c, ivt, vt, val, &ob);
+        emit_ivar_text_nilbit(c, wcls, ix, pfx, ob.p ? ob.p : oint_nil(ivt), b);
+        free(ob.p);
+      }
+      else masgn_conv(c, id, ivt, vt, val, b);
+      free(rb.p);
       buf_puts(b, ";\n");
     }
     return 1;
@@ -10822,12 +10837,26 @@ static int emit_multi_write_stmt(Compiler *c, int id, Buf *b, int indent, const 
         masgn_guard_line(&fb, b, indent);
       }
       emit_indent(b, indent);
-      if (((iv_sc && iv_sc->is_cmethod) || iv_global) && iv_cid >= 0)
+      int iv_static = ((iv_sc && iv_sc->is_cmethod) || iv_global) && iv_cid >= 0;
+      if (iv_static)
         buf_printf(b, "civ_%s_%s = ", c->classes[iv_cid].name, iv_c(ivnm + 1));
       else
         buf_printf(b, "%s%siv_%s = ", g_self, g_self_deref, iv_c(ivnm + 1));
       TyKind valt = tmpts ? tmpts[i] : repr_of(c, els[i]).as_ty;
+      int iv_ix = iv_cid >= 0 ? comp_ivar_index(&c->classes[iv_cid], ivnm) : -1;
+      char ivex[32]; snprintf(ivex, sizeof ivex, "_t%d", tmps[i]);
       if (ivt == TY_POLY && valt != TY_POLY) emit_boxed_tmp(c, valt, tmps[i], b);
+      /* an Integer or Float slot that holds its nil: the element with its
+         nil, into the field's bit or the oint static */
+      else if (oint_kind(ivt) && iv_ix >= 0 && !iv_static && ivar_has_nilbit(c, iv_cid, iv_ix)) {
+        char pfx[160]; snprintf(pfx, sizeof pfx, "%s%s", g_self, g_self_deref);
+        Buf ob; memset(&ob, 0, sizeof ob);
+        masgn_conv_o(c, ivt, valt, masgn_nil_el(c, els[i]) ? NULL : ivex, &ob);
+        emit_ivar_text_nilbit(c, iv_cid, iv_ix, pfx, ob.p ? ob.p : oint_nil(ivt), b);
+        free(ob.p);
+      }
+      else if (oint_kind(ivt) && iv_ix >= 0 && iv_static && civ_is_oint(c, iv_cid, iv_ix))
+        masgn_conv_o(c, ivt, valt, masgn_nil_el(c, els[i]) ? NULL : ivex, b);
       else buf_printf(b, "_t%d", tmps[i]);
       buf_puts(b, ";\n");
     }
@@ -10860,6 +10889,10 @@ static int emit_multi_write_stmt(Compiler *c, int id, Buf *b, int indent, const 
       int defc2 = -1; comp_writer_in_chain(c, rc2, base2, &defc2);
       int iv2 = comp_ivar_index(&c->classes[defc2 < 0 ? rc2 : defc2], ivn2);
       TyKind ivt2 = iv2 >= 0 ? c->classes[defc2 < 0 ? rc2 : defc2].ivar_types[iv2] : TY_UNKNOWN;
+      int wcls2 = defc2 < 0 ? rc2 : defc2;
+      /* a field with a nil bit takes the element with its nil, the bit kept in step */
+      int nb2 = iv2 >= 0 && oint_kind(ivt2) && ivar_has_nilbit(c, wcls2, iv2);
+      char expr2[32]; snprintf(expr2, sizeof expr2, "_t%d", tmps[i]);
       {
         Buf rb; memset(&rb, 0, sizeof rb);
         emit_node_or_tmp(c, recv_id2, ttr[i], &rb);
@@ -10867,11 +10900,18 @@ static int emit_multi_write_stmt(Compiler *c, int id, Buf *b, int indent, const 
         emit_frozen_obj_guard(c, rc2, rb.p ? rb.p : "", &fb);
         masgn_guard_line(&fb, b, indent);
         emit_indent(b, indent);
-        buf_printf(b, "(%s)->iv_%s = ", rb.p ? rb.p : "", iv_c(base2)); free(rb.p);
+        buf_printf(b, "(%s)->iv_%s = ", rb.p ? rb.p : "", iv_c(base2));
+        if (nb2) {
+          char pfx2[320]; snprintf(pfx2, sizeof pfx2, "(%s)->", rb.p ? rb.p : "");
+          Buf ob; memset(&ob, 0, sizeof ob);
+          masgn_conv_o(c, ivt2, tmpts[i], masgn_nil_el(c, els[i]) ? NULL : expr2, &ob);
+          emit_ivar_text_nilbit(c, wcls2, iv2, pfx2, ob.p ? ob.p : oint_nil(ivt2), b);
+          free(ob.p);
+        }
+        free(rb.p);
       }
       /* a nil element lands the slot's own nil, not the boxed temp */
-      char expr2[32]; snprintf(expr2, sizeof expr2, "_t%d", tmps[i]);
-      masgn_conv(c, id, ivt2, tmpts[i], masgn_nil_el(c, els[i]) ? NULL : expr2, b);
+      if (!nb2) masgn_conv(c, id, ivt2, tmpts[i], masgn_nil_el(c, els[i]) ? NULL : expr2, b);
       buf_puts(b, ";\n");
     }
     else if (lty && sp_streq(lty, "MultiTargetNode")) {
@@ -10893,6 +10933,11 @@ static int emit_multi_write_stmt(Compiler *c, int id, Buf *b, int indent, const 
          typed element, as the ivar target above does */
       TyKind gvalt = tmpts ? tmpts[i] : repr_of(c, els[i]).as_ty;
       if (gv2->type == TY_POLY && gvalt != TY_POLY) emit_boxed_tmp(c, gvalt, tmps[i], b);
+      /* an oint static takes the element with its nil */
+      else if (gvar_is_oint(c, gv2)) {
+        char ex[32]; snprintf(ex, sizeof ex, "_t%d", tmps[i]);
+        masgn_conv_o(c, gv2->type, gvalt, masgn_nil_el(c, els[i]) ? NULL : ex, b);
+      }
       else buf_printf(b, "_t%d", tmps[i]);
       buf_puts(b, ";\n");
     }
@@ -10926,7 +10971,11 @@ static int emit_multi_write_stmt(Compiler *c, int id, Buf *b, int indent, const 
              the sink, as the single store does (#4733) */
           TyKind valt = tmpts ? tmpts[i] : repr_of(c, els[i]).as_ty;
           TyKind et = ty_array_elem(recv_t);
-          if (valt == TY_POLY && et == TY_INT) buf_printf(b, "sp_poly_elem_i(_t%d)", tmps[i]);
+          /* the _nilable store takes the element with its nil */
+          int nl = oint_kind(et) && nil_store_sfx(c, k, els[i])[0];
+          char nex[32]; snprintf(nex, sizeof nex, "_t%d", tmps[i]);
+          if (nl) masgn_conv_o(c, et, valt, masgn_nil_el(c, els[i]) ? NULL : nex, b);
+          else if (valt == TY_POLY && et == TY_INT) buf_printf(b, "sp_poly_elem_i(_t%d)", tmps[i]);
           else if (valt == TY_POLY && et == TY_FLOAT) buf_printf(b, "sp_poly_elem_f(_t%d)", tmps[i]);
           else if (valt == TY_POLY && et == TY_STRING) buf_printf(b, "sp_poly_elem_s(_t%d)", tmps[i]);
           else buf_printf(b, "_t%d", tmps[i]);
