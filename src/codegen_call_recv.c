@@ -5097,6 +5097,77 @@ static int emit_hash_merge_misfit(Compiler *c, int id, TyKind rt, Buf *b) {
   return 1;
 }
 
+/* A read of an Integer-keyed typed hash whose key can be nil (a nil
+   literal, a nullable Integer): no key equals nil, so a nil key misses --
+   `[]` answers the default, key? false, fetch(k, d) its default, values_at
+   a nil element -- where the plain key spelling unwrapped it and raised.
+   The key is bound once; the ordinary emission of the call reads its value
+   through a view binding. Answers 1 when it emitted. */
+static int g_nilkey_busy = -1;
+static int emit_hash_nilkey_read(Compiler *c, int id, const char *name, int recv, TyKind rt,
+                                 int argc, const int *argv, Buf *b) {
+  const NodeTable *nt = c->nt;
+  if (g_nilkey_busy == id || argc < 1 || ty_hash_key(rt) != TY_INT) return 0;
+  if (nt_ref(nt, id, "block") >= 0) return 0;
+  const char *hn = ty_hash_cname(rt);
+  if (!hn || !(sp_streq(hn, "IntInt") || sp_streq(hn, "IntStr"))) return 0;
+  int key = argv[0];
+  TyKind kt = comp_ntype(c, key);
+  int kbox = repr_of(c, key).kind == RK_BOXED || kt == TY_POLY;   /* a boxed key: its nil tag */
+  if (!(kt == TY_NIL || kbox || (kt == TY_INT && node_has_oint_form(c, key)))) return 0;
+  int is_aref = sp_streq(name, "[]") && argc == 1;
+  int is_q = is_key_query(name) && argc == 1;
+  int is_fetch = sp_streq(name, "fetch") && argc == 2;
+  int is_va = sp_streq(name, "values_at") && argc == 1;
+  if (!(is_aref || is_q || is_fetch || is_va)) return 0;
+  Repr cr = repr_of(c, id);
+  TyKind ct = cr.as_ty;
+  if (is_fetch && !(cr.kind == RK_BOXED || comp_ntype(c, argv[1]) == ct)) return 0;
+  if (is_va && !(ct == TY_POLY_ARRAY || ct == TY_INT_ARRAY || ct == TY_STR_ARRAY)) return 0;
+  if (g_n_argov + 2 > MAX_ARG_OVERRIDE) return 0;
+  int tk = ++g_tmp, tr = ++g_tmp;
+  if (kbox && kt != TY_NIL) {
+    buf_printf(b, "({ sp_RbVal _t%d = ", tk); emit_boxed(c, key, b);
+    buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); sp_%sHash *_t%d = ", tk, hn, tr); emit_expr(c, recv, b);
+    buf_printf(b, "; SP_GC_ROOT(_t%d); _t%d.tag == SP_TAG_NIL ? ", tr, tk);
+  }
+  else {
+    buf_printf(b, "({ sp_oint _t%d = ", tk);
+    if (kt == TY_NIL) { buf_puts(b, "((void)("); emit_expr(c, key, b); buf_puts(b, "), sp_oint_nil())"); }
+    else emit_oint_expr(c, key, TY_INT, b);
+    buf_printf(b, "; sp_%sHash *_t%d = ", hn, tr); emit_expr(c, recv, b);
+    buf_printf(b, "; SP_GC_ROOT(_t%d); _t%d.nil ? ", tr, tk);
+  }
+  /* the miss, in the form the call's consumer takes */
+  if (is_aref && sp_streq(hn, "IntInt")) {
+    char d[160]; snprintf(d, sizeof d, "((_t%d && !_t%d->default_nil) ? sp_oint_of(_t%d->default_v) : sp_oint_nil())", tr, tr, tr);
+    if (cr.kind == RK_BOXED) buf_printf(b, "sp_box_oint(%s)", d);
+    else if (node_is_oint(c, id)) buf_puts(b, d);
+    else buf_printf(b, "sp_oint_arg(%s)", d);
+  }
+  else if (is_aref) {
+    if (cr.kind == RK_BOXED) buf_printf(b, "sp_box_str(_t%d ? _t%d->default_v : NULL)", tr, tr);
+    else buf_printf(b, "(_t%d ? _t%d->default_v : (const char *)NULL)", tr, tr);
+  }
+  else if (is_q) buf_puts(b, cr.kind == RK_BOXED ? "sp_box_bool(0)" : "(sp_bool)0");
+  else if (is_fetch) { if (cr.kind == RK_BOXED) emit_boxed(c, argv[1], b); else emit_expr(c, argv[1], b); }
+  else if (ct == TY_POLY_ARRAY) buf_puts(b, "({ sp_PolyArray *_va = sp_PolyArray_new(); sp_PolyArray_push(_va, sp_box_nil()); _va; })");
+  else if (ct == TY_INT_ARRAY) buf_puts(b, "({ sp_IntArray *_va = sp_IntArray_new(); sp_IntArray_push_nilable(_va, sp_oint_nil()); _va; })");
+  else buf_puts(b, "({ sp_StrArray *_va = sp_StrArray_new(); sp_StrArray_push(_va, NULL); _va; })");
+  buf_puts(b, " : ");
+  /* the hit: the ordinary emission, the key and receiver read through their binds */
+  int kb = (kbox && kt != TY_NIL) ? view_bind(key, "_t%d", tk) : view_bind(key, "_t%d.v", tk);
+  int rb2 = view_bind(recv, "_t%d", tr);
+  int sv = g_nilkey_busy; g_nilkey_busy = id;
+  Buf hb; memset(&hb, 0, sizeof hb);
+  emit_call(c, id, &hb);
+  g_nilkey_busy = sv;
+  view_unbind(rb2); view_unbind(kb);
+  buf_puts(b, hb.p ? hb.p : "0"); free(hb.p);
+  buf_puts(b, "; })");
+  return 1;
+}
+
 int emit_hash_call(Compiler *c, int id, Buf *b) {
   const NodeTable *nt = c->nt;
   const char *name = nt_str(nt, id, "name");
@@ -5105,6 +5176,7 @@ int emit_hash_call(Compiler *c, int id, Buf *b) {
   const int *argv = call_args(nt, id, &argc);
   TyKind rt = comp_recv_type(c, recv);
   if (recv >= 0 && ty_is_hash(rt)) {
+    if (emit_hash_nilkey_read(c, id, name, recv, rt, argc, argv, b)) return 1;
     /* the arms that read only the receiver's variant, the receiver and the
        arguments: builtin-op rows (builtin_ops.c, codegen_call_hash.c). The
        arms below that stay read the argument nodes, the block or the

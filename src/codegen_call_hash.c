@@ -174,8 +174,12 @@ int emit_op_hash_to_proc(Compiler *c, const BopCtx *x, Buf *b) {
      for every value type; the .call site reads the slot back. */
   buf_puts(&g_procs, "  _sp_proc_poly_ret = ");
   { char _ge[256];
-    snprintf(_ge, sizeof _ge, "sp_%sHash_get(_h, %s)", hn, keyexpr);
-    emit_boxed_text(c, vt, _ge, &g_procs); }
+    /* an Integer-valued hash answers a miss as its default or nil (oget) */
+    if (vt == TY_INT) buf_printf(&g_procs, "sp_box_oint(sp_%sHash_oget(_h, %s))", hn, keyexpr);
+    else {
+      snprintf(_ge, sizeof _ge, "sp_%sHash_get(_h, %s)", hn, keyexpr);
+      emit_boxed_text(c, vt, _ge, &g_procs);
+    } }
   buf_puts(&g_procs, ";\n  return 0;\n}\n");
   buf_printf(b, "sp_proc_new_meta((void *)_hashproc_%d, (void *)(", pn);
   emit_expr(c, recv, b);
