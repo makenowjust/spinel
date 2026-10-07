@@ -2450,7 +2450,7 @@ static void emit_op_assign_lv(Compiler *c, int id, Buf *b, int indent,
     buf_printf(b, "%s = %s %s ", lval, lval, op); emit_expr(c, v, b); buf_puts(b, ";\n");
     return;
   }
-  if (emit_scalar_op_assign(c, lval, t, op, v, cap, lv && lv->nullable_int, b)) return;
+  if (emit_scalar_op_assign(c, lval, t, op, v, cap, lv && slot_is_oint(lv), b)) return;
   if (t == TY_COMPLEX && (is_add_or_mul(op))) {
     /* coerce the rhs like the binary path does: an Integer, a Float or a boxed
        value all have to reach sp_complex_* as an sp_Complex */
@@ -10011,7 +10011,12 @@ static int emit_multi_write_scalar(Compiler *c, int id, Buf *b, int indent, cons
         LocalVar *llv = lvn ? scope_local(rt_scope, lvn) : NULL;
         TyKind ltt = llv ? llv->type : repr_of(c, lefts[i]).as_ty;
         char gx[64]; snprintf(gx, sizeof gx, "sp_%sArray_get(_t%d, %dLL)", k, tarr, i);
-        if (ltt == TY_POLY && !sp_streq(k, "Poly")) emit_boxed_src(c, elem, gx, b);
+        /* a local that holds its nil takes the element with it */
+        if (oint_kind(ltt) && llv && slot_is_oint(llv)) {
+          if (sp_streq(k, "Poly")) buf_printf(b, "%s(%s)", oint_unbox(ltt), gx);
+          else buf_printf(b, "sp_%sArray_oget(_t%d, %dLL)", k, tarr, i);
+        }
+        else if (ltt == TY_POLY && !sp_streq(k, "Poly")) emit_boxed_src(c, elem, gx, b);
         else if (sp_streq(k, "Poly") && ltt != TY_POLY && ltt != TY_UNKNOWN) {
           /* typed target from a poly tuple (known multi-value return) */
           emit_unbox_text(c, ltt, gx, b);
@@ -10031,7 +10036,16 @@ static int emit_multi_write_scalar(Compiler *c, int id, Buf *b, int indent, cons
         int iv_rt = comp_ivar_index(&c->classes[iv_home_cid], ivnm);
         if (iv_rt >= 0) ivt = c->classes[iv_home_cid].ivar_types[iv_rt];
         buf_printf(b, "%s = ", iv_lhs);
-        if (ivt == TY_POLY && elem != TY_POLY) emit_boxed_src(c, elem, get_expr, b);
+        if (oint_kind(ivt) && iv_rt >= 0 && ivar_has_nilbit(c, iv_home_cid, iv_rt)) {
+          /* the element with its nil into the field's nil bit */
+          char og[96];
+          if (sp_streq(k, "Poly")) snprintf(og, sizeof og, "%s(%s)", oint_unbox(ivt), get_expr);
+          else snprintf(og, sizeof og, "sp_%sArray_oget(_t%d, %dLL)", k, tarr, i);
+          size_t pn = strlen(iv_lhs) - strlen(iv_c(ivnm + 1)) - 3;
+          char ipfx[300]; snprintf(ipfx, sizeof ipfx, "%.*s", (int)pn, iv_lhs);
+          emit_ivar_text_nilbit(c, iv_home_cid, iv_rt, ipfx, og, b);
+        }
+        else if (ivt == TY_POLY && elem != TY_POLY) emit_boxed_src(c, elem, get_expr, b);
         else if (sp_streq(k, "Poly") && ivt != TY_POLY && ivt != TY_UNKNOWN) {
           /* typed target from a poly tuple (known multi-value return) */
           emit_unbox_text(c, ivt, get_expr, b);

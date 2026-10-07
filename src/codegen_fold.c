@@ -9959,7 +9959,10 @@ void emit_gathered_param(Compiler *c, Scope *m, int i, int ct, Buf *out) {
   Buf eb; memset(&eb, 0, sizeof eb);
   char raw[128];
   snprintf(raw, sizeof raw, "sp_PolyArray_get(_t%d, %s)", ct, idx);
-  if (pt != TY_POLY && pt != TY_UNKNOWN) emit_unbox_nilable_text(c, pt, raw, &eb);
+  /* an Integer or Float parameter that holds its nil takes the element
+     with it; a plain one the checked conversion */
+  if (oint_kind(pt) && !(sp && slot_is_oint(sp))) buf_printf(&eb, "%s(%s)", pt == TY_INT ? "sp_poly_to_i" : "sp_poly_to_f", raw);
+  else if (pt != TY_POLY && pt != TY_UNKNOWN) emit_unbox_nilable_text(c, pt, raw, &eb);
   else buf_puts(&eb, raw);
   /* a handle made around a plain String element (a parameter whose slot
      is an sp_String *, the shared one --share-strings assigns or master's

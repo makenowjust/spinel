@@ -8759,7 +8759,9 @@ static void emit_ctor_params(Compiler *c, int init, int init_has_blk, Buf *b) {
     for (int i = 0; i < s->nparams; i++) {
       if (i) buf_puts(b, ", ");
       TyKind pt = scope_param_type(s, i);
-      emit_ctype(c, pt, b);
+      LocalVar *pl = scope_local(s, s->pnames[i]);
+      /* as initialize's own signature declares it (an oint slot included) */
+      if (pl && pl->type != TY_UNKNOWN) emit_slot_ctype(c, pl, b); else emit_ctype(c, pt, b);
       buf_printf(b, " lv_%s", s->pnames[i]);
     }
     if (init_has_blk) {
