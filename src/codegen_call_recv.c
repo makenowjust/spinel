@@ -401,12 +401,13 @@ static void emit_elem_boxed_text(Compiler *c, int recv, TyKind rt, const char *a
 /* The receiver of a compare (min, max, minmax, sort; `ck` "cmp") or of a
    blockless sum (`ck` "sum", `float_seed` when the seed is a Float), wrapped
    in the runtime's nil check where the array can hold nil: CRuby raises
-   there. A marked array is scanned (_ck); any other is checked through its
-   bitmap pointer (_if_flagged), which scans only where a nil was stored. */
+   there. Checked through its bitmap pointer (_if_flagged), which scans only
+   where a nil was stored: every nil an Integer / Float array holds is in
+   its bitmap, so a marked array needs no unconditional scan. */
 void emit_nil_ck_recv(Compiler *c, int recv, TyKind rt, const char *ck, int float_seed, Buf *b) {
   if (!elem_nil_sentinel(c, recv, rt)) { emit_expr(c, recv, b); return; }
   buf_printf(b, "sp_%sArray_nil_%s_%s(", rt == TY_INT_ARRAY ? "Int" : "Float", ck,
-             elem_nil_marked(c, recv, rt) ? "ck" : "if_flagged");
+             "if_flagged");
   emit_expr(c, recv, b);
   if (sp_streq(ck, "sum")) buf_printf(b, ", %d", float_seed);
   buf_puts(b, ")");
@@ -416,7 +417,7 @@ void emit_nil_ck_recv(Compiler *c, int recv, TyKind rt, const char *ck, int floa
 static const char *nil_sum_ck_text(Compiler *c, int recv, TyKind rt, int float_seed, const char *txt, Buf *out) {
   if (!elem_nil_sentinel(c, recv, rt)) return txt;
   buf_printf(out, "sp_%sArray_nil_sum_%s(%s, %d)", rt == TY_INT_ARRAY ? "Int" : "Float",
-             elem_nil_marked(c, recv, rt) ? "ck" : "if_flagged", txt, float_seed);
+             "if_flagged", txt, float_seed);
   return out->p;
 }
 
@@ -1804,8 +1805,14 @@ static int emit_kind_array_call(Compiler *c, int id, Buf *b, const NodeTable *nt
          the analysis proved in range and non-nil reads the plain element */
       TyKind ek = rt == TY_INT_ARRAY ? TY_INT : TY_FLOAT;
       int oread = node_is_oint(c, id);
-      if (hc_index_in_range(c, recv, argv[0]) && !oread) {   /* in range by the loop's own test */
+      /* in range by the loop's own test: the cached element itself -- lifted
+         where the node answers an oint, which an array whose elements are
+         not marked nil-capable never holds (the analysis did not see the
+         loop's bound that the header cache proves) */
+      if (hc_index_in_range(c, recv, argv[0]) && (!oread || !repr_of(c, recv).elem_nil_marked)) {
+        if (oread) buf_printf(b, "%s(", oint_of(ek));
         buf_printf(b, "%s[", hd); emit_int_expr(c, argv[0], b); buf_puts(b, "]");
+        if (oread) buf_puts(b, ")");
         { *out = 1; return 1; }
       }
       if (repr_of(c, recv).nil_cold) {
@@ -1826,9 +1833,12 @@ static int emit_kind_array_call(Compiler *c, int id, Buf *b, const NodeTable *nt
         }
         const char *inil = "";
         char inb[32]; if (io) { snprintf(inb, sizeof inb, "!_o%d.nil && ", tk); inil = inb; }
-        if (oread) buf_printf(b, "; (%s(unsigned long long)_t%d < (unsigned long long)%s && !sp_%sArray_elem_nil(", inil, tk, hl, k);
+        /* the header's no-bitmap flag (_hcz) settles most reads without
+           touching the array */
+        char hz[48]; snprintf(hz, sizeof hz, "%s", hd); if (!strncmp(hz, "_hcd", 4)) hz[3] = 'z';
+        if (oread) buf_printf(b, "; (%s(unsigned long long)_t%d < (unsigned long long)%s && (%s || !sp_%sArray_elem_nil(", inil, tk, hl, hz, k);
         else buf_printf(b, "; %s(unsigned long long)_t%d < (unsigned long long)%s ? %s[_t%d] : ({ ", inil, tk, hl, hd, tk);
-        if (oread) { emit_expr(c, recv, b); buf_printf(b, ", _t%d)) ? %s(%s[_t%d]) : ({ ", tk, oint_of(ek), hd, tk); }
+        if (oread) { emit_expr(c, recv, b); buf_printf(b, ", _t%d))) ? %s(%s[_t%d]) : ({ ", tk, oint_of(ek), hd, tk); }
         emit_nil_cold_test(c, id, recv, b);
         buf_puts(b, " ");
         buf_printf(b, "sp_%sArray_%s(", k, oread ? "oget" : "get");
@@ -1841,9 +1851,10 @@ static int emit_kind_array_call(Compiler *c, int id, Buf *b, const NodeTable *nt
       buf_printf(b, "({ sp_int _t%d = ", tk);
       (void)emit_int_index_raw(c, argv[0], b);
       if (oread) {
-        buf_printf(b, "; ((unsigned long long)_t%d < (unsigned long long)%s && !sp_%sArray_elem_nil(", tk, hl, k);
+        char hz[48]; snprintf(hz, sizeof hz, "%s", hd); if (!strncmp(hz, "_hcd", 4)) hz[3] = 'z';
+        buf_printf(b, "; ((unsigned long long)_t%d < (unsigned long long)%s && (%s || !sp_%sArray_elem_nil(", tk, hl, hz, k);
         emit_expr(c, recv, b);
-        buf_printf(b, ", _t%d)) ? %s(%s[_t%d]) : ", tk, oint_of(ek), hd, tk);
+        buf_printf(b, ", _t%d))) ? %s(%s[_t%d]) : ", tk, oint_of(ek), hd, tk);
       }
       else buf_printf(b, "; (unsigned long long)_t%d < (unsigned long long)%s ? %s[_t%d] : ", tk, hl, hd, tk);
       buf_printf(b, "sp_%sArray_%s(", k, oread ? "oget" : "get");
@@ -2404,7 +2415,7 @@ else {
     if ((rt == TY_INT_ARRAY || rt == TY_FLOAT_ARRAY) && elem_nil_sentinel(c, recv, rt)) {
       oint_open(c, id, ty_array_elem(rt), b);
       buf_printf(b, "sp_%sArray_%s_o(sp_%sArray_nil_lit_%s(", k, name, k,
-                 elem_nil_marked(c, recv, rt) ? "ck" : "if_flagged");
+                 "if_flagged");
       emit_expr(c, recv, b); buf_printf(b, ", %d))", want_max);
       oint_close(c, id, b);
       { *out = 1; return 1; }

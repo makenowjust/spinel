@@ -7497,7 +7497,9 @@ static void hc_close(HcRegion *r, const char *loop, Buf *b, int indent) {
       const char *et = r->e[i].kind == HC_INT ? "sp_int" : r->e[i].kind == HC_FLOAT ? "sp_float" : "const char";
       emit_indent(b, indent + 1);
       buf_printf(b, "%s *_hcd%d_%d; sp_int _hcl%d_%d;", et, r->id, i, r->id, i);
-      if (r->e[i].kind != HC_STR) buf_printf(b, " int _hcw%d_%d;", r->id, i);
+      /* _hcz: the array has no nil bitmap, so no element is nil (tested
+         once per refresh instead of per read) */
+      if (r->e[i].kind != HC_STR) buf_printf(b, " int _hcw%d_%d; int _hcz%d_%d;", r->id, i, r->id, i);
       if (r->e[i].nf) buf_printf(b, " sp_int _hcn%d_%d;", r->id, i);
       buf_puts(b, "\n");
     }
@@ -7508,9 +7510,9 @@ static void hc_close(HcRegion *r, const char *loop, Buf *b, int indent) {
         buf_printf(b, "{ const char *_s = %s; _hcd%d_%d = _s; _hcl%d_%d = _s ? (sp_int)sp_str_byte_len(_s) : 0; } ",
                    rv, r->id, i, r->id, i);
       else {
-        buf_printf(b, "{ sp_%sArray *_a = %s; _hcd%d_%d = _a ? _a->data%s : NULL; _hcl%d_%d = _a ? _a->len : 0; _hcw%d_%d = _a && !_a->frozen; ",
+        buf_printf(b, "{ sp_%sArray *_a = %s; _hcd%d_%d = _a ? _a->data%s : NULL; _hcl%d_%d = _a ? _a->len : 0; _hcw%d_%d = _a && !_a->frozen; _hcz%d_%d = _a && !_a->nilbits; ",
                    r->e[i].kind == HC_INT ? "Int" : "Float", rv, r->id, i,
-                   r->e[i].kind == HC_INT ? " + _a->start" : "", r->id, i, r->id, i);
+                   r->e[i].kind == HC_INT ? " + _a->start" : "", r->id, i, r->id, i, r->id, i);
         if (r->e[i].nf)
           buf_printf(b, "_hcn%d_%d = _a && !SP_MAY_NIL(_a)%s ? _a->len : 0; ", r->id, i, r->e[i].guard);
         buf_puts(b, "} ");
