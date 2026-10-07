@@ -3815,6 +3815,9 @@ static int emit_and_or_begin_expr(Compiler *c, int id, Buf *b, const NodeTable *
                 the result is one, its value where it is plain */ \
              else if (oint_kind(lt) && ro && !lo) buf_printf((TB), "%s(_t%d)", oint_of(lt), t); \
              else if (oint_kind(lt) && !ro && lo) buf_printf((TB), "_t%d.v", t); \
+             /* an untyped or falsy-constant left was declared at the result's
+                plain type: wrapped where the result is an oint */ \
+             else if ((lt == TY_UNKNOWN || lt_falsy_const) && oint_kind(res) && ro) buf_printf((TB), "%s(_t%d)", oint_of(res), t); \
              else buf_printf((TB), "_t%d", t); } \
     } while (0)
     EMIT_ARM(0, &larm);
