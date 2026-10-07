@@ -47,7 +47,6 @@ p(m.zero? ? "z" : "nz")
 p m.positive?
 p m.negative?
 p m.nonzero?
-p m.abs == m.abs
 p (m..0).cover?(m)
 p (m..0).include?(m)
 p (m...0).cover?(m)

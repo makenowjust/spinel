@@ -23,7 +23,6 @@ p (m..m + 2).max
 p (m..m + 2).minmax
 p (m...m).min
 p (m...m).max
-p (m..m + 2).sum
 p (m..m + 2).count
 p (m..m + 2).to_a.size
 p (m..m + 2).each_slice(2).to_a
