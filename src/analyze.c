@@ -27299,7 +27299,8 @@ int nullable_int_value(Compiler *c, int v) {
     if (cid < 0 || cid >= c->nclasses) return 0;
     ClassInfo *ci = &c->classes[cid];
     int iv = comp_ivar_index(ci, nt_str(nt, v, "name"));
-    return iv >= 0 && ci->ivar_nullable_int[iv];
+    /* a boxed ivar (a promote-widened member) can hold nil too */
+    return iv >= 0 && (ci->ivar_nullable_int[iv] || ci->ivar_types[iv] == TY_POLY);
   }
   /* A class variable some write left the sentinel in, as an ivar: `def
      self.b = (@@x = nil)` beside `@@x = 1` read back 0 */
