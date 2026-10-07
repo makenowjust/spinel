@@ -13451,9 +13451,11 @@ void emit_array_splice(Compiler *c, int id, int recv, TyKind rt,
                      :                     "SP_BUILTIN_FLT_ARRAY";
     /* A scalar goes through the typed-element rules (#4481): nil is the
        kind's nil, a value of another kind is refused rather than coerced. */
-    const char *conv = elem == TY_INT   ? "sp_poly_elem_i"
+    /* _vN is the plain element: sp_poly_elem_i / _f answer the oint, the
+       _v forms unwrap it (nil's TypeError) */
+    const char *conv = elem == TY_INT   ? "sp_poly_elem_i_v"
                      : elem == TY_STRING ? "sp_poly_elem_s"
-                     :                     "sp_poly_elem_f";
+                     :                     "sp_poly_elem_f_v";
     buf_printf(b, "sp_RbVal _t%d = ", ts); emit_boxed(c, rhs_node, b);
     /* root the boxed RHS: when it holds a same-kind array, _src aliases into
        _sa->data, which the splice's pushes can collect out from under us */
