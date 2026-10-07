@@ -1113,7 +1113,9 @@ int emit_bsearch_expr(Compiler *c, int id, Buf *b) {
   /* an Integer-typed block is CRuby's find-any mode (0 found, positive means
      the target sorts after the probe, negative before); a truthy block is
      find-minimum mode */
-  int find_any = comp_ntype(c, bb[bn - 1]) == TY_INT;
+  /* a Float answer is find-any as well (Float::INFINITY searches right) */
+  TyKind fa_t = comp_ntype(c, bb[bn - 1]);
+  int find_any = fa_t == TY_INT || fa_t == TY_FLOAT;
   Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, recv, &rb);
   emit_indent(g_pre, g_indent); buf_printf(g_pre, "sp_Range _t%d = ", tr); buf_puts(g_pre, rb.p ? rb.p : ""); buf_puts(g_pre, ";\n"); free(rb.p);
   /* a Float end makes CRuby bisect the Floats (2.0, not 2) */
@@ -1134,11 +1136,28 @@ int emit_bsearch_expr(Compiler *c, int id, Buf *b) {
   if (p0) { snprintf(pv, sizeof pv, "_t%d", tmid); emit_iter_param_assign(c, block, p0_orig, p0, TY_INT, pv, g_pre, g_indent + 1); }
   IterStep st; emit_iter_step_open(c, block, 0, g_indent + 1, &st);
   int save = g_indent; g_indent++;
-  Buf cb; memset(&cb, 0, sizeof cb); emit_iter_step_tail(c, &st, &cb); g_indent = save;
-  if (find_any) {
+  Buf cb; memset(&cb, 0, sizeof cb);
+  /* an Integer answer that can be nil: nil searches right, as false does */
+  int fa_o = find_any && fa_t == TY_INT && emit_iter_step_tail_o(c, &st, TY_INT, &cb);
+  if (!fa_o) emit_iter_step_tail(c, &st, &cb);
+  g_indent = save;
+  if (fa_o) {
     int tcmp = ++g_tmp;
     emit_indent(g_pre, g_indent + 1);
-    buf_printf(g_pre, "sp_int _t%d = %s;\n", tcmp, cb.p ? cb.p : "0");
+    buf_printf(g_pre, "sp_oint _t%d = %s;\n", tcmp, cb.p ? cb.p : "sp_oint_nil()");
+    emit_indent(g_pre, g_indent + 1);
+    buf_printf(g_pre, "if (_t%d.nil) %s\n", tcmp, right);
+    emit_indent(g_pre, g_indent + 1);
+    buf_printf(g_pre, "else if (_t%d.v == 0) { _t%d = sp_oint_of(_t%d); break; }\n", tcmp, tres, tmid);
+    emit_indent(g_pre, g_indent + 1);
+    buf_printf(g_pre, "else if (_t%d.v > 0) %s\n", tcmp, right);
+    emit_indent(g_pre, g_indent + 1);
+    buf_printf(g_pre, "else %s\n", left);
+  }
+  else if (find_any) {
+    int tcmp = ++g_tmp;
+    emit_indent(g_pre, g_indent + 1);
+    buf_printf(g_pre, "%s _t%d = %s;\n", fa_t == TY_FLOAT ? "sp_float" : "sp_int", tcmp, cb.p ? cb.p : "0");
     /* an Integer block whose answer can be nil arrives plain: the nil
        raised at its coercion (a boxed block is the combined dispatch) */
     emit_indent(g_pre, g_indent + 1);
@@ -3693,6 +3712,23 @@ TyKind emit_iter_step_tail(Compiler *c, const IterStep *st, Buf *vb) {
   if (st->want_poly) { emit_boxed(c, bb[bn - 1], vb); return TY_POLY; }
   emit_expr(c, bb[bn - 1], vb);
   return tt;
+}
+
+/* The tail in its oint form when it can be nil (an oint slot, or a tail
+   with an oint form): answers 1 and writes it, else 0 and writes nothing.
+   For the emitters that read a nil answer as a value of its own
+   (bsearch's nil: search right). */
+int emit_iter_step_tail_o(Compiler *c, const IterStep *st, TyKind t, Buf *vb) {
+  if (st->slot) {
+    if (!oint_slot_is(st->slot)) return 0;
+    buf_printf(vb, "_t%d", st->slot);
+    return 1;
+  }
+  int body = nt_ref(c->nt, st->block, "body");
+  int bn = 0; const int *bb = body >= 0 ? nt_arr(c->nt, body, "body", &bn) : NULL;
+  if (bn == 0 || st->want_poly || !node_has_oint_form(c, bb[bn - 1])) return 0;
+  emit_oint_expr(c, bb[bn - 1], t, vb);
+  return 1;
 }
 
 /* The answer of a step opened for a condition (want_poly), as a C truth

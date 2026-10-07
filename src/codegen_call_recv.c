@@ -93,6 +93,8 @@ static void emit_int_array_delete(Compiler *c, const char *arr, int arg, int nil
   buf_puts(b, ")");
 }
 #include "analyze.h"
+/* codegen_fold.c: a step tail in its oint form, when it can be nil */
+int emit_iter_step_tail_o(Compiler *c, const IterStep *st, TyKind t, Buf *vb);
 
 static void emit_str_encode_call(Compiler *c, const char *recv_txt, const int *argv, int argc, Buf *b);
 
@@ -3432,7 +3434,9 @@ static int emit_typed_array_call(Compiler *c, int id, Buf *b, const NodeTable *n
         IterStep st; emit_iter_step_open(c, block, 0, g_indent + 1, &st);
         int sv = g_indent; g_indent++;
         Buf cb; memset(&cb, 0, sizeof cb);
-        TyKind bvt = emit_iter_step_tail(c, &st, &cb); g_indent = sv;
+        /* an Integer answer that can be nil: nil searches right */
+        int bv_o = emit_iter_step_tail_o(c, &st, TY_INT, &cb);
+        TyKind bvt = bv_o ? TY_INT : emit_iter_step_tail(c, &st, &cb); g_indent = sv;
         /* An Integer-valued block selects find-ANY mode (CRuby dispatches on
            the block value's kind): 0 means found, negative searches left,
            positive right. A boolean block is find-minimum, as before. */
@@ -3441,6 +3445,19 @@ static int emit_typed_array_call(Compiler *c, int id, Buf *b, const NodeTable *n
           emit_indent(g_pre, g_indent + 1);
           buf_printf(g_pre, "(void)(%s); sp_raise_cls(\"TypeError\", \"wrong argument type for Array#bsearch block\");\n",
                      cb.p ? cb.p : "sp_box_nil()");
+        }
+        else if (bvt == TY_INT && bv_o) {
+          int tcmp = ++g_tmp;
+          emit_indent(g_pre, g_indent + 1);
+          buf_printf(g_pre, "sp_oint _t%d = %s;\n", tcmp, cb.p ? cb.p : "sp_oint_nil()");
+          emit_indent(g_pre, g_indent + 1);
+          buf_printf(g_pre, "if (_t%d.nil) { _t%d = _t%d + 1; }\n", tcmp, tlo, tmid);
+          emit_indent(g_pre, g_indent + 1);
+          buf_printf(g_pre, "else if (_t%d.v == 0) { _t%d = sp_%sArray_%s(_t%d, _t%d); break; }\n",
+                     tcmp, tres, k, egn, trecv, tmid);
+          emit_indent(g_pre, g_indent + 1);
+          buf_printf(g_pre, "else if (_t%d.v < 0) { _t%d = _t%d - 1; }\n", tcmp, thi, tmid);
+          emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "else { _t%d = _t%d + 1; }\n", tlo, tmid);
         }
         else if (bvt == TY_INT) {
           int tcmp = ++g_tmp;
