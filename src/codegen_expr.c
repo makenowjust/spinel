@@ -1459,7 +1459,10 @@ void emit_expr(Compiler *c, int id, Buf *b) {
   /* a wrapper pending: the node is rendered aside first, since a text that
      diverges (a raise token answering the plain default) takes no wrapper */
   Buf side; memset(&side, 0, sizeof side);
-  Buf *ob = (wrap_arg || wrap_of) ? &side : b;
+  /* (an oint wanted of an oint producer is rendered aside too: a diverging
+     text there carries the plain default, which the oint slot cannot take) */
+  int keep_o = want_o && is_o && oint_kind(ot);
+  Buf *ob = (wrap_arg || wrap_of || keep_o) ? &side : b;
   /* an Array subclass instance read where an Array is wanted -- a splat, a
      destructuring, a `for` collection, an element write that is no call --
      is typed as its Array (an_ary_viewed): the same pointer, cast to the
@@ -1474,6 +1477,14 @@ void emit_expr(Compiler *c, int id, Buf *b) {
     /* a diverging text (a raise token) carries the plain default: it is
        never unwrapped (sp_oint_arg would not take it), and wrapped as the
        plain scalar it is where the oint is wanted */
+    if (keep_o) {
+      if (side.p && text_diverges(side.p)) buf_printf(b, "({ (void)(%s); %s; })", side.p, oint_nil(ot));
+      else buf_puts(b, side.p ? side.p : "");
+      free(side.p);
+      g_oint_read = 0;
+      g_expr_depth--;
+      return;
+    }
     int skip = wrap_arg && side.p && text_diverges(side.p);
     if (wrap_arg && !skip) buf_printf(b, "%s(", oint_arg(ot));
     else if (wrap_of) buf_printf(b, "%s(", oint_of(oint_kind(ot) ? ot : TY_INT));

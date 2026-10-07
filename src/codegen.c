@@ -975,7 +975,12 @@ const char *past_open_parens(const char *s) {
 void emit_member_boxed_text(Compiler *c, ClassInfo *ci, int i, const char *objprefix, const char *expr, Buf *b);
 int text_diverges(const char *txt) {
   const char *p = past_open_parens(txt);
-  while (strncmp(p, "void)", 5) == 0) p = past_open_parens(p + 5);
+  /* a statement expression whose first statement raises: `({ sp_raise_..` */
+  for (int k = 0; k < 8; k++) {
+    if (strncmp(p, "void)", 5) == 0) { p = past_open_parens(p + 5); continue; }
+    if (*p == '{') { p++; while (*p == ' ') p++; p = past_open_parens(p); continue; }
+    break;
+  }
   return strncmp(p, "sp_raise_", 9) == 0;
 }
 
