@@ -575,7 +575,20 @@ int emit_call_instance_eval_arms(Compiler *c, int id, Buf *b, const NodeTable *n
         g_ie_nil_ivars = sv_nil_ie;
         return 1;
       }
-      if (nscalar) {
+      /* an Integer or Float tail the consumer takes with its nil (a
+         receiver without the ivar reads it nil): held as the oint */
+      if (nscalar && oint_kind(nbt) && (node_is_oint(c, id) || nbox)) {
+        int tr = ++g_tmp;
+        Buf vb; memset(&vb, 0, sizeof vb);
+        emit_oint_expr(c, nbb[nbn - 1], nbt, &vb);
+        emit_indent(g_pre, g_indent);
+        buf_printf(g_pre, "%s _t%d = %s;\n", oint_ctype(nbt), tr, vb.p ? vb.p : oint_nil(nbt)); free(vb.p);
+        ie_body_restore(c, nsnap);
+        g_self = sv_self; g_self_deref = sv_deref;
+        if (nbox) buf_printf(b, "%s(_t%d)", oint_box(nbt), tr);
+        else buf_printf(b, "_t%d", tr);
+      }
+      else if (nscalar) {
         int tr = ++g_tmp;
         Buf vb = expr_buf(c, nbb[nbn - 1]);
         emit_indent(g_pre, g_indent); emit_ctype(c, nbt, g_pre);
