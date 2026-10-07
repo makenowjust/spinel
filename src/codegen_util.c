@@ -5253,6 +5253,9 @@ int node_is_oint(Compiler *c, int node) {
       int rci = comp_class_index(c, nt_str(nt, r, "name"));
       if (rci >= 0) mi = comp_cmethod_in_chain(c, rci, nm, NULL);
     }
+    /* a method whose return widened past the call's (a yielding method
+       answering its block, typed per call site): the call's own analysis */
+    if (mi >= 0 && (c->scopes[mi].ret == TY_POLY || c->scopes[mi].ret == TY_UNKNOWN)) return nullable_int_value(c, node);
     if (mi >= 0) return method_ret_is_oint(&c->scopes[mi]);
     /* `<=>` answers nil for an incomparable operand: the analysis's answer
        where both sides are of one comparable kind (numbers, Strings,

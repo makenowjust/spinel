@@ -27389,7 +27389,8 @@ int nullable_int_value(Compiler *c, int v) {
   if (nt_kind(nt, v) == NK_ClassVariableReadNode) {
     ClassInfo *ci = NULL;
     int cv = cvar_slot(c, v, &ci);
-    return cv >= 0 && ci->cvar_nullable_int[cv];
+    /* a boxed one (a promote-widened member) can hold nil too, as an ivar */
+    return cv >= 0 && (ci->cvar_nullable_int[cv] || ci->cvar_types[cv] == TY_POLY);
   }
   /* A Float global is declared holding the sentinel, which it keeps until its
      first assignment; and any scalar global some write left the sentinel in
@@ -27398,7 +27399,7 @@ int nullable_int_value(Compiler *c, int v) {
     const char *gn = nt_str(nt, v, "name");
     const char *rn = gn ? comp_resolve_gvar(c, gn + 1) : NULL;
     LocalVar *g = rn ? comp_gvar(c, rn) : NULL;
-    if (g && g->nullable_int) return 1;
+    if (g && (g->nullable_int || g->type == TY_POLY)) return 1;
     return g && g->type == TY_FLOAT && !gvar_seeded_before_read(c, rn);
   }
   /* `(e)` is e, and a parenthesized sequence `(y = a[i]; y)` is its last
@@ -28535,7 +28536,9 @@ static void mark_nullable_int_locals(Compiler *c) {
        plain int at the caller (#3505). */
     for (int mi = 1; mi < c->nscopes; mi++) {
       Scope *s = &c->scopes[mi];
-      if (s->ret_nullable_int || (s->ret != TY_INT && s->ret != TY_FLOAT)) continue;
+      /* (a boxed return too: a call site that narrows it to a number --
+         a yielding method answering its block -- asks this mark) */
+      if (s->ret_nullable_int || (s->ret != TY_INT && s->ret != TY_FLOAT && s->ret != TY_POLY && s->ret != TY_UNKNOWN)) continue;
       int tail = scope_body_last(c, mi);
       /* a body with rescue / else / ensure clauses: any arm's value */
       if (tail < 0 && s->body >= 0 && nt_kind(nt, s->body) == NK_BeginNode) tail = s->body;
@@ -28549,7 +28552,7 @@ static void mark_nullable_int_locals(Compiler *c) {
       int rmi = rs ? (int)(rs - c->scopes) : -1;
       if (rmi < 1 || rmi >= c->nscopes) continue;
       Scope *s = &c->scopes[rmi];
-      if (s->ret_nullable_int || (s->ret != TY_INT && s->ret != TY_FLOAT)) continue;
+      if (s->ret_nullable_int || (s->ret != TY_INT && s->ret != TY_FLOAT && s->ret != TY_POLY && s->ret != TY_UNKNOWN)) continue;
       if (nullable_int_value(c, id)) { s->ret_nullable_int = 1; changed = 1; }
     }
     for (int id = 0; id < nt->count; id++) {
@@ -29123,7 +29126,7 @@ static void mark_nullable_int_locals(Compiler *c) {
         BlockSig bsig;
         block_sig(c, nt_ref(nt, blk, "parameters"), 0, &bsig);
         int np = bsig.P + bsig.O + bsig.Q;
-        if (!bs || bsig.P + bsig.O == 0) continue;
+        if (!bs || (np == 0 && bsig.nk == 0)) continue;
         TyKind *pos = calloc((size_t)(np + bsig.nk + 1), sizeof(TyKind));
         char *absent = calloc((size_t)np + 1, 1);
         if (iex) block_site_types(c, &bsig, iav, ian, pos, absent, pos + np);
@@ -29137,10 +29140,21 @@ static void mark_nullable_int_locals(Compiler *c) {
             block_site_types(c, &bsig, av, an, pos, absent, pos + np);
           }
         }
-        for (int i = 0; i < bsig.P + bsig.O; i++) {
+        /* the posts after a splat too: `|a, *r, b|` binds b from the last
+           argument */
+        for (int i = 0; i < np; i++) {
           if (!(absent[i] & BS_NIL)) continue;
           const char *pnm = block_sig_name(c, &bsig, i);
           LocalVar *pv = pnm ? scope_local(bs, pnm) : NULL;
+          if (!pv || (pv->type != TY_INT && pv->type != TY_FLOAT) || pv->nullable_int) continue;
+          pv->nullable_int = 1; changed = 1;
+        }
+        /* a keyword the sites bind (`yield(k: a)`) from arguments that may
+           be nil: the binding plan keeps no per-key nil, so the slot holds
+           its nil beside the value whenever a site may pass one */
+        for (int ki = 0; ki < bsig.nk; ki++) {
+          const char *kn = block_keyword_name(c, blk, ki);
+          LocalVar *pv = kn ? scope_local(bs, kn) : NULL;
           if (!pv || (pv->type != TY_INT && pv->type != TY_FLOAT) || pv->nullable_int) continue;
           pv->nullable_int = 1; changed = 1;
         }

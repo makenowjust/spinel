@@ -6439,7 +6439,9 @@ static int emit_poly_builtin_default_at(Compiler *c, int id, int recv, const cha
   view_unbind(slot);
   Buf ib; memset(&ib, 0, sizeof ib);
   if (ok && nb->p) {
-    if (ret == TY_POLY && bt != TY_POLY) emit_boxed_text(c, bt, nb->p, &ib);
+    /* a raise token is no value to box: the test below reads it bare */
+    int is_raise = strncmp(nb->p, "sp_raise_", 9) == 0;
+    if (ret == TY_POLY && bt != TY_POLY && !is_raise) emit_boxed_text(c, bt, nb->p, &ib);
     else buf_puts(&ib, nb->p);
   }
   free(nb->p); free(nb);
