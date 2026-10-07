@@ -5871,6 +5871,8 @@ else {
         /* copy the receiver into the fresh result */
         buf_printf(b, " %s _t%d = ", c_type_name(rt), tc); emit_expr(c, recv, b); buf_puts(b, ";");
         buf_printf(b, " _t%d->default_v = _t%d->default_v;", tr, tc);
+        if (rt == TY_STR_INT_HASH || rt == TY_INT_INT_HASH)
+          buf_printf(b, " _t%d->default_nil = _t%d->default_nil;", tr, tc);
         if (vt == TY_POLY)
           buf_printf(b, " _t%d->dproc = _t%d->dproc; _t%d->dproc_self = _t%d->dproc_self;", tr, tc, tr, tc);
         buf_printf(b, " for (sp_int _t%d = 0; _t%d < _t%d->len; _t%d++)"
