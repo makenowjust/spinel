@@ -28325,14 +28325,18 @@ static void mark_nullable_int_locals(Compiler *c) {
   /* A Float ivar initialize need not assign holds the constructor's nil seed
      (emit_ivar_nil_inits) until its first write, so a local copied from it
      carries the sentinel too. An int's boxing checks its sentinel anyway. */
+  int toplevel_cid = comp_class_index(c, "Toplevel");
   for (int k = 0; k < c->nclasses; k++) {
     ClassInfo *ci = &c->classes[k];
     if (ci->is_struct) continue;
+    /* the top level has no initialize: its ivars are statics whose reads
+       the nil marks of their writes decide */
+    int is_toplevel = k == toplevel_cid;
     for (int iv = 0; iv < ci->nivars; iv++)
       /* an Integer one too: nil out of band, its read is nil until the
          first write (the nil bit), and "assigned in initialize" means on
          every path (a top-level statement of initialize) */
-      if ((ci->ivar_types[iv] == TY_FLOAT || ci->ivar_types[iv] == TY_INT) &&
+      if ((ci->ivar_types[iv] == TY_FLOAT || (ci->ivar_types[iv] == TY_INT && !is_toplevel)) &&
           !ivar_assigned_in_initialize(c, k, ci->ivars[iv]))
         ci->ivar_nullable_int[iv] = 1;
   }
