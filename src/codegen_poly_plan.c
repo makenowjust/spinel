@@ -282,9 +282,18 @@ static int poly_user_arm0_decide(Compiler *c, int id, const char *name, int argc
 /* One user-class arm of a zero-argument poly dispatch, as the plan (or the
    decision above) gives it: `case k:` writing the result temp _t<tr> from
    receiver _t<tv>, the arm's value fitted to the call's type ret. */
+/* The zero-argument dispatch's result slot holds its nil beside the value
+   (an sp_oint / sp_ofloat, declared so by the dispatcher) where the call's
+   consumer wants that form: an arm's plain value is wrapped as never nil,
+   a boxed one unboxed with its nil, an oint one assigned as it is. */
+static int plan_slot_oint(Compiler *c, int id, TyKind ret) { return is_scalar_ret(ret) && oint_kind(ret) && node_is_oint(c, id); }
+static void plan_put_plain(int so, TyKind ret, const char *text, Buf *b) { if (so) buf_printf(b, "%s(%s)", oint_of(ret), text); else buf_puts(b, text); }
+static void plan_put_boxed(Compiler *c, int so, TyKind slotty, const char *text, Buf *b) { if (so) buf_printf(b, "%s(%s)", oint_unbox(slotty), text); else emit_unbox_text(c, slotty, text, b); }
+
 static void emit_poly_user_arm0(Compiler *c, int id, const char *name, TyKind ret, int tv, int tr,
                                 int blk_tmp0, const PolyArm *a, Buf *b) {
   int k = a->key, mi = a->mi;
+  int so = plan_slot_oint(c, id, ret);
   if (a->kind == PA_NATIVE || (a->kind == PA_ARITY && mi < 0)) {
     int nmi = comp_native_method_find(c, k, name, 0, 0);
     if (a->kind == PA_NATIVE) {
@@ -303,10 +312,11 @@ static void emit_poly_user_arm0(Compiler *c, int id, const char *name, TyKind re
         buf_printf(b, "_t%d = ", tr);
         if (ret == TY_POLY && mret != TY_POLY) { emit_boxed_text(c, mret, nbuf, b); pconv = PC_BOX; }
         else if (ret != TY_POLY && mret == TY_POLY) {
-          emit_unbox_poly_ret(c, is_scalar_ret(ret) ? ret : TY_INT, nbuf, b);
+          if (so) buf_printf(b, "%s(%s)", oint_unbox(ret), nbuf);
+          else emit_unbox_poly_ret(c, is_scalar_ret(ret) ? ret : TY_INT, nbuf, b);
           pconv = PC_UNBOX;
         }
-        else buf_puts(b, nbuf);
+        else plan_put_plain(so, ret, nbuf, b);
       }
       buf_puts(b, "; break;");
       if (g_plan_check) pa_observe(PA_NATIVE, k, -1, mret, pconv);
@@ -452,13 +462,19 @@ static void emit_poly_user_arm0(Compiler *c, int id, const char *name, TyKind re
       if (ret == TY_POLY && cret9 != TY_POLY) { emit_boxed_text(c, cret9, call, b); pconv = PC_BOX; }
       /* The slot is scalar (e.g. a length dispatch fixed to sp_int) but
          this class's method widened its return to poly: coerce down. */
-      else if (ret != TY_POLY && cret9 == TY_POLY) { emit_unbox_poly_ret(c, slotty, call, b); pconv = PC_UNBOX; }
+      else if (ret != TY_POLY && cret9 == TY_POLY) {
+        if (so) buf_printf(b, "%s(%s)", oint_unbox(slotty), call);
+        else emit_unbox_poly_ret(c, slotty, call, b);
+        pconv = PC_UNBOX;
+      }
       /* Two classes own the name and answer different types (one an
          Integer, another a Bignum): the slot took one of them, so the
          odd arm converts into it rather than emitting a type error. */
-      else if (slotty == TY_INT && cret9 == TY_BIGINT) { buf_printf(b, "sp_bigint_to_int(%s)", call); pconv = PC_NUM; }
-      else if (slotty == TY_FLOAT && cret9 == TY_BIGINT) { buf_printf(b, "sp_bigint_to_double(%s)", call); pconv = PC_NUM; }
-      else buf_puts(b, call);
+      else if (slotty == TY_INT && cret9 == TY_BIGINT) { if (so) buf_puts(b, "sp_oint_of("); buf_printf(b, "sp_bigint_to_int(%s)", call); if (so) buf_puts(b, ")"); pconv = PC_NUM; }
+      else if (slotty == TY_FLOAT && cret9 == TY_BIGINT) { if (so) buf_puts(b, "sp_ofloat_of("); buf_printf(b, "sp_bigint_to_double(%s)", call); if (so) buf_puts(b, ")"); pconv = PC_NUM; }
+      /* a callee that answers its nil beside the value hands the slot its own form */
+      else if (so && method_ret_is_oint(&c->scopes[pf9 ? pfi9 : mi])) buf_puts(b, call);
+      else plan_put_plain(so, ret, call, b);
     }
     buf_puts(b, "; break;");
     free(cb.p);
@@ -483,11 +499,18 @@ static void emit_poly_user_arm0(Compiler *c, int id, const char *name, TyKind re
     buf_printf(b, "(%s ? sp_box_nil() : %s(%s))", bit, ivt == TY_INT ? "sp_box_int" : "sp_box_float", fld);
     pconv = PC_BOX_OR_NIL;
   }
+  /* an oint slot takes the field with its bit: nil where the bit is set */
+  else if (so && oint_kind(ivt) && ivx >= 0 && ivar_has_nilbit(c, rdcls, ivx)) {
+    char objp[200]; snprintf(objp, sizeof objp, "((sp_%s *)_t%d.v.p)->", c->classes[rdcls].c_name, tv);
+    char bit[400]; ivar_nilbit_test(c, rdcls, ivx, objp, bit, sizeof bit);
+    buf_printf(b, "(%s ? %s : %s(%s))", bit, oint_nil(ret), oint_of(ret), fld);
+    pconv = PC_BOX_OR_NIL;
+  }
   else if (ret == TY_POLY && ivt != TY_POLY) { emit_boxed_text(c, ivt, fld, b); pconv = PC_BOX; }
   /* The slot is scalar (e.g. a length dispatch fixed to sp_int) but
      this class's ivar widened to poly: coerce down. */
   else if (ret != TY_POLY && ivt == TY_POLY) {
-    emit_unbox_text(c, is_scalar_ret(ret) ? ret : TY_INT, fld, b);
+    plan_put_boxed(c, so, is_scalar_ret(ret) ? ret : TY_INT, fld, b);
     pconv = PC_UNBOX;
   }
   /* shared-mutable ivar read into a plain string slot: the safe
@@ -496,7 +519,7 @@ static void emit_poly_user_arm0(Compiler *c, int id, const char *name, TyKind re
     buf_printf(b, "%s ? sp_str_concat(sp_String_cstr(%s), (&(\"\\xff\")[1])) : NULL", fld, fld);
     pconv = PC_COPY;
   }
-  else buf_puts(b, fld);
+  else plan_put_plain(so, ret, fld, b);
   buf_puts(b, "; break;");
   if (g_plan_check) pa_observe(PA_READER, k, -1, ivt, pconv);
 }
@@ -1352,12 +1375,14 @@ int emit_poly_obj_default0(Compiler *c, int id, const char *name, int argc, TyKi
         if (method_is_void(&c->scopes[obj_pf])) { buf_puts(b, oc.p); pconv = PC_VOID; }
         else {
           buf_printf(b, "_t%d = ", tr);
+          int so = plan_slot_oint(c, id, ret);
           if (ret == TY_POLY && pr != TY_POLY) { emit_boxed_text(c, pr, oc.p, b); pconv = PC_BOX; }
           else if (ret != TY_POLY && pr == TY_POLY) {
-            emit_unbox_text(c, is_scalar_ret(ret) ? ret : TY_INT, oc.p, b);
+            plan_put_boxed(c, so, is_scalar_ret(ret) ? ret : TY_INT, oc.p, b);
             pconv = PC_UNBOX;
           }
-          else buf_puts(b, oc.p);
+          else if (so && method_ret_is_oint(&c->scopes[obj_pf])) buf_puts(b, oc.p);
+          else plan_put_plain(so, ret, oc.p, b);
         }
         buf_puts(b, "; break;");
         free(oc.p);
@@ -1385,16 +1410,18 @@ int emit_poly_obj_default0(Compiler *c, int id, const char *name, int argc, TyKi
         if (method_is_void(&c->scopes[obj_mi])) { buf_puts(b, ocall); pconv = PC_VOID; }
         else {
           TyKind oslot = is_scalar_ret(ret) ? ret : TY_INT;
+          int so = plan_slot_oint(c, id, ret);
           buf_printf(b, "_t%d = ", tr);
           if (ret == TY_POLY && c->scopes[obj_mi].ret != TY_POLY) {
             emit_boxed_text(c, c->scopes[obj_mi].ret, ocall, b);
             pconv = PC_BOX;
           }
           else if (ret != TY_POLY && c->scopes[obj_mi].ret == TY_POLY) {
-            emit_unbox_text(c, oslot, ocall, b);
+            plan_put_boxed(c, so, oslot, ocall, b);
             pconv = PC_UNBOX;
           }
-          else buf_puts(b, ocall);
+          else if (so && method_ret_is_oint(&c->scopes[obj_mi])) buf_puts(b, ocall);
+          else plan_put_plain(so, ret, ocall, b);
         }
         buf_puts(b, "; break;");
         free(ob.p);
@@ -1487,9 +1514,13 @@ void emit_poly_prearms0(Compiler *c, int id, const char *name, const PolySpecial
        NoMethodError). This chain is built when a user class owns the
        name too, and its default arm raised for the File the same
        program keeps beside those objects in one Hash (#4734). */
-    if (sp_streq(name, "size"))
-      buf_printf(b, "if (_t%d.tag == SP_TAG_OBJ && _t%d.cls_id == SP_BUILTIN_IO) _t%d = %ssp_poly_size(_t%d)%s; else ",
-                 tv, tv, tr, bopen, tv, bclose);
+    if (sp_streq(name, "size")) {
+      /* sp_poly_size answers an sp_oint: boxed with its nil, bare into an
+         oint slot, unwrapped (TypeError for nil) into a plain one */
+      const char *so = ret == TY_POLY ? "sp_box_oint(" : plan_slot_oint(c, id, ret) ? "(" : "sp_oint_arg(";
+      buf_printf(b, "if (_t%d.tag == SP_TAG_OBJ && _t%d.cls_id == SP_BUILTIN_IO) _t%d = %ssp_poly_size(_t%d)); else ",
+                 tv, tv, tr, so, tv);
+    }
   }
   /* a string/symbol-tagged poly value answers empty? directly (#1438) */
   if (is_empty) {

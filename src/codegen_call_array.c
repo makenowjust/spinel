@@ -107,6 +107,15 @@ int emit_op_array_last(Compiler *c, const BopCtx *x, Buf *b) {
   if (x->rt == TY_POLY_ARRAY)
     buf_printf(b, "({ sp_PolyArray *_t%d = %s; sp_PolyArray_get(_t%d, sp_PolyArray_length(_t%d) - 1); })",
                t, rb.p ? rb.p : "", t, t);
+  else if (oint_kind(ty_array_elem(x->rt))) {
+    /* an Integer or Float element is read with its nil (an empty array,
+       a nil element), unwrapped where the consumer wants it plain */
+    const char *k = array_kind(x->rt);
+    oint_open(c, x->id, ty_array_elem(x->rt), b);
+    buf_printf(b, "({ %s _t%d = %s; sp_%sArray_oget(_t%d, sp_%sArray_length(_t%d) - 1); })",
+               c_type_name(x->rt), t, rb.p ? rb.p : "", k, t, k, t);
+    oint_close(c, x->id, b);
+  }
   else {
     const char *k = array_kind(x->rt);
     buf_printf(b, "({ %s _t%d = %s; sp_%sArray_get(_t%d, sp_%sArray_length(_t%d) - 1); })",
@@ -1763,15 +1772,25 @@ int emit_call_append_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, cons
       else if (repr_of(c, argv[a]).kind == RK_BOXED && elem == TY_FLOAT) {
         buf_puts(b, "sp_poly_elem_f("); emit_expr(c, argv[a], b); buf_puts(b, ")");
       }
-      else if (comp_ntype(c, argv[a]) == TY_UNKNOWN) emit_unresolved_coerced(c, argv[a], elem, b);
+      else if (comp_ntype(c, argv[a]) == TY_UNKNOWN) {
+        /* the _nilable store of an unresolved value takes an oint */
+        if (oint_kind(elem)) buf_printf(b, "%s(", oint_of(elem));
+        emit_unresolved_coerced(c, argv[a], elem, b);
+        if (oint_kind(elem)) buf_puts(b, ")");
+      }
       /* an Array, a Hash or an object into an Integer, Float or String
-         array is refused at run time, as the statement form refuses it */
+         array is refused at run time, as the statement form refuses it
+         (the plain store here unwraps the oint the refusal never answers) */
       else if ((elem == TY_INT || elem == TY_FLOAT || elem == TY_STRING) &&
                (ty_is_array(comp_ntype(c, argv[a])) || ty_is_obj_array(comp_ntype(c, argv[a])) ||
                 ty_is_hash(comp_ntype(c, argv[a])) || ty_is_object(comp_ntype(c, argv[a])))) {
+        if (oint_kind(elem)) buf_printf(b, "%s(", oint_arg(elem));
         buf_puts(b, elem == TY_INT ? "sp_poly_elem_i(" : elem == TY_FLOAT ? "sp_poly_elem_f(" : "sp_poly_elem_s(");
         emit_boxed(c, argv[a], b); buf_puts(b, ")");
+        if (oint_kind(elem)) buf_puts(b, ")");
       }
+      /* an Integer or Float value stores with its nil where it can be one */
+      else if (oint_kind(elem)) emit_elem_store_value(c, k, argv[a], b);
       else emit_coerce(c, argv[a], elem, CO_HOLD, "an Array push", b);
       buf_puts(b, "); ");
     }
@@ -2012,7 +2031,10 @@ int emit_call_array_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const
       else {
         TyKind et = ty_array_elem(rt);
         int vboxed = repr_of(c, argv[1]).kind == RK_BOXED;
-        emit_ctype(c, et, b); buf_printf(b, " _t%d = ", tv);
+        /* a boxed number arrives with its nil (sp_poly_elem_i / _f answer
+           an oint), which the _nilable store takes */
+        if (vboxed && oint_kind(et)) buf_puts(b, oint_ctype(et)); else emit_ctype(c, et, b);
+        buf_printf(b, " _t%d = ", tv);
         if (vboxed && et == TY_INT) { buf_puts(b, "sp_poly_elem_i("); emit_expr(c, argv[1], b); buf_puts(b, ")"); }
         else if (vboxed && et == TY_STRING) { buf_puts(b, "sp_poly_elem_s("); emit_expr(c, argv[1], b); buf_puts(b, ")"); }
         else if (vboxed && et == TY_FLOAT) { buf_puts(b, "sp_poly_elem_f("); emit_expr(c, argv[1], b); buf_puts(b, ")"); }

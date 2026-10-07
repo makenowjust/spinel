@@ -1189,7 +1189,7 @@ static const BuiltinOp bop_rows[] = {
   { TY_IO, "sysseek",        1,   1, BF_ANY, TY_INT,      BOPE_TEMPLATE, "sp_File_sysseek($r, $i0, 0)", TY_UNKNOWN },
   { TY_IO, "sysseek",        2, 127, BF_ANY, TY_INT,      BOPE_TEMPLATE, "sp_File_sysseek($r, $i0, $i1)", TY_UNKNOWN },
   { TY_IO, "sysseek",        0, 127, BF_ANY, TY_INT,      BOPE_NONE },
-  { TY_IO, "size",           0,   0, BF_ANY, TY_INT,      BOPE_TEMPLATE, "sp_stat_size($r)", TY_UNKNOWN },
+  { TY_IO, "size",           0,   0, BF_ANY, TY_INT,      BOPE_TEMPLATE, "sp_oint_arg(sp_stat_size($r))", TY_UNKNOWN },  /* nil only when the stat failed */
   { TY_IO, "size",           0, 127, BF_ANY, TY_INT,      BOPE_NONE },
   { TY_IO, "chmod",          1,   1, BF_ANY, TY_INT,      BOPE_TEMPLATE, "({ sp_file_chmod($i0, sp_File_path($r)); (sp_int)0; })", TY_UNKNOWN },
   { TY_IO, "chmod",          0, 127, BF_ANY, TY_INT,      BOPE_NONE },
@@ -2183,9 +2183,9 @@ static const BuiltinOp bop_rows[] = {
   { BOP_ANY_ARRAY, "size",                  0,   0, BF_NONE,     TY_INT,        BOPE_TEMPLATE, "sp_$AArray_length($r)" },
   { BOP_ANY_ARRAY, "count",                 0,   0, BF_NONE,     TY_INT,        BOPE_TEMPLATE, "sp_$AArray_length($r)" },
   { BOP_ANY_ARRAY, "empty?",                0,   0, BF_ANY,      TY_BOOL,       BOPE_TEMPLATE, "(sp_$AArray_length($r) == 0)" },
-  { BOP_ANY_ARRAY, "first",                 0,   0, BF_ANY,      BOPR_ELEM,     BOPE_TEMPLATE, "sp_$AArray_get($r, 0)" },
-  { BOP_ANY_ARRAY, "shift",                 0,   0, BF_ANY,      BOPR_ELEM,     BOPE_TEMPLATE, "sp_$AArray_shift_o($r)" },  /* nil when empty: an sp_oint for the scalar kinds */
-  { BOP_ANY_ARRAY, "pop",                   0,   0, BF_ANY,      BOPR_ELEM,     BOPE_TEMPLATE, "sp_$AArray_pop_o($r)" },
+  { BOP_ANY_ARRAY, "first",                 0,   0, BF_ANY,      BOPR_ELEM,     BOPE_ARRAY_FIRST },  /* an Integer / Float element with its nil */
+  { BOP_ANY_ARRAY, "shift",                 0,   0, BF_ANY,      BOPR_ELEM,     BOPE_ARRAY_POP_SHIFT },  /* nil when empty: an sp_oint for the scalar kinds */
+  { BOP_ANY_ARRAY, "pop",                   0,   0, BF_ANY,      BOPR_ELEM,     BOPE_ARRAY_POP_SHIFT },
   { BOP_ANY_ARRAY, "sample",                0,   0, BF_ANY,      TY_UNKNOWN,    BOPE_TEMPLATE, "sp_$AArray_sample_o($r)" },  /* one element, or nil when empty */
   { BOP_ANY_ARRAY, "inspect",               0,   0, BF_ANY,      TY_STRING,     BOPE_TEMPLATE, "sp_$AArray_inspect($r)" },
   { BOP_ANY_ARRAY, "to_a",                  0,   0, BF_ANY,      BOPR_SELF,     BOPE_TEMPLATE, "$r", 0, 0, BOPF_SELF_EXACT },

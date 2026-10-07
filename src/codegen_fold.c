@@ -9,6 +9,12 @@
 static void oint_open(Compiler *c, int id, TyKind t, Buf *b) { if (!node_is_oint(c, id)) buf_printf(b, "%s(", oint_arg(t)); }
 static void oint_close(Compiler *c, int id, Buf *b) { if (!node_is_oint(c, id)) buf_puts(b, ")"); }
 static void emit_seedless_fold_answer(Compiler *c, int id, TyKind et, int tn, int tacc, Buf *b);
+/* The value a collecting fold pushes is a plain C value (a temp, or a tail
+   rendered plain): where nil_store_sfx chose the _nilable store (the tail
+   can be nil), that store takes the value as its oint, never nil here (a
+   nil raised where the tail was rendered). */
+static const char *lift_open(const char *rk, const char *sfx) { return !sfx[0] ? "" : sp_streq(rk, "Float") ? "sp_ofloat_of(" : "sp_oint_of("; }
+static const char *lift_close(const char *sfx) { return sfx[0] ? ")" : ""; }
 
 /* Defined lower in this file; declared here so the collecting emitters above
    its definition (the hash block-walk binder, flat_map) can route a block's
@@ -427,13 +433,16 @@ int emit_hash_collect_expr(Compiler *c, int id, Buf *b) {
     TyKind bret;
     char *vb = emit_hash_block_eval(c, block, rr, hn, trecv, ti, block_param_name(c, block, 1) ? 1 : 2, &bret);
     emit_indent(g_pre, g_indent + 1);
-    buf_printf(g_pre, "sp_%sArray_push%s(_t%d, ", rk, nil_store_sfx(c, rk, NIL_STORE_BOXED), tres);
+    const char *sfx = nil_store_sfx(c, rk, NIL_STORE_BOXED);
+    buf_printf(g_pre, "sp_%sArray_push%s(_t%d, ", rk, sfx, tres);
     if (res_poly && bret != TY_POLY) {
       Buf bx; memset(&bx, 0, sizeof bx);
       emit_boxed_text(c, bret, vb ? vb : "", &bx);
       buf_puts(g_pre, bx.p ? bx.p : ""); free(bx.p);
     }
-    else buf_puts(g_pre, vb ? vb : "");
+    /* a number array takes a boxed block value with its nil, a plain one as never nil */
+    else if (sfx[0] && bret == TY_POLY) buf_printf(g_pre, "%s(%s)", sp_streq(rk, "Float") ? "sp_unbox_ofloat" : "sp_unbox_oint", vb ? vb : "sp_box_nil()");
+    else buf_printf(g_pre, "%s%s%s", lift_open(rk, sfx), vb ? vb : "", lift_close(sfx));
     buf_puts(g_pre, ");\n"); free(vb);
     emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n");
   }
@@ -4670,7 +4679,8 @@ int emit_collect_expr(Compiler *c, int id, Buf *b) {
             else { emit_ctype(c, melem_es, g_pre); buf_printf(g_pre, " _t%d = %s;\n", tv_es, default_value_from_compiler(c, melem_es)); }
             emit_block_value_into(c, block, tvb_es, res_poly_es, g_indent + 1);
             emit_indent(g_pre, g_indent + 1);
-            buf_printf(g_pre, "sp_%sArray_push%s(_t%d, _t%d);\n", rk_es, nil_store_sfx(c, rk_es, bb_es[bn_es - 1]), tres_es, tv_es);
+            { const char *sfx = nil_store_sfx(c, rk_es, bb_es[bn_es - 1]);
+              buf_printf(g_pre, "sp_%sArray_push%s(_t%d, %s_t%d%s);\n", rk_es, sfx, tres_es, lift_open(rk_es, sfx), tv_es, lift_close(sfx)); }
             emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n");
             buf_printf(b, "_t%d", tres_es);
             return 1;
@@ -4766,7 +4776,8 @@ int emit_collect_expr(Compiler *c, int id, Buf *b) {
             emit_iter_step_tail(c, &st_ec, &vb_ec);
             g_indent = saveInd_ec;
             emit_indent(g_pre, g_indent + 1);
-            buf_printf(g_pre, "sp_%sArray_push%s(_t%d, %s);\n", rk_ec, nil_store_sfx(c, rk_ec, bb_ec[bn_ec - 1]), tres_ec, vb_ec.p ? vb_ec.p : "");
+            { const char *sfx = nil_store_sfx(c, rk_ec, bb_ec[bn_ec - 1]);
+              buf_printf(g_pre, "sp_%sArray_push%s(_t%d, %s%s%s);\n", rk_ec, sfx, tres_ec, lift_open(rk_ec, sfx), vb_ec.p ? vb_ec.p : "", lift_close(sfx)); }
             free(vb_ec.p);
             emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n");
             buf_printf(b, "_t%d", tres_ec);
@@ -4896,10 +4907,15 @@ int emit_collect_expr(Compiler *c, int id, Buf *b) {
               emit_iter_step_tail(c, &st_wi, &vb_wi);
               g_indent = saveInd_wi;
               emit_indent(g_pre, g_indent + 1);
-              buf_printf(g_pre, "sp_%sArray_push%s(_t%d, ", rk_wi, nil_store_sfx(c, rk_wi, bb_wi[bn_wi - 1]), tres_wi);
-              if (res_poly_wi) buf_puts(g_pre, vb_wi.p ? vb_wi.p : "");
-              else emit_typed_sink_text(c, bb_wi[bn_wi - 1], sp_streq(rk_wi, "Int") ? TY_INT : sp_streq(rk_wi, "Float") ? TY_FLOAT : TY_UNKNOWN, vb_wi.p ? vb_wi.p : "", g_pre);
-              buf_puts(g_pre, ");\n");
+              { const char *sfx = nil_store_sfx(c, rk_wi, bb_wi[bn_wi - 1]);
+                buf_printf(g_pre, "sp_%sArray_push%s(_t%d, ", rk_wi, sfx, tres_wi);
+                if (res_poly_wi) buf_puts(g_pre, vb_wi.p ? vb_wi.p : "");
+                else {
+                  buf_puts(g_pre, lift_open(rk_wi, sfx));
+                  emit_typed_sink_text(c, bb_wi[bn_wi - 1], sp_streq(rk_wi, "Int") ? TY_INT : sp_streq(rk_wi, "Float") ? TY_FLOAT : TY_UNKNOWN, vb_wi.p ? vb_wi.p : "", g_pre);
+                  buf_puts(g_pre, lift_close(sfx));
+                }
+                buf_puts(g_pre, ");\n"); }
               free(vb_wi.p);
               emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n");
               buf_printf(b, "_t%d", tres_wi);
@@ -5101,7 +5117,8 @@ int emit_collect_expr(Compiler *c, int id, Buf *b) {
     else emit_expr(c, bb2[bn2 - 1], &vb2);
     g_indent = saveIndent2;
     emit_indent(g_pre, g_indent + 2);
-    buf_printf(g_pre, "sp_%sArray_push%s(_t%d, %s);\n", rk2, nil_store_sfx(c, rk2, bn2 >= 1 ? bb2[bn2 - 1] : -1), tres2, vb2.p ? vb2.p : "");
+    { const char *sfx = nil_store_sfx(c, rk2, bn2 >= 1 ? bb2[bn2 - 1] : -1);
+      buf_printf(g_pre, "sp_%sArray_push%s(_t%d, %s%s%s);\n", rk2, sfx, tres2, lift_open(rk2, sfx), vb2.p ? vb2.p : "", lift_close(sfx)); }
     free(vb2.p);
     emit_indent(g_pre, g_indent + 1);
     buf_puts(g_pre, "}\n");
@@ -5262,7 +5279,8 @@ int emit_collect_expr(Compiler *c, int id, Buf *b) {
     else { emit_ctype(c, elem, g_pre); buf_printf(g_pre, " _t%d = %s;\n", tv, default_value_from_compiler(c, elem)); }
     emit_block_value_into(c, block, tvbuf, res_poly, innerIndent);
     emit_indent(g_pre, innerIndent);
-    buf_printf(g_pre, "sp_%sArray_push%s(_t%d, _t%d);\n", rk, nil_store_sfx(c, rk, bn > 0 ? bb[bn - 1] : -1), tres, tv);
+    { const char *sfx = nil_store_sfx(c, rk, bn > 0 ? bb[bn - 1] : -1);
+      buf_printf(g_pre, "sp_%sArray_push%s(_t%d, %s_t%d%s);\n", rk, sfx, tres, lift_open(rk, sfx), tv, lift_close(sfx)); }
   }
   else {
     /* select/reject: collect the block's value (next-aware) into a temp, then
@@ -5439,7 +5457,8 @@ int emit_with_index_expr(Compiler *c, int id, Buf *b) {
     else emit_iter_step_cond(c, &st, 1, &vb);
     g_indent = saveInd;
     if (is_map) {
-      emit_indent(g_pre, innerIndent); buf_printf(g_pre, "sp_%sArray_push%s(_t%d, ", rk, nil_store_sfx(c, rk, bb[bn - 1]), tres);
+      const char *sfx = nil_store_sfx(c, rk, bb[bn - 1]);
+      emit_indent(g_pre, innerIndent); buf_printf(g_pre, "sp_%sArray_push%s(_t%d, ", rk, sfx, tres);
       if (res_poly && body_ty != TY_POLY) {
         Buf bx; memset(&bx, 0, sizeof bx); emit_boxed_text(c, body_ty, vb.p ? vb.p : "", &bx);
         buf_puts(g_pre, bx.p ? bx.p : ""); free(bx.p);
@@ -5452,7 +5471,11 @@ int emit_with_index_expr(Compiler *c, int id, Buf *b) {
         unsupported_feature(c, id, "map!.with_index with a block whose value is untyped, on a typed Array");
         buf_puts(g_pre, "0");
       }
-      else if (!res_poly) emit_typed_sink_text(c, bb[bn - 1], sp_streq(rk, "Int") ? TY_INT : sp_streq(rk, "Float") ? TY_FLOAT : TY_UNKNOWN, vb.p ? vb.p : "", g_pre);
+      else if (!res_poly) {
+        buf_puts(g_pre, lift_open(rk, sfx));
+        emit_typed_sink_text(c, bb[bn - 1], sp_streq(rk, "Int") ? TY_INT : sp_streq(rk, "Float") ? TY_FLOAT : TY_UNKNOWN, vb.p ? vb.p : "", g_pre);
+        buf_puts(g_pre, lift_close(sfx));
+      }
       else buf_puts(g_pre, vb.p ? vb.p : "");
       buf_puts(g_pre, ");\n");
     }
@@ -7067,6 +7090,9 @@ else if (dty && sp_streq(dty, "NilNode")) {
            ty_is_numeric(comp_ntype(c, dv))) {
     buf_puts(out, "sp_bigint_new_int("); emit_int_expr(c, dv, out); buf_puts(out, ")");
   }
+  /* a number slot that holds its nil beside the value takes the default's
+     oint form (a plain default is wrapped as never nil) */
+  else if (oint_kind(pt) && slot_is_oint(p)) emit_oint_expr(c, dv, pt, out);
   else {
     /* Default empty `[]` literal: emit the correct array constructor for
        the parameter type rather than always sp_IntArray_new(). */

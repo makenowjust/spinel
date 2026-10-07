@@ -1263,11 +1263,16 @@ int emit_call_cmethod_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
                  ahead of the declaration, not into the middle of it */
               Buf apre; memset(&apre, 0, sizeof apre);
               Buf aval; memset(&aval, 0, sizeof aval);
-              { Buf *sv_pre = g_pre; g_pre = &apre; emit_one_arg(c, saved0, 0, &aval); g_pre = sv_pre; }
+              /* a temporary that can hold nil takes the argument's oint form */
+              int sv_oint = slot_is_oint(lv);
+              { Buf *sv_pre = g_pre; g_pre = &apre;
+                if (sv_oint) emit_oint_expr(c, saved0, at, &aval); else emit_one_arg(c, saved0, 0, &aval);
+                g_pre = sv_pre; }
               if (!g_pre) buf_puts(b, "({ ");
               if (apre.p) buf_puts(decl, apre.p);
               if (g_pre) emit_indent(g_pre, g_indent);
-              emit_ctype(c, at, decl); buf_printf(decl, " lv_%s = %s; ", svn, aval.p ? aval.p : "0");
+              if (sv_oint) buf_puts(decl, oint_ctype(at)); else emit_ctype(c, at, decl);
+              buf_printf(decl, " lv_%s = %s; ", svn, aval.p ? aval.p : "0");
               free(apre.p); free(aval.p);
               /* a poly temporary is an sp_RbVal, and its root is the RbVal
                  kind -- needs_root() answers yes for TY_POLY too, so that

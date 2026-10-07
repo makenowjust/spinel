@@ -1554,8 +1554,9 @@ int emit_call_safe_nav_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
         Buf *sv_pre2 = g_pre;
         g_pre = &preb2;
         if (g_n_argov < MAX_ARG_OVERRIDE) {
-          int slot2 = (sn_scalar && !node_is_oint(c, recv)) ? view_bind(recv, "_snv%d", tsn2)
-                                                            : view_bind(recv, "_sn%d", tsn2);
+          /* the guard proved the scalar non-nil: the re-entry reads its plain
+             value (a view-bound node takes no oint wrapper either way) */
+          int slot2 = sn_scalar ? view_bind(recv, "_snv%d", tsn2) : view_bind(recv, "_sn%d", tsn2);
           int sv_skip = g_sn_skip; g_sn_skip = id;
           /* infer_type widened a C bool answer to poly so the nil arm has
              somewhere to live; the value arm still renders the bool. Emit it

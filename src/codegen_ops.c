@@ -148,6 +148,41 @@ static int emit_op_template(Compiler *c, const BopCtx *x, Buf *b) {
   return 1;
 }
 
+/* Array#first with no count: the element, which for an Integer or Float
+   array is read with its nil (an empty array, a nil element) and unwrapped
+   where the call's consumer wants it plain. */
+static int emit_op_array_first(Compiler *c, const BopCtx *x, Buf *b) {
+  char *r = op_recv_text(c, x);
+  const char *ak = x->rt == TY_POLY_ARRAY ? "Poly" : array_kind(x->rt);
+  TyKind et = ty_array_elem(x->rt);
+  if (oint_kind(et)) {
+    if (!node_is_oint(c, x->id)) buf_printf(b, "%s(", oint_arg(et));
+    buf_printf(b, "sp_%sArray_oget(%s, 0)", ak ? ak : "", r);
+    if (!node_is_oint(c, x->id)) buf_puts(b, ")");
+  }
+  else buf_printf(b, "sp_%sArray_get(%s, 0)", ak ? ak : "", r);
+  free(r);
+  return 1;
+}
+
+/* Array#pop / #shift with no count: the element, nil when the array is
+   empty -- an sp_oint / sp_ofloat from the _o runtime call for an Integer
+   or Float array (unwrapped where the consumer wants it plain), NULL or a
+   boxed nil from the plain call for the other kinds. */
+static int emit_op_array_pop_shift(Compiler *c, const BopCtx *x, Buf *b) {
+  char *r = op_recv_text(c, x);
+  const char *ak = x->rt == TY_POLY_ARRAY ? "Poly" : array_kind(x->rt);
+  TyKind et = ty_array_elem(x->rt);
+  if (oint_kind(et)) {
+    if (!node_is_oint(c, x->id)) buf_printf(b, "%s(", oint_arg(et));
+    buf_printf(b, "sp_%sArray_%s_o(%s)", ak ? ak : "", x->name, r);
+    if (!node_is_oint(c, x->id)) buf_puts(b, ")");
+  }
+  else buf_printf(b, "sp_%sArray_%s(%s)", ak ? ak : "", x->name, r);
+  free(r);
+  return 1;
+}
+
 /* Process::Status#success?: the runtime answers -1 for CRuby's nil, when
    the process did not exit normally */
 static int emit_op_pstatus_success(Compiler *c, const BopCtx *x, Buf *b) {
@@ -258,6 +293,8 @@ static int (*const bop_emitters[BOPE__COUNT])(Compiler *, const BopCtx *, Buf *)
   [BOPE_ARRAY_SHIFT_N] = emit_op_array_shift_n,
   [BOPE_ARRAY_CYCLE_N] = emit_op_array_cycle_n,
   [BOPE_ARRAY_LAST] = emit_op_array_last,
+  [BOPE_ARRAY_FIRST] = emit_op_array_first,
+  [BOPE_ARRAY_POP_SHIFT] = emit_op_array_pop_shift,
   [BOPE_ARRAY_JOIN] = emit_op_array_join,
   [BOPE_ARRAY_SORT_BANG] = emit_op_array_sort_bang,
   [BOPE_ARRAY_SLICE_BANG_RANGE] = emit_op_array_slice_bang_range,

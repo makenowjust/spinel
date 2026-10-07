@@ -17,6 +17,10 @@
    oint producer, applied here because this emitter decides the form. */
 static void oint_open(Compiler *c, int id, TyKind t, Buf *b) { if (!node_is_oint(c, id)) buf_printf(b, "%s(", oint_arg(t)); }
 static void oint_close(Compiler *c, int id, Buf *b) { if (!node_is_oint(c, id)) buf_puts(b, ")"); }
+/* A plain answer where the call's consumer wants its oint form (the
+   analysis marks the call nullable): wrapped as never nil. */
+static void oint_lift_open(Compiler *c, int id, TyKind t, Buf *b) { if (node_is_oint(c, id)) buf_printf(b, "%s(", oint_of(t)); }
+static void oint_lift_close(Compiler *c, int id, Buf *b) { if (node_is_oint(c, id)) buf_puts(b, ")"); }
 
 /* The receiver of an Integer bit operator. For a shift, an Integer slot
    that can hold its nil sentinel (cmp_operand_may_be_nil) is tested first:
@@ -333,6 +337,7 @@ int emit_call_compare_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
     if ((lrt == TY_BIGINT || lat == TY_BIGINT) &&
         (lrt == TY_INT || lrt == TY_BIGINT) && (lat == TY_INT || lat == TY_BIGINT)) {
       int tc = ++g_tmp;
+      oint_lift_open(c, id, TY_INT, b);
       buf_printf(b, "({ int _t%d = sp_bigint_cmp(", tc);
       if (lrt == TY_BIGINT) emit_expr(c, recv, b);
       else { buf_puts(b, "sp_bigint_new_int("); emit_expr(c, recv, b); buf_puts(b, ")"); }
@@ -340,6 +345,7 @@ int emit_call_compare_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
       if (lat == TY_BIGINT) emit_expr(c, argv[0], b);
       else { buf_puts(b, "sp_bigint_new_int("); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
       buf_printf(b, "); (sp_int)((_t%d > 0) - (_t%d < 0)); })", tc, tc);
+      oint_lift_close(c, id, b);
       return 1;
     }
     if (ty_is_numeric(lrt) && ty_is_numeric(lat)) {
@@ -358,8 +364,10 @@ int emit_call_compare_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
       if (nr) buf_printf(b, "_o%d.v", tb); else emit_expr(c, argv[0], b);
       buf_puts(b, "; ");
       if (nl || nr) {
-        buf_printf(b, "(%s || %s) ? ((%s && %s) ? sp_oint_of(0) : sp_oint_nil()) : ",
-                   nl ? "_o" : "0", nr ? "_o" : "0", nl ? "_o" : "0", nr ? "_o" : "0");
+        char lnil[24], rnil[24];
+        if (nl) snprintf(lnil, sizeof lnil, "_o%d.nil", ta); else snprintf(lnil, sizeof lnil, "0");
+        if (nr) snprintf(rnil, sizeof rnil, "_o%d.nil", tb); else snprintf(rnil, sizeof rnil, "0");
+        buf_printf(b, "(%s || %s) ? ((%s && %s) ? sp_oint_of(0) : sp_oint_nil()) : ", lnil, rnil, lnil, rnil);
       }
       /* an Integer against a Float compares exactly (#7505); a NaN answers 2 */
       if ((lrt == TY_INT && lat == TY_FLOAT) || (lrt == TY_FLOAT && lat == TY_INT)) {
@@ -459,8 +467,10 @@ int emit_call_compare_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
     } }
     if (lrt == TY_STRING && lat == TY_STRING) {
       int tc = ++g_tmp;
+      oint_lift_open(c, id, TY_INT, b);
       buf_printf(b, "({ int _t%d = sp_str_cmp_bytes(", tc); emit_expr(c, recv, b); buf_puts(b, ", "); emit_expr(c, argv[0], b);
-      buf_printf(b, "); (_t%d > 0) - (_t%d < 0); })", tc, tc);
+      buf_printf(b, "); (sp_int)((_t%d > 0) - (_t%d < 0)); })", tc, tc);
+      oint_lift_close(c, id, b);
       return 1;
     }
     if (lrt == TY_SYMBOL && lat == TY_SYMBOL) {

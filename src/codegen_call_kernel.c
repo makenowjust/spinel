@@ -1042,8 +1042,12 @@ int emit_call_kernel_flow_arms(Compiler *c, int id, Buf *b, const NodeTable *nt,
       if (bt == TY_UNKNOWN || bt == TY_VOID || bt == TY_NIL) bt = TY_INT;
       int ptr = proc_slot_is_ptr(bt);
       int t = ++g_tmp;
-      emit_indent(g_pre, g_indent); emit_ctype(c, bt, g_pre);
-      buf_printf(g_pre, " _t%d = %s;\n", t, default_value_from_compiler(c, bt));
+      /* a number answer that can be nil (a thrown nil, a nullable tail) is
+         held with its nil beside the value */
+      int c_oint = oint_kind(bt) && node_is_oint(c, id);
+      emit_indent(g_pre, g_indent);
+      if (c_oint) buf_printf(g_pre, "%s _t%d = %s;\n", oint_ctype(bt), t, oint_nil(bt));
+      else { emit_ctype(c, bt, g_pre); buf_printf(g_pre, " _t%d = %s;\n", t, default_value_from_compiler(c, bt)); }
       emit_indent(g_pre, g_indent); buf_puts(g_pre, "sp_catch_check_depth();\n");
       int tag_kind = 0;
       if (argc == 1) {
@@ -1127,6 +1131,7 @@ int emit_call_kernel_flow_arms(Compiler *c, int id, Buf *b, const NodeTable *nt,
           Buf cvb; memset(&cvb, 0, sizeof cvb);
           int sv_ind = g_indent; g_indent = g_indent + 1;
           if (bt == TY_POLY && lr.kind != RK_BOXED) emit_boxed(c, last, &cvb);
+          else if (c_oint) emit_oint_expr(c, last, bt, &cvb);
           else emit_expr(c, last, &cvb);
           g_indent = sv_ind;
           emit_indent(g_pre, g_indent + 1);
@@ -1150,6 +1155,9 @@ int emit_call_kernel_flow_arms(Compiler *c, int id, Buf *b, const NodeTable *nt,
       }
       else if (bt == TY_POLY) {
         buf_printf(g_pre, "_t%d = sp_catch_val[sp_catch_top];\n", t);
+      }
+      else if (c_oint) {
+        buf_printf(g_pre, "_t%d = %s(sp_catch_val[sp_catch_top]);\n", t, oint_unbox(bt));
       }
       else {
         buf_printf(g_pre, "_t%d = ", t);

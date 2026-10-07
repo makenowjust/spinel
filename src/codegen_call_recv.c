@@ -15,6 +15,10 @@
    oint producer, applied here because this emitter decides the form. */
 static void oint_open(Compiler *c, int id, TyKind t, Buf *b) { if (!node_is_oint(c, id)) buf_printf(b, "%s(", oint_arg(t)); }
 static void oint_close(Compiler *c, int id, Buf *b) { if (!node_is_oint(c, id)) buf_puts(b, ")"); }
+/* A plain answer where the call's consumer wants its oint form (the
+   analysis marks the call nullable): wrapped as never nil. */
+static void oint_lift_open(Compiler *c, int id, TyKind t, Buf *b) { if (node_is_oint(c, id)) buf_printf(b, "%s(", oint_of(t)); }
+static void oint_lift_close(Compiler *c, int id, Buf *b) { if (node_is_oint(c, id)) buf_puts(b, ")"); }
 
 /* The value of the block a `fetch` or `delete` runs when it finds nothing, as
    `({ bind; leading statements; setup; value; })`. `bind` sets the block's
@@ -2414,10 +2418,23 @@ else {
     Buf rix; char tyx[32];
     snprintf(tyx, sizeof tyx, "sp_%sArray *", k);
     int cix = hold_recv_open(c, recv, 0, tyx, "SP_GC_ROOT", b, &rix);
-    buf_printf(b, "sp_%sArray_%s(%s, ", k, fn, rix.p);
-    if (rt == TY_INT_ARRAY || rt == TY_FLOAT_ARRAY) emit_elem_needle(c, rt, argv[0], b);
-    else emit_expr(c, argv[0], b);
-    buf_puts(b, ")");
+    if ((rt == TY_INT_ARRAY || rt == TY_FLOAT_ARRAY) && node_has_oint_form(c, argv[0])) {
+      /* a needle that can be nil searches with its nil (a nil needle finds
+         the nil elements); the _o answer is boxed as the _poly one is */
+      buf_printf(b, "sp_box_oint(sp_%sArray_%s_o(%s, ", k, sp_streq(name, "rindex") ? "rindex" : "index", rix.p);
+      emit_elem_needle(c, rt, argv[0], b);
+      buf_puts(b, "))");
+    }
+    else {
+      buf_printf(b, "sp_%sArray_%s(%s, ", k, fn, rix.p);
+      /* the _poly search takes the plain element: the needle's oint form,
+         which is never nil here, unwrapped */
+      if (rt == TY_INT_ARRAY || rt == TY_FLOAT_ARRAY) {
+        buf_printf(b, "%s(", oint_arg(ty_array_elem(rt))); emit_elem_needle(c, rt, argv[0], b); buf_puts(b, ")");
+      }
+      else emit_expr(c, argv[0], b);
+      buf_puts(b, ")");
+    }
     free(rix.p);
     if (cix) buf_puts(b, "; })");
     { *out = 1; return 1; }
@@ -5385,10 +5402,13 @@ else {
         }
         else if (vt == TY_INT && (dt == TY_INT || dt == TY_NIL) && fetch_operand_is_inert(c, argv[1]) &&
                  (sp_streq(hn, "IntInt") || sp_streq(hn, "StrInt"))) {
-          /* an inert default costs nothing to evaluate up front: one probe */
-          buf_printf(b, "; sp_%sHash_fetch_or(_t%d, _t%d, ", hn, th, tk);
-          emit_expr_slot(c, argv[1], TY_INT, b);
-          buf_puts(b, ")");
+          /* an inert default costs nothing to evaluate up front: one probe;
+             the default travels with its nil (fetch_or takes an sp_oint)
+             and the answer is unwrapped where the consumer wants it plain */
+          buf_puts(b, "; "); oint_open(c, id, TY_INT, b);
+          buf_printf(b, "sp_%sHash_fetch_or(_t%d, _t%d, ", hn, th, tk);
+          emit_oint_expr(c, argv[1], TY_INT, b);
+          buf_puts(b, ")"); oint_close(c, id, b);
         }
         else {
           buf_printf(b, "; sp_%sHash_has_key(_t%d, _t%d) ? sp_%sHash_get(_t%d, _t%d) : ", hn, th, tk, hn, th, tk);
@@ -9864,6 +9884,19 @@ int emit_object_call(Compiler *c, int id, Buf *b) {
                        tvR, tvR);
           return 1;
         }
+        /* a field with a nil bit is read with it where the call's consumer
+           wants the oint (node_is_oint answers the reader by that bit) */
+        if (rdiv >= 0 && node_is_oint(c, id) &&
+            ivar_has_nilbit(c, rdc >= 0 ? rdc : cid, rdiv)) {
+          int rcls = rdc >= 0 ? rdc : cid;
+          TyKind rivt = c->classes[rcls].ivar_types[rdiv];
+          int trd = ++g_tmp;
+          char objp[48]; snprintf(objp, sizeof objp, "_t%d%s", trd, comp_ty_value_obj(c, rt) ? "." : "->");
+          char bit[400]; ivar_nilbit_test(c, rcls, rdiv, objp, bit, sizeof bit);
+          buf_puts(b, "({ "); emit_ctype(c, rt, b); buf_printf(b, " _t%d = ", trd); emit_expr(c, recv, b);
+          buf_printf(b, "; ((%s){ %siv_%s, (%s) != 0 }); })", oint_ctype(rivt), objp, iv_c(rn2), bit);
+          return 1;
+        }
         buf_puts(b, "("); emit_expr(c, recv, b);
         buf_printf(b, ")%siv_%s", comp_ty_value_obj(c, rt) ? "." : "->", iv_c(rn2));
         return 1;
@@ -11107,9 +11140,12 @@ int emit_range_call(Compiler *c, int id, Buf *b) {
       }
       else if (sp_streq(name, "first") || sp_streq(name, "begin")) {
         /* #first enumerates, so a beginless range has none (#3668) */
-        if (argc == 0 && sp_streq(name, "first"))
+        if (argc == 0 && sp_streq(name, "first")) {
+          oint_lift_open(c, id, TY_INT, b);
           buf_printf(b, "({ if (_t%d.nobeg) sp_raise_cls(\"RangeError\","
                         " \"cannot get the first element of beginless range\"); _t%d.first; })", t, t);
+          oint_lift_close(c, id, b);
+        }
         else if (argc == 1) {
           /* first(n): the first n elements from `first`, walking by step. */
           int tf = ++g_tmp, tn = ++g_tmp, ti = ++g_tmp, tc = ++g_tmp;
@@ -12893,10 +12929,13 @@ static void emit_class_ivar_arm(Compiler *c, int tv, const char *sym, char op, c
     char slot[300]; TyKind t;
     if (!class_ivar_slot(c, k, sym, slot, sizeof slot, &t)) continue;
     buf_printf(b, " case %d: ", k);
+    /* a class-level number slot (civ_) holds its nil beside the value */
+    int so = strncmp(slot, "civ_", 4) == 0 && oint_kind(t);
     if (op == 's') {
       char val[24]; snprintf(val, sizeof val, "_ivs%d", tv);
       buf_printf(b, "%s = ", slot);
       if (t == TY_POLY) buf_puts(b, val);
+      else if (so) buf_printf(b, "%s(%s)", oint_unbox(t), val);
       else if (nil_value(t)) {
         buf_printf(b, "(%s.tag == SP_TAG_NIL ? %s : ", val, nil_value(t));
         emit_unbox_text(c, t, val, b);
@@ -12909,7 +12948,9 @@ static void emit_class_ivar_arm(Compiler *c, int tv, const char *sym, char op, c
     }
     else {
       buf_printf(b, "%s%d = ", op == 'g' ? "_ivg" : "_ivd", tv);
-      if (op == 'g') emit_boxed_text(c, t, slot, b);
+      if (so && op == 'g') buf_printf(b, "%s(%s)", oint_box(t), slot);
+      else if (so) buf_printf(b, "!(%s).nil || %s", slot, dflt);
+      else if (op == 'g') emit_boxed_text(c, t, slot, b);
       else { buf_puts(b, "("); emit_boxed_text(c, t, slot, b); buf_printf(b, ").tag != SP_TAG_NIL || %s", dflt); }
       buf_puts(b, ";");
     }
@@ -12932,7 +12973,10 @@ static void emit_class_ivar_list_arm(Compiler *c, int tv, Buf *b) {
       char slot[300]; TyKind t;
       if (!class_ivar_slot(c, k, ci->ivars[j], slot, sizeof slot, &t)) continue;
       if (!any) { buf_printf(b, " case %d:", k); any = 1; }
-      buf_puts(b, " if (("); emit_boxed_text(c, t, slot, b);
+      buf_puts(b, " if ((");
+      /* a class-level number slot holds its nil beside the value */
+      if (strncmp(slot, "civ_", 4) == 0 && oint_kind(t)) buf_printf(b, "%s(%s)", oint_box(t), slot);
+      else emit_boxed_text(c, t, slot, b);
       buf_printf(b, ").tag != SP_TAG_NIL && !sp_bivar_defined(_t%d, sp_sym_intern(\"%s\"))) "
                     "sp_PolyArray_push(_ivl%d, sp_box_sym(sp_sym_intern(\"%s\")));", tv, ci->ivars[j], tv, ci->ivars[j]);
     }
@@ -13036,7 +13080,10 @@ static int emit_poly_ivar_call(Compiler *c, int id, Buf *b, const NodeTable *nt,
       if (c->bivar_table) buf_printf(b, "else %s; ", bst);
       if (rp.kind != RK_BOXED && rp.kind != RK_NONE) {
         char ivn[24]; snprintf(ivn, sizeof ivn, "_ivs%d", tv);
-        emit_unbox_text(c, res, ivn, b);
+        /* a number answers with its nil beside the value: the call is the
+           value written, nil included */
+        if (oint_kind(res)) { oint_open(c, id, res, b); buf_printf(b, "%s(%s)", oint_unbox(res), ivn); oint_close(c, id, b); }
+        else emit_unbox_text(c, res, ivn, b);
         buf_puts(b, "; })");
       }
       else buf_printf(b, "_ivs%d; })", tv);
