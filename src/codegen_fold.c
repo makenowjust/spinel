@@ -8177,7 +8177,8 @@ static void emit_arg_temp(Compiler *c, int v) {
   /* an Integer / Float producer whose nil rides beside the value keeps it
      in the temp (view_bind_o below): `a[i] = xs.max` stores the nil */
   int to = !wshare && oint_kind(at) && node_is_oint(c, v);
-  if (to) emit_oint_expr(c, v, at, &hb);
+  if (wshare) { }   /* the handle's read, above */
+  else if (to) emit_oint_expr(c, v, at, &hb);
   else emit_expr(c, v, &hb);
   emit_indent(g_pre, g_indent);
   if (at == TY_POLY) buf_puts(g_pre, "sp_RbVal");
