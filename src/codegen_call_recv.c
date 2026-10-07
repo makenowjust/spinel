@@ -10103,6 +10103,19 @@ int emit_object_call(Compiler *c, int id, Buf *b) {
         buf_printf(b, " _t%d->iv_%s = ((sp_RbVal){SP_TAG_NIL, 0x%x, {0}}); _t%d; })",
                    to, iv_c(sym + 1), SP_IVAR_UNSET_MARK, tv);
       }
+      /* an Integer or Float field with a nil bit answers its nil */
+      else if (mi >= 0 && !comp_ty_value_obj(c, rt) && oint_kind(c->classes[cid].ivar_types[mi]) &&
+               ivar_has_nilbit(c, cid, mi)) {
+        TyKind ft = c->classes[cid].ivar_types[mi];
+        int to = ++g_tmp;
+        char objp[40]; snprintf(objp, sizeof objp, "_t%d->", to);
+        char bt[320]; ivar_nilbit_test(c, cid, mi, objp, bt, sizeof bt);
+        char ov[700]; snprintf(ov, sizeof ov, "((%s){ _t%d->iv_%s, (%s) != 0 })", oint_ctype(ft), to, iv_c(sym + 1), bt);
+        buf_printf(b, "({ sp_%s *_t%d = ", c->classes[cid].c_name, to); emit_expr(c, recv, b); buf_puts(b, "; ");
+        if (repr_of(c, id).kind == RK_BOXED) buf_printf(b, "%s(%s); })", oint_box(ft), ov);
+        else if (node_is_oint(c, id)) buf_printf(b, "%s; })", ov);
+        else buf_printf(b, "%s(%s); })", oint_arg(ft), ov);
+      }
       else if (mi >= 0) {
         const char *acc = comp_ty_value_obj(c, rt) ? "." : "->";
         buf_puts(b, "("); emit_expr(c, recv, b);
