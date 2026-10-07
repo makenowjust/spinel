@@ -10424,10 +10424,22 @@ void emit_struct_kw_check(Compiler *c, ClassInfo *cls, int ht, int kwh) {
 /* Member `a` of `cls` read out of the keyword hash in temp `ht`, in the
    type every key that may name it brings (struct_new_types_members): nil
    when no key names it or the last one is nil. */
+/* the keyword hash temp the last struct construction read its members
+   from (emit_struct_kw_member), for emit_struct_new_call to set the nil
+   bits of the members it left nil; -1 when none */
+static int g_struct_kw_ht = -1;
 void emit_struct_kw_member(Compiler *c, ClassInfo *cls, int a, int ht, Buf *b) {
   char gv[256];
   snprintf(gv, sizeof gv, "sp_kw_member_val(_t%d, \"%s\")", ht, cls->ivars[a] + 1);
-  emit_unbox_nilable_text(c, cls->ivar_types[a], gv, b);
+  /* the generated constructor takes a number member plain: a member with a
+     nil bit takes the value (its nil bit set after construction from the
+     same hash), one without raises for nil */
+  if (oint_kind(cls->ivar_types[a]) && ivar_has_nilbit(c, (int)(cls - c->classes), a)) {
+    buf_printf(b, "%s(%s).v", oint_unbox(cls->ivar_types[a]), gv);
+    g_struct_kw_ht = ht;
+  }
+  else if (oint_kind(cls->ivar_types[a])) emit_unbox_text(c, cls->ivar_types[a], gv, b);
+  else emit_unbox_nilable_text(c, cls->ivar_types[a], gv, b);
 }
 /* What a Data or Struct construction `ci.new(argv)` answers before its
    members bind, where its generated constructor builds it (`kwh` its sole
@@ -10817,7 +10829,9 @@ int emit_struct_new_call(Compiler *c, int id, int ci, int argc, const int *argv,
   for (int a = 0; a < argc; a++)
     if (nt_kind(nt, argv[a]) == NK_SplatNode || nt_kind(nt, argv[a]) == NK_BlockArgumentNode) ok_plain = 0;
   int kn = 0; const int *ke = kwh >= 0 ? nt_arr(nt, kwh, "elements", &kn) : NULL;
-  for (int e = 0; e < kn; e++) if (nt_kind(nt, ke[e]) != NK_AssocNode) ok_plain = 0;
+  /* (a computed key names its member only at run time) */
+  for (int e = 0; e < kn; e++)
+    if (nt_kind(nt, ke[e]) != NK_AssocNode || nt_kind(nt, nt_ref(nt, ke[e], "key")) != NK_SymbolNode) ok_plain = 0;
   int otmp[64], omem[64], on = 0, unset[64], un = 0;
   int bind0 = -1;
   for (int m = 0; ok_plain && m < cls->nmembers && m < 64; m++) {
@@ -10850,12 +10864,20 @@ int emit_struct_new_call(Compiler *c, int id, int ci, int argc, const int *argv,
     otmp[on] = t; omem[on] = m; on++;
   }
   Buf inner; memset(&inner, 0, sizeof inner);
+  int sv_kwht = g_struct_kw_ht; g_struct_kw_ht = -1;
   int r = emit_struct_new_call_members(c, id, ci, argc, argv, &inner);
+  int kwht = g_struct_kw_ht; g_struct_kw_ht = sv_kwht;
   if (bind0 >= 0) view_unbind(bind0);
-  if (on == 0 && un == 0) { buf_puts(b, inner.p ? inner.p : ""); free(inner.p); return r; }
+  if (on == 0 && un == 0 && kwht < 0) { buf_puts(b, inner.p ? inner.p : ""); free(inner.p); return r; }
   int ts = ++g_tmp;
   buf_printf(b, "({ sp_%s *_t%d = %s; ", cls->c_name, ts, inner.p ? inner.p : "NULL");
   char pfx[40]; snprintf(pfx, sizeof pfx, "_t%d->", ts);
+  /* members read out of a keyword hash: nil where the hash left them nil */
+  for (int m = 0; kwht >= 0 && m < cls->nmembers; m++) {
+    if (!oint_kind(cls->ivar_types[m]) || !ivar_has_nilbit(c, ci, m)) continue;
+    char bs[200]; ivar_nilbit_set(c, ci, m, pfx, bs, sizeof bs);
+    buf_printf(b, "if (sp_kw_member_val(_t%d, \"%s\").tag == SP_TAG_NIL) %s; ", kwht, cls->ivars[m] + 1, bs);
+  }
   for (int k = 0; k < on; k++) {
     char bs[200]; ivar_nilbit_set(c, ci, omem[k], pfx, bs, sizeof bs);
     buf_printf(b, "if (_t%d.nil) %s; ", otmp[k], bs);
