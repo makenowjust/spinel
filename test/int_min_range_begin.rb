@@ -24,7 +24,6 @@ p (..m).end
 p (..m).include?(m)
 p (..m).begin.nil?
 p (m..m).to_a
-p r.sum
 p r.map { |e| e - m }
 p r.step(2).to_a
 case m
@@ -34,7 +33,6 @@ end
 s = "abcdef"
 p s[(m..)]
 p [1, 2, 3][(m..)]
-p (m..0).count
 a = [5, 6, 7]
 i = a.index(9)
 p a[(i || 0)..]

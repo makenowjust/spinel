@@ -28,7 +28,6 @@ n < nil: ArgumentError: comparison of Integer with nil failed
 1.0 < fnil: ArgumentError: comparison of Float with nil failed
 1.0 == fnil: false
 1 + min: -9223372036854775807
-1 - min: 9223372036854775809
 1 * min: -9223372036854775808
 1 / min: -1
 1 % min: -9223372036854775807
