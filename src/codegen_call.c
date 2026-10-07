@@ -17717,6 +17717,9 @@ int emit_unresolved_call(Compiler *c, int id, Buf *b) {
       /* the slot the call answers into, before the face retypes the
          receiver: a poly dispatch's builtin arm keeps the node poly */
       TyKind want = repr_of(c, id).as_ty;
+      /* the form the call answers in outside the face (its oint where the
+         enclosing slot holds one: a boxed reader switch's default arm) */
+      int outer_o = oint_kind(want) && node_is_oint(c, id);
       int tkv = ++g_tmp;
       Buf krb; memset(&krb, 0, sizeof krb); emit_boxed(c, recv, &krb);
       emit_indent(g_pre, g_indent);
@@ -17740,6 +17743,14 @@ int emit_unresolved_call(Compiler *c, int id, Buf *b) {
         /* under the face the call answers its oint where it can be nil */
         if (oint_kind(got) && node_is_oint(c, id)) buf_printf(b, "%s(%s)", oint_box(got), fb.p ? fb.p : oint_nil(got));
         else emit_boxed_text(c, got, fb.p ? fb.p : "0", b);
+        free(fb.p);
+      }
+      else if (oint_kind(want) && outer_o != node_is_oint(c, id)) {
+        /* the handle answers in the face's form: converted to the form the
+           call answers outside it (lifted, or unwrapped) */
+        Buf fb; memset(&fb, 0, sizeof fb);
+        emit_call(c, id, &fb);
+        buf_printf(b, "%s(%s)", outer_o ? oint_of(want) : oint_arg(want), fb.p ? fb.p : "0");
         free(fb.p);
       }
       else emit_call(c, id, b);
