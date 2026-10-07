@@ -27345,6 +27345,8 @@ int nullable_int_value(Compiler *c, int v) {
   }
   if (nt_kind(nt, v) == NK_CallNode) {
     if (nn_index_inbounds(c, v)) return 0;
+    /* a call that answers nothing (`$stdout.puts(x)`) is nil */
+    { TyKind cvt = infer_type(c, v); if (cvt == TY_NIL || cvt == TY_VOID) return 1; }
     /* `<=>` over two numbers (or two Strings, two Symbols) always answers:
        only a pairing of other kinds can be nil */
     if (sp_streq(nt_str(nt, v, "name"), "<=>")) {
@@ -27457,6 +27459,10 @@ int nullable_int_value(Compiler *c, int v) {
   }
   if (nt_kind(nt, v) == NK_LocalVariableOrWriteNode)
     return nullable_int_value(c, nt_ref(nt, v, "value"));
+  /* `h[k] &&= v` answers the element when it is nil (a miss); `h[k] ||= v`
+     answers v when it assigns */
+  if (nt_kind(nt, v) == NK_IndexAndWriteNode) return 1;
+  if (nt_kind(nt, v) == NK_IndexOrWriteNode) return nullable_int_value(c, nt_ref(nt, v, "value"));
   /* `x = v` answers v: `s0 = s1 = nil` hands s0 the inner write's nil */
   if (nt_kind(nt, v) == NK_LocalVariableWriteNode)
     return nullable_int_value(c, nt_ref(nt, v, "value"));
@@ -28752,11 +28758,17 @@ static void mark_nullable_int_locals(Compiler *c) {
     NT_FOREACH_KIND(nt, NK_CallNode, id) {
       const char *cn = nt_str(nt, id, "name");
       int recv = nt_ref(nt, id, "receiver");
-      if (!cn || !sp_streq(cn, "new") || recv < 0) continue;
-      NodeKind rk = nt_kind(nt, recv);
+      if (!cn || !sp_streq(cn, "new")) continue;
+      NodeKind rk = recv >= 0 ? nt_kind(nt, recv) : NK_SelfNode;
       int k = rk == NK_LocalVariableReadNode ? class_var_static_ci(c, recv)
             : rk == NK_ConstantReadNode || rk == NK_ConstantPathNode ? comp_class_index(c, nt_str(nt, recv, "name"))
             : -1;
+      /* `new(...)` / `self.new(...)` in a class method of the Struct / Data
+         itself (`def self.of(path, line = nil) = new(path:, line:)`) */
+      if (rk == NK_SelfNode) {
+        Scope *ns = comp_scope_of(c, id);
+        if (ns && ns->is_cmethod && ns->class_id >= 0) k = ns->class_id;
+      }
       if (k < 0 || !c->classes[k].is_struct || comp_method_in_chain(c, k, "initialize", NULL) >= 0) continue;
       ClassInfo *ci = &c->classes[k];
       int ca = nt_ref(nt, id, "arguments");
