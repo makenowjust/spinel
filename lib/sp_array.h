@@ -236,6 +236,29 @@ static inline sp_bool sp_FloatArray_empty(sp_FloatArray*a){return a->len==0;}
 static inline sp_float sp_FloatArray_get(sp_FloatArray*a,sp_int i){if(!a)return 0.0;if(i<0)i+=a->len;if(i<0||i>=a->len)return 0.0;return a->data[i];}
 static inline sp_bool sp_FloatArray_elem_nil(sp_FloatArray*a,sp_int i){return SP_UNLIKELY(a->nilbits!=NULL)&&sp_nilbit_get(a->nilbits,i);}
 static inline sp_ofloat sp_FloatArray_oget(sp_FloatArray*a,sp_int i){if(!a)return sp_ofloat_nil();if(i<0)i+=a->len;if(i<0||i>=a->len)return sp_ofloat_nil();if(SP_UNLIKELY(a->nilbits)&&sp_nilbit_get(a->nilbits,i))return sp_ofloat_nil();return sp_ofloat_of(a->data[i]);}
+/* The fused reads (`a[i] + 1`, `f(a[i])`): the plain element, CRuby's
+   error raised at the read for an index past the end or a nil element.
+   The in-range read of an array that never held a nil is one unsigned
+   compare and one bitmap test before the load; the rest (a negative
+   index, a bitmap, a nil receiver) takes the oget path.
+   _ck: the element is a receiver, NoMethodError "undefined method 'op' for nil";
+   _arg: the element is an argument, TypeError (sp_oint_arg / sp_ofloat_arg). */
+static inline sp_int sp_IntArray_get_ck(sp_IntArray *a, sp_int i, const char *op) {
+  if (SP_LIKELY(a && (unsigned long long)i < (unsigned long long)a->len && !a->nilbits)) return a->data[a->start + i];
+  return sp_oint_val(sp_IntArray_oget(a, i), op);
+}
+static inline sp_int sp_IntArray_get_arg(sp_IntArray *a, sp_int i) {
+  if (SP_LIKELY(a && (unsigned long long)i < (unsigned long long)a->len && !a->nilbits)) return a->data[a->start + i];
+  return sp_oint_arg(sp_IntArray_oget(a, i));
+}
+static inline sp_float sp_FloatArray_get_ck(sp_FloatArray *a, sp_int i, const char *op) {
+  if (SP_LIKELY(a && (unsigned long long)i < (unsigned long long)a->len && !a->nilbits)) return a->data[i];
+  return sp_ofloat_val(sp_FloatArray_oget(a, i), op);
+}
+static inline sp_float sp_FloatArray_get_arg(sp_FloatArray *a, sp_int i) {
+  if (SP_LIKELY(a && (unsigned long long)i < (unsigned long long)a->len && !a->nilbits)) return a->data[i];
+  return sp_ofloat_arg(sp_FloatArray_oget(a, i));
+}
 /* the `_o` spelling of the element read with its nil (a builtin row's sp_$AArray_get$O) */
 #define sp_IntArray_get_o(a, i) sp_IntArray_oget((a), (i))
 #define sp_FloatArray_get_o(a, i) sp_FloatArray_oget((a), (i))
