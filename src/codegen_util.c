@@ -5439,7 +5439,8 @@ int node_is_oint(Compiler *c, int node) {
          own return mark says: the field has no other form) -- unless a
          method written out nearer in the chain overrides the reader */
       if (an2 == 0 && blk < 0 && comp_reader_in_chain(c, cid, nm, &rdef) &&
-          (mi < 0 || class_chain_depth(c, cid, rdef < 0 ? cid : rdef) <= class_chain_depth(c, cid, mdef < 0 ? cid : mdef)))
+          (mi < 0 || (mdef != cid &&
+                      class_chain_depth(c, cid, rdef < 0 ? cid : rdef) <= class_chain_depth(c, cid, mdef < 0 ? cid : mdef))))
         return reader_ivar_has_nilbit(c, cid, nm);
     }
     else if (nt_kind(nt, r) == NK_ConstantReadNode) {
