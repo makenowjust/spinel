@@ -15402,9 +15402,9 @@ static int str_mutate_reassign_arms(Compiler *c, Buf *b, int indent, const NodeT
       /* a beginless bound is 0 and an endless one is the last index, rather
          than the open-bound marker a negative-index fixup would fold into a
          wild offset (`s[..1] = x` raised RangeError) */
-      buf_printf(b, " sp_int _a%d = _t%d.first == SP_RANGE_NO_BEGIN ? 0 :"
+      buf_printf(b, " sp_int _a%d = _t%d.nobeg ? 0 :"
                     " (_t%d.first < 0 ? _t%d.first + _len%d : _t%d.first);", ti, ti, ti, ti, ti, ti);
-      buf_printf(b, " int _oe%d = _t%d.last == SP_RANGE_NO_END;", ti, ti);
+      buf_printf(b, " int _oe%d = _t%d.noend;", ti, ti);
       buf_printf(b, " sp_int _e%d = _oe%d ? _len%d - 1 :"
                     " (_t%d.last < 0 ? _t%d.last + _len%d : _t%d.last);", ti, ti, ti, ti, ti, ti, ti);
       buf_printf(b, " sp_int _n%d = _e%d - _a%d + ((_t%d.excl && !_oe%d) ? 0 : 1);", ti, ti, ti, ti, ti);
