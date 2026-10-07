@@ -2088,6 +2088,10 @@ void emit_oint_expr(Compiler *c, int node, TyKind t, Buf *b);
 extern int g_want_oint;
 /* an element read whose oint is unwrapped at once emits the checked plain
    read (codegen_util.c emit_scalar_operand_op, emit_expr's sp_oint_arg) */
+/* a boxed field whose writes may store nil starts with the unset mark
+   (codegen_util.c); the mark is a nil's cls_id no box carries */
+#define SP_IVAR_UNSET_MARK 0x5e70
+int poly_ivar_unset_marked(Compiler *c, int cid, int iv);
 extern int g_ck_node;
 extern const char *g_ck_op;
 extern int g_ck_done;

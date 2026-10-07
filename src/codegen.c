@@ -8821,7 +8821,9 @@ static void emit_ivar_nil_inits_from(Compiler *c, Buf *b, ClassInfo *ci, int fro
   }
   for (int i = from; i < ci->nivars; i++) {
     const char *name = iv_c(ci->ivars[i] + 1);  /* skip leading '@', mangle to a C field */
-    if (ci->ivar_types[i] == TY_POLY)
+    if (ci->ivar_types[i] == TY_POLY && poly_ivar_unset_marked(c, cid, i))
+      buf_printf(b, "%s%siv_%s = ((sp_RbVal){SP_TAG_NIL, 0x%x, {0}})%s", lead, lv, name, SP_IVAR_UNSET_MARK, term);
+    else if (ci->ivar_types[i] == TY_POLY)
       buf_printf(b, "%s%siv_%s = sp_box_nil()%s", lead, lv, name, term);
     else {
       const char *nv = ivar_scalar_nil_init(ci->ivar_types[i]);

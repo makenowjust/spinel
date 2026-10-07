@@ -1938,6 +1938,16 @@ static int ivs_never_nil(Compiler *c, int v) {
   if (v >= 0 && nt_kind(nt, v) != NK_NilNode && oint_kind(comp_ntype(c, v)) && !nullable_int_value(c, v) &&
       !node_has_oint_form(c, v))
     return 1;
+  /* under --int-overflow=promote an Integer slot is widened to the box
+     after the analysis (comp_ntype answers poly, infer_type the Integer it
+     settled on): a value the analysis proved non-nil is still never nil */
+  if (v >= 0 && nt_kind(nt, v) != NK_NilNode && comp_ntype(c, v) == TY_POLY) {
+    an_pure_read_begin();
+    TyKind it = infer_type(c, v);
+    int nn = oint_kind(it) && !nullable_int_value(c, v);
+    an_pure_read_end();
+    if (nn) return 1;
+  }
   switch (nt_kind(nt, v)) {
     case NK_StringNode: case NK_InterpolatedStringNode: case NK_XStringNode: case NK_IntegerNode:
     case NK_FloatNode: case NK_RationalNode: case NK_ImaginaryNode: case NK_SymbolNode:
@@ -2100,11 +2110,27 @@ int ivar_set_kind(Compiler *c, int cid, const char *ivn) {
 }
 /* The C test that ivar `ivn` (of class `cid`, read as `expr`) is set, for
    an ivar of kind 1 or 3; NULL when it is always reported as set. */
+/* A boxed (poly) instance field whose writes may store nil (ivar_set_kind
+   2): set or unset cannot be read off the value, so the constructor seeds
+   it with a nil carrying SP_IVAR_UNSET_MARK in its cls_id. */
+int poly_ivar_unset_marked(Compiler *c, int cid, int iv) {
+  if (cid < 0 || cid >= c->nclasses || iv < 0 || iv >= c->classes[cid].nivars) return 0;
+  ClassInfo *ci = &c->classes[cid];
+  if (ci->ivar_types[iv] != TY_POLY || (ci->is_struct && iv < ci->nmembers)) return 0;
+  return ivar_set_kind(c, cid, ci->ivars[iv]) == 2;
+}
 const char *ivar_set_test(Compiler *c, int cid, const char *ivn, const char *expr, char *buf, size_t cap) {
   int kind = ivar_set_kind(c, cid, ivn);
   if (kind == 3) {
     size_t n = strlen(expr) - strlen(iv_c(ivn + 1)) - 3;
     snprintf(buf, cap, "(%.*s_sp_set_%s)", (int)n, expr, iv_c(ivn + 1));
+    return buf;
+  }
+  /* a boxed slot a nil can be written into: the object starts it with
+     the unset mark (a nil whose cls_id says never written), which any
+     write replaces (poly_ivar_unset_marked) */
+  if (kind == 2 && poly_ivar_unset_marked(c, cid, comp_ivar_index(&c->classes[cid], ivn))) {
+    snprintf(buf, cap, "((%s).cls_id != 0x%x)", expr, SP_IVAR_UNSET_MARK);
     return buf;
   }
   if (kind != 1) return NULL;

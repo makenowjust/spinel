@@ -2256,7 +2256,8 @@ int emit_call_display_ivar_arms(Compiler *c, int id, Buf *b, const NodeTable *nt
     int dcid = ty_object_class(rt);
     int have = ivn && ivn[0] == '@' && comp_ivar_index(&c->classes[dcid], ivn) >= 0;
     /* one nothing has set yet is not defined (ivar_set_kind) */
-    if (have && (ivar_set_kind(c, dcid, ivn) & 1)) {
+    if (have && ((ivar_set_kind(c, dcid, ivn) & 1) ||
+                 poly_ivar_unset_marked(c, dcid, comp_ivar_index(&c->classes[dcid], ivn)))) {
       int tro = ++g_tmp;
       char ex[160], tb[256];
       snprintf(ex, sizeof ex, "_t%d->iv_%s", tro, iv_c(ivn + 1));
