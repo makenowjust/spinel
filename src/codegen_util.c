@@ -5128,6 +5128,14 @@ int node_is_oint(Compiler *c, int node) {
   case NK_ClassVariableReadNode:
   case NK_GlobalVariableReadNode:
     return nullable_int_value(c, node);
+  case NK_LocalVariableAndWriteNode: {
+    /* `x &&= v` answers the slot: its oint where the slot holds its nil
+       (the untaken arm answers the nil the slot held) */
+    const char *ln = nt_str(nt, node, "name");
+    Scope *s = ln ? comp_scope_of(c, node) : NULL;
+    LocalVar *lv = s ? scope_local(s, ln) : NULL;
+    return lv && slot_is_oint(lv);
+  }
   case NK_InstanceVariableWriteNode:
     /* `@x = v` as an expression answers the slot it wrote: its oint where
        the field carries a nil bit (or the static is an oint); the `||=` /

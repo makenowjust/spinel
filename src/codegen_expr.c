@@ -1634,7 +1634,9 @@ static void emit_local_orw_result(Compiler *c, int id, const char *ref, Buf *b) 
     const char *nm = nt_str(c->nt, id, "name");
     Scope *sc = nm ? comp_scope_of(c, id) : NULL;
     LocalVar *lv = sc ? scope_local(sc, nm) : NULL;
-    if (lv && slot_is_oint(lv) && !node_is_oint(c, id)) buf_puts(b, ".v");
+    /* (an expression typed past the slot -- poly -- is boxed from the
+       oint by its consumer) */
+    if (lv && slot_is_oint(lv) && !node_is_oint(c, id) && oint_kind(comp_ntype(c, id))) buf_puts(b, ".v");
   }
 }
 
