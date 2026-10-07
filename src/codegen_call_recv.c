@@ -8616,6 +8616,9 @@ static void emit_isa_self_class(Compiler *c, int recv, int cid, Buf *b) {
    emit_stmt is lowering (g_setter_stmt_id) has no reader for the value and
    emits as before. Returns the temp, or -1 when the call is left alone, and
    the temp's type in *vt_out. */
+/* the setter-value temps that hold an oint (a small ring, as fold's) */
+static int g_sv_oint[32], g_sv_oint_n = 0;
+static int sv_oint_is(int tv) { for (int i = 0; i < 32; i++) if (tv && g_sv_oint[i] == tv) return 1; return 0; }
 static int setter_value_open(Compiler *c, int id, Buf *b, TyKind *vt_out) {
   const NodeTable *nt = c->nt;
   int argc; const int *argv = call_args(nt, id, &argc);
@@ -8626,18 +8629,23 @@ static int setter_value_open(Compiler *c, int id, Buf *b, TyKind *vt_out) {
   if (vt == TY_UNKNOWN) return -1;
   /* nil and void have no C storage type of their own: hold them boxed */
   int boxed = (vt == TY_NIL || vt == TY_VOID);
+  /* an Integer or Float that can be nil is held with its nil (view_bind_o):
+     the writer gets it, and so does the assignment's value */
+  int so = !boxed && oint_kind(vt) && node_has_oint_form(c, argv[0]);
   Buf ab; memset(&ab, 0, sizeof ab);
   if (boxed) emit_boxed(c, argv[0], &ab);
+  else if (so) emit_oint_expr(c, argv[0], vt, &ab);
   else emit_expr(c, argv[0], &ab);
   int tv = ++g_tmp;
   emit_indent(g_pre, g_indent);
-  emit_ctype(c, boxed ? TY_POLY : vt, g_pre);
+  if (so) buf_puts(g_pre, oint_ctype(vt)); else emit_ctype(c, boxed ? TY_POLY : vt, g_pre);
   buf_printf(g_pre, " _t%d = ", tv);
   buf_puts(g_pre, ab.p ? ab.p : "sp_box_nil()"); buf_puts(g_pre, ";\n");
   free(ab.p);
   if (boxed || vt == TY_POLY) { emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT_RBVAL(_t%d);\n", tv); }
   else if (needs_root(vt)) { emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", tv); }
-  view_bind(argv[0], "_t%d", tv);
+  if (so) { view_bind_o(argv[0], "_t%d", tv); g_sv_oint[g_sv_oint_n++ & 31] = tv; }
+  else view_bind(argv[0], "_t%d", tv);
   buf_puts(b, "({ (void)(");
   *vt_out = boxed ? TY_POLY : vt;
   return tv;
@@ -8650,7 +8658,14 @@ static void setter_value_close(Compiler *c, int id, TyKind vt, Buf *b, int tv) {
   if (tv < 0) return;
   view_unbind(g_n_argov - 1);
   buf_puts(b, "); ");
-  if (repr_of(c, id).kind == RK_BOXED && vt != TY_POLY) {
+  if (sv_oint_is(tv)) {
+    /* the oint: boxed with its nil, as it is where the consumer takes the
+       oint, unwrapped for a plain one */
+    if (repr_of(c, id).kind == RK_BOXED) buf_printf(b, "%s(_t%d)", oint_box(vt), tv);
+    else if (node_is_oint(c, id) || node_has_oint_form(c, id)) buf_printf(b, "_t%d", tv);
+    else buf_printf(b, "%s(_t%d)", oint_arg(vt), tv);
+  }
+  else if (repr_of(c, id).kind == RK_BOXED && vt != TY_POLY) {
     char tn[32]; snprintf(tn, sizeof tn, "_t%d", tv);
     emit_boxed_text(c, vt, tn, b);
   }
