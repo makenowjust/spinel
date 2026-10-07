@@ -13341,7 +13341,7 @@ void emit_stmt_inner(Compiler *c, int id, Buf *b, int indent) {
         TyKind at9 = g_ie_next_ty == TY_POLY_ARRAY ? comp_ntype(c, nv[0]) : TY_UNKNOWN;
         const char *apf9 = at9 != TY_POLY_ARRAY ? array_to_poly_fn(at9) : NULL;
         if (g_ie_res_poly) emit_boxed(c, nv[0], b);
-        else if (g_ie_next_oint) emit_oint_expr(c, nv[0], g_ie_next_ty, b);
+        else if (g_ie_next_oint && oint_kind(g_ie_next_ty)) emit_oint_expr(c, nv[0], g_ie_next_ty, b);
         else if (g_ie_next_ty == TY_INT || g_ie_next_ty == TY_FLOAT) {
           /* a plain slot never holds a nil: the backstop */
           if (node_may_be_nil(c, nv[0])) refuse_nil_store(c, nv[0], g_ie_next_ty, "a `next` value into a plain slot");

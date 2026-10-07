@@ -2975,6 +2975,7 @@ void emit_block_invoke(Compiler *c, int args_node, Buf *b, int indent, int as_ex
      previous emission. */
   int nx_own = subtree_has_own_next(nt, bbody);
   const char *sv_nx2 = g_ie_next_var; int sv_poly2 = g_ie_res_poly; TyKind sv_nty2 = g_ie_next_ty;
+  int sv_nxo2 = g_ie_next_oint;
   int sv_lexc2 = g_loop_exc_base;
   int sv_lens2 = g_loop_ensure_base;
   char nxbuf[32]; int nx_tmp = 0;
@@ -3076,7 +3077,7 @@ void emit_block_invoke(Compiler *c, int args_node, Buf *b, int indent, int as_ex
       Buf *svp3 = g_pre; int svi3 = g_indent; g_pre = b; g_indent = 0;
       if (void_tail) emit_expr(c, tl3, &tb);
       else if (g_ie_res_poly) emit_boxed(c, tl3, &tb);
-      else if (g_ie_next_oint) emit_oint_expr(c, tl3, nx_bt, &tb);   /* the next-var is the oint */
+      else if (g_ie_next_oint && oint_kind(nx_bt)) emit_oint_expr(c, tl3, nx_bt, &tb);   /* the next-var is the oint */
       else emit_expr_slot(c, tl3, nx_bt, &tb);
       g_pre = svp3; g_indent = svi3;
       if (void_tail) buf_puts(b, "(void)(");
@@ -3101,9 +3102,11 @@ void emit_block_invoke(Compiler *c, int args_node, Buf *b, int indent, int as_ex
     }
     if (rd_lbl && rd_head >= bn3 - 1) buf_printf(b, "_redo_%d: ; ", rd_lbl);
     const char *sv_rv = g_result_var; int sv_rp = g_result_poly; TyKind sv_rty = g_result_ty;
+    int sv_ro = g_result_oint;
     g_result_var = nxbuf; g_result_poly = g_ie_res_poly; g_result_ty = g_ie_res_poly ? TY_POLY : nx_bt;
+    g_result_oint = g_ie_next_oint && !g_ie_res_poly && oint_kind(nx_bt);   /* the carrier is the oint: the arms store that form */
     emit_stmt_tail(c, bd3[bn3 - 1], b, 0);
-    g_result_var = sv_rv; g_result_poly = sv_rp; g_result_ty = sv_rty;
+    g_result_var = sv_rv; g_result_poly = sv_rp; g_result_ty = sv_rty; g_result_oint = sv_ro;
   }
   else if (as_expr && !nx_own && bn3 > 0 &&
            nt_type(nt, bd3[bn3 - 1]) &&
@@ -3249,7 +3252,7 @@ void emit_block_invoke(Compiler *c, int args_node, Buf *b, int indent, int as_ex
     g_loop_ensure_base = sv_lens2;
     if (as_expr) buf_printf(b, "} while(0); %s; ", g_ie_next_var ? nxbuf : "(void)0");
     else { emit_indent(b, indent); buf_puts(b, "} while(0);\n"); }
-    g_ie_next_var = sv_nx2; g_ie_res_poly = sv_poly2; g_ie_next_ty = sv_nty2;
+    g_ie_next_var = sv_nx2; g_ie_res_poly = sv_poly2; g_ie_next_ty = sv_nty2; g_ie_next_oint = sv_nxo2;
   }
   block_aliases_release(&al);
   if (al.open) { emit_indent(b, indent); buf_puts(b, "}\n"); }

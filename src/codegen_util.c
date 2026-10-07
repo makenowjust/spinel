@@ -5189,6 +5189,32 @@ int node_is_oint(Compiler *c, int node) {
       int same = (num_l && num_r) || (rt == TY_STRING && at == TY_STRING) || (rt == TY_SYMBOL && at == TY_SYMBOL);
       return same ? nullable_int_value(c, node) : 1;
     }
+    /* `s[0]` / `s[:a]` / `s["a"]` / `s.dig(:a)` on a Struct or Data: the
+       member's read, with its nil where the member carries a nil bit */
+    if ((sp_streq(nm, "[]") || sp_streq(nm, "dig")) && an2 == 1 && r >= 0 && ty_is_object(rt)) {
+      int scid = ty_object_class(rt);
+      ClassInfo *sci = &c->classes[scid];
+      if (sci->is_struct || sci->is_data) {
+        int a1 = nt_ref(nt, node, "arguments"), a1n = 0;
+        const int *a1a = a1 >= 0 ? nt_arr(nt, a1, "arguments", &a1n) : NULL;
+        int mix = -1;
+        if (a1a && a1n == 1) {
+          NodeKind ak = nt_kind(nt, a1a[0]);
+          if (ak == NK_IntegerNode && !sp_streq(nm, "dig")) {
+            long long ix = nt_int(nt, a1a[0], "value", 0);
+            if (ix < 0) ix += sci->nmembers;
+            if (ix >= 0 && ix < sci->nmembers) mix = (int)ix;
+          }
+          else if (ak == NK_SymbolNode || ak == NK_StringNode) {
+            const char *mn = ak == NK_SymbolNode ? nt_str(nt, a1a[0], "value") : nt_str(nt, a1a[0], "content");
+            char ivb[300]; snprintf(ivb, sizeof ivb, "@%s", mn ? mn : "");
+            int iv = mn ? comp_ivar_index(sci, ivb) : -1;
+            if (iv >= 0 && iv < sci->nmembers) mix = iv;
+          }
+        }
+        if (mix >= 0) return ivar_has_nilbit(c, scid, mix);
+      }
+    }
     /* `o.instance_variable_get(:@x)` on a typed object: the field's read,
        with its nil where the field carries a nil bit (as an attr reader) */
     if (sp_streq(nm, "instance_variable_get") && an2 == 1 && r >= 0 && ty_is_object(rt)) {
