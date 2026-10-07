@@ -6344,6 +6344,10 @@ static int desugar_str_range_methods(Compiler *c) {
     "begin", "end", "min", "max", "include?", "member?", "cover?", "===",
     "exclude_end?", "==", "!=", "eql?", "inspect", "to_s", "class",
     "frozen?", "freeze", "itself", "dup", "clone", "hash",
+    /* Range's own overlap? and bsearch answer about the RANGE: the member
+       Array has no overlap?, and its bsearch searched where CRuby raises
+       TypeError for a String range */
+    "overlap?", "bsearch",
     /* the identity predicates answer about the RANGE, not its members: routing
        them through to_a made `("a".."e").is_a?(Range)` false (#3619) */
     "is_a?", "kind_of?", "instance_of?", "nil?", "equal?", "respond_to?",
@@ -6404,11 +6408,24 @@ static int desugar_str_range_methods(Compiler *c) {
     }
     /* first/last are the endpoints bare, a prefix/suffix ARRAY with a count */
     if (!native && an == 0 && (is_endpoint_query(nm))) native = 1;
+    /* Object's own face answers about the RANGE, not its members (#3619's
+       identity predicates were the first of it): through to_a, tap and then
+       yielded the member Array, tap answered it, and on an endless range
+       instance_variables, `!` and `=~` raised RangeError where CRuby answers */
+    if (range_object_face(nm)) native = 1;
     if (native) continue;
     int toa = nt_new_node(nt, "CallNode");
     if (toa < 0) continue;
     nt_node_set_str(nt, toa, "name", "to_a");
     nt_node_set_ref(nt, toa, "receiver", recv);
+    /* each, each_entry, reverse_each, each_with_index, each_slice and
+       each_cons with a block walk the members but answer the RANGE: mark the
+       hop, as the Hash and Enumerable routes do (#3842), so inference and the
+       value emitter yield the receiver instead of the member Array */
+    { int blk = nt_ref(nt, id, "block");
+      if (blk >= 0 && nt_kind(nt, blk) == NK_BlockNode &&
+          ((an == 0 && is_each_walk_or_with_index(nm)) || (an == 1 && is_each_window(nm))))
+        nt_node_set_str(nt, toa, "enum_recv", "1"); }
     nt_node_set_ref(nt, id, "receiver", toa);
     comp_grow_node_arrays(c);
     c->nscope[toa] = c->nscope[id];
@@ -9920,7 +9937,7 @@ static int narrow_locals_from_arrays(Compiler *c) {
         TyKind rt = infer_type(c, crecv);
         /* element type of a narrowed obj-array OR the new int-array-array */
         /* a scalar-element array yields its element type; an out-of-range
-           read is that type's nil (SP_INT_NIL / NULL), which it models */
+           read is that type's nil (the sp_oint's flag / NULL), which it models */
         TyKind ec = ty_is_obj_array(rt) ? ty_object(ty_obj_array_class(rt))
                   : (rt == TY_INT_ARRAY_ARRAY) ? TY_INT_ARRAY
                   : (rt == TY_FLOAT_ARRAY_ARRAY) ? TY_FLOAT_ARRAY
@@ -16587,8 +16604,37 @@ static unsigned share_types_digest(Compiler *c) {
    String every name holds rather than replacing the slot's own copy. */
 /* (a read of a holder is not lifted: the rule makes that holder the
    handle, whose box is the handle already) */
+static int share_lift_value(Compiler *c, int v);
+/* An arm of a conditional value: its last statement, through parentheses
+   and an `else`. */
+static int share_lift_arms(Compiler *c, int n) {
+  const NodeTable *nt = c->nt;
+  for (int d = 0; n >= 0 && d < 16; d++) {
+    NodeKind k = nt_kind(nt, n);
+    if (k == NK_ElseNode) { n = nt_ref(nt, n, "statements"); continue; }
+    if (k == NK_ParenthesesNode) { n = nt_ref(nt, n, "body"); continue; }
+    if (k == NK_StatementsNode) {
+      int bn = 0; const int *bv = nt_arr(nt, n, "body", &bn);
+      n = bn > 0 ? bv[bn - 1] : -1;
+      continue;
+    }
+    return share_lift_value(c, n);
+  }
+  return 0;
+}
 static int share_lift_value(Compiler *c, int v) {
-  NodeKind k = nt_kind(c->nt, v);
+  const NodeTable *nt = c->nt;
+  NodeKind k = nt_kind(nt, v);
+  /* a conditional value: each arm that can be a String (a boxed slot's
+     value boxes each arm on its own) */
+  switch (k) {
+    case NK_IfNode: case NK_UnlessNode:
+      return share_lift_arms(c, nt_ref(nt, v, "statements")) |
+             share_lift_arms(c, nt_ref(nt, v, k == NK_IfNode ? "subsequent" : "else_clause"));
+    case NK_OrNode: case NK_AndNode:
+      return share_lift_arms(c, nt_ref(nt, v, "left")) | share_lift_arms(c, nt_ref(nt, v, "right"));
+    default: break;
+  }
   if (k == NK_LocalVariableReadNode || k == NK_InstanceVariableReadNode || k == NK_GlobalVariableReadNode ||
       k == NK_ClassVariableReadNode || k == NK_ConstantReadNode || k == NK_ConstantPathNode)
     return 0;
@@ -16596,13 +16642,60 @@ static int share_lift_value(Compiler *c, int v) {
   c->poly_strbuf_lift[v] = 1;
   return 1;
 }
+/* The same for local `name` of scope `scope`: its `=`, `||=` and `&&=`
+   (comp_lvw_first_sc, the local write index). */
+static int share_lift_poly_local_stores(Compiler *c, int scope, const char *name) {
+  const NodeTable *nt = c->nt;
+  int changed = 0;
+  for (int w = comp_lvw_first_sc(c, scope, name); w >= 0; w = comp_lvw_next_sc(c, w)) {
+    NodeKind k = nt_kind(nt, w);
+    if ((k != NK_LocalVariableWriteNode && k != NK_LocalVariableOrWriteNode && k != NK_LocalVariableAndWriteNode) ||
+        !sp_streq(nt_str(nt, w, "name"), name) || comp_scope_of(c, w) != &c->scopes[scope]) continue;
+    int v = an_unparen(nt, nt_ref(nt, w, "value"));
+    if (v >= 0) changed |= share_lift_value(c, v);
+  }
+  return changed;
+}
+/* The same for a global's, a class variable's or a constant's writes
+   (holder kind `kind`, the share facts' name): `=`, `||=` and `&&=`. A
+   class variable is every class's of the name, as the facts key it. */
+static int share_lift_poly_static_stores(Compiler *c, int kind, const char *name) {
+  const NodeTable *nt = c->nt;
+  int changed = 0;
+  NodeKind rk = kind == SHK_GVAR ? NK_GlobalVariableReadNode : kind == SHK_CVAR ? NK_ClassVariableReadNode
+                                                                                 : NK_ConstantReadNode;
+  const char *want = kind == SHK_GVAR && name && name[0] == '$' ? comp_resolve_gvar(c, name + 1) : name;
+  if (!want) return 0;
+  for (int e = comp_vsite_first(c, VS_STORE, rk, want, -1); e >= 0; e = comp_vsite_next(c, e)) {
+    int w = comp_vsite_node(c, e);
+    const char *wn = nt_str(nt, w, "name");
+    const char *rn = kind == SHK_GVAR && wn && wn[0] == '$' ? comp_resolve_gvar(c, wn + 1) : wn;
+    NodeKind wk = nt_kind(nt, w);
+    int wkind = wk == NK_GlobalVariableWriteNode || wk == NK_GlobalVariableOrWriteNode ||
+                wk == NK_GlobalVariableAndWriteNode ? SHK_GVAR
+              : wk == NK_ClassVariableWriteNode || wk == NK_ClassVariableOrWriteNode ||
+                wk == NK_ClassVariableAndWriteNode ? SHK_CVAR
+              : wk == NK_ConstantWriteNode || wk == NK_ConstantOrWriteNode || wk == NK_ConstantAndWriteNode ? SHK_CONST
+              : -1;
+    if (!rn || !sp_streq(rn, want) || wkind != kind) continue;   /* a chain's collisions */
+    int v = an_unparen(nt, nt_ref(nt, w, "value"));
+    if (v >= 0) changed |= share_lift_value(c, v);
+  }
+  return changed;
+}
 static int share_lift_poly_ivar_stores(Compiler *c, int cid, const char *name) {
   const NodeTable *nt = c->nt;
   int changed = 0;
-  NT_FOREACH_KIND(nt, NK_InstanceVariableWriteNode, w) {
+  /* its `=`, `||=` and `&&=` (the variable-site chains) */
+  for (int e = comp_vsite_first(c, VS_STORE, NK_InstanceVariableReadNode, name, cid); e >= 0;
+       e = comp_vsite_next(c, e)) {
+    int w = comp_vsite_node(c, e);
+    NodeKind wk = nt_kind(nt, w);
     const char *wn = nt_str(nt, w, "name");
-    int v = nt_ref(nt, w, "value");
-    if (!wn || !sp_streq(wn, name) || v < 0 || comp_ivar_owner(c, w) != cid) continue;
+    int v = an_unparen(nt, nt_ref(nt, w, "value"));
+    if ((wk != NK_InstanceVariableWriteNode && wk != NK_InstanceVariableOrWriteNode &&
+         wk != NK_InstanceVariableAndWriteNode) || !wn || !sp_streq(wn, name) || v < 0 || comp_ivar_owner(c, w) != cid)
+      continue;
     changed |= share_lift_value(c, v);
   }
   size_t ln = strlen(name);
@@ -16652,7 +16745,13 @@ static int share_default_apply(Compiler *c, int in_fixpoint) {
         continue;
       }
       if (!repr_str_shares(c, h)) continue;
-      if (lv->type != TY_STRING && lv->type != TY_STRBUF) continue;   /* a box holds the handle */
+      /* a box holds the handle: each String written into it is boxed as
+         its handle, as an ivar's are (share_lift_poly_ivar_stores) */
+      if (lv->type == TY_POLY) {
+        changed |= share_lift_poly_local_stores(c, sh->scope, lv->name);
+        continue;
+      }
+      if (lv->type != TY_STRING && lv->type != TY_STRBUF) continue;
       if (repr_of_slot(c, lv).share && !lv->byref_out) continue;
       if (lv->is_param && !lv->is_block_param) {
         if (lv->rbs_seeded) continue;
@@ -16687,6 +16786,8 @@ static int share_default_apply(Compiler *c, int in_fixpoint) {
       for (int k = 0; k < c->nclasses; k++) {
         ClassInfo *ci = &c->classes[k];
         int i = sh->name ? comp_cvar_index(ci, sh->name) : -1;
+        /* a box holds the handle: its Strings are stored as the handle */
+        if (i >= 0 && ci->cvar_types[i] == TY_POLY) { changed |= share_lift_poly_static_stores(c, SHK_CVAR, sh->name); continue; }
         if (i < 0 || (ci->cvar_types[i] != TY_STRING && ci->cvar_types[i] != TY_STRBUF)) continue;
         if (repr_of_cvar(c, k, i).share) continue;
         ci->cvar_types[i] = TY_STRBUF;
@@ -16699,7 +16800,9 @@ static int share_default_apply(Compiler *c, int in_fixpoint) {
     else if ((sh->kind == SHK_GVAR || sh->kind == SHK_CONST) && repr_str_shares(c, h)) {
       LocalVar *gv = sh->kind == SHK_CONST ? comp_const(c, sh->name)
                                            : comp_gvar(c, sh->name[0] == '$' ? sh->name + 1 : sh->name);
-      if (!gv || (gv->type != TY_STRING && gv->type != TY_STRBUF)) continue;   /* a box holds the handle */
+      /* a box holds the handle: its Strings are stored as the handle */
+      if (gv && gv->type == TY_POLY) { changed |= share_lift_poly_static_stores(c, sh->kind, sh->name); continue; }
+      if (!gv || (gv->type != TY_STRING && gv->type != TY_STRBUF)) continue;
       if (repr_of_slot(c, gv).share) continue;
       gv->type = TY_STRBUF;
       gv->str_shared = 1;
@@ -24997,7 +25100,7 @@ static int reassert_rbs_param_seeds(Compiler *c) {
 static int nullable_int_call_name(const char *nm) {
   if (!nm) return 0;
   static const char *const N[] = {
-    "index", "rindex", "byteindex", "byterindex", "delete_at", "pop", "shift",
+    "index", "rindex", "byteindex", "byterindex", "delete_at", "slice!", "pop", "shift",
     "delete", "nonzero?", "infinite?", "getbyte", "bsearch", "bsearch_index",
     /* `a <=> b` answers nil when the two are not comparable, and the poly
        helper spells that with the sentinel like every other nullable int */
@@ -25564,6 +25667,9 @@ static int elem_miss_call(Compiler *c, int v) {
     return argc == 0 && blk < 0;
   if (is_minmax_query(nm)) return argc == 0;
   if (is_find_alias(nm)) return blk >= 0;
+  /* a fold without an initial value answers nil on an empty receiver:
+     `inject(:+)` and `inject { |s, x| ... }`, not `inject(0) { ... }` */
+  if (is_reduce_alias(nm)) return argc == 0 || (argc == 1 && blk < 0);
   return 0;
 }
 
@@ -28087,7 +28193,7 @@ static void mark_nullable_int_locals(Compiler *c) {
        every defaulted call even when each explicit call site passes a real
        number -- the number is what narrowed the slot to sp_int, and the
        call-site propagation below never sees the default. `of(path,
-       line = nil)` stored SP_INT_NIL boxed as an Integer: truthy, non-nil?,
+       line = nil)` stored the old nil sentinel boxed as an Integer: truthy, non-nil?,
        class Integer, while inspect still said nil (#4212). Only the boxing
        has to know, as everywhere in this family. */
     for (int si2 = 1; si2 < c->nscopes; si2++) {
@@ -32863,6 +32969,7 @@ static void an_phase_infer_fixpoint(Compiler *c) {
     ch |= desugar_implicit_send(c);            /* send(:m, a) -> m(a) on self */
     ch |= desugar_public_send_recv(c);         /* r.public_send(:m, a) -> r.m(a), visibility-stamped */
     ch |= desugar_symbol_string_methods(c);    /* :sym.match(re) -> :sym.to_s.match(re) */
+    ch |= desugar_interp_reopened_to_s(c);     /* "#{5}" with Integer#to_s reopened -> "#{5.to_s}" */
     /* re-run inside the fixpoint: a key whose type comes from a PARAMETER is
        still UNKNOWN on the pre-fixpoint pass, so `h[k] ||= []` fell back to
        the StrPolyHash default and handed an Integer key to a const char *
@@ -33559,7 +33666,7 @@ static void an_phase_post_fixpoint(Compiler *c) {
       if (class_ivar_pinned(cl, ivname)) continue;  /* --rbs seed pins the type */
       TyKind t = cl->ivar_types[iv];
       /* TY_INT is exempt: the generated constructor already seeds int ivars
-         with SP_INT_NIL (emit_ivar_nil_inits), so a pre-write read is nil
+         with their nil bit set (emit_ivar_nil_inits), so a pre-write read is nil
          through the nullable-int machinery without widening to poly. */
       if (t != TY_FLOAT && t != TY_STRING &&
           t != TY_SYMBOL && t != TY_BOOL) continue;

@@ -7075,7 +7075,7 @@ static void dn_build(Compiler *c) {
 }
 
 /* `@iv = cond ? nil : <int>` (a literal-nil ternary arm) pins the ivar as a
-   nullable int -- the SP_INT_NIL sentinel in an unboxed int slot, the same
+   nullable int -- its nil beside the value in an sp_oint slot, the same
    representation a direct `@iv = nil` / `@iv = <int>` pair already yields
    (a bare `@iv = nil` is skipped below, leaving the int writes) -- rather than
    widening to poly. Scoped to the ivar write so the nullable value never

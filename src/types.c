@@ -50,9 +50,10 @@ static const PolyFace ty_poly_face_tbl[] = {
      takes the row above; blockless bsearch answers an Enumerator no typed
      emitter builds.
      An Array owns bsearch too: a row for the name decides every receiver
-     kind, so leaving it out made a boxed Array's bsearch a NoMethodError. */
+     kind, so leaving it out made a boxed Array's bsearch a NoMethodError.
+     A String Range's bsearch is its TypeError, raised by its own row. */
   {"step", PF_RANGE | PF_FRANGE | PF_SRANGE, 0, 1, 1},
-  {"bsearch", PF_ARRAY | PF_RANGE | PF_FRANGE, 0, 0, 1},
+  {"bsearch", PF_ARRAY | PF_RANGE | PF_FRANGE | PF_SRANGE, 0, 0, 1},
   /* minmax is Range's own, read off the endpoints (a Float Range cannot be
      walked), beside the Enumerable row below that walks a collection */
   {"minmax", PF_RANGE | PF_FRANGE | PF_SRANGE, 0, 0, -1},
@@ -432,7 +433,7 @@ TyKind ty_unify(TyKind a, TyKind b) {
   if (a == TY_NIL && b == TY_STRING) return b;
   if (b == TY_NIL && a == TY_STRING) return a;
   /* An Integer or a Float that also sees nil stays a (nullable) scalar: the
-     slot's nil is the sentinel (SP_INT_NIL, the NaN payload), which the
+     slot's nil rides beside the value (sp_oint / sp_ofloat), which the
      search misses already leave there, and every consumer that can carry
      it is guarded by the #3505 marking (nullable_int on the local, the
      ivar, the return). `best = nil` followed by `best = x` in a search
@@ -610,11 +611,12 @@ const TyTraits ty_traits[TY_TRAITS_N] = {
 };
 
 /* A builtin value's type, which lays out no instance variables: a String,
-   a number, true, false, nil, a Symbol, a Range, a Random, an Array or a
-   Hash. */
+   a number, true, false, nil, a Symbol, a Range (of any endpoints), a Random,
+   an Array or a Hash. */
 int ty_builtin_ivar_less(TyKind t) {
   return t == TY_STRING || t == TY_STRBUF || t == TY_INT || t == TY_FLOAT || t == TY_BOOL || t == TY_NIL ||
-         t == TY_SYMBOL || t == TY_BIGINT || t == TY_RANGE || t == TY_RANDOM || ty_is_array(t) || ty_is_hash(t);
+         t == TY_SYMBOL || t == TY_BIGINT || t == TY_RANGE || t == TY_FLOAT_RANGE || t == TY_STR_RANGE ||
+         t == TY_RANDOM || ty_is_array(t) || ty_is_hash(t);
 }
 
 /* Of those, the values whose identity Spinel keeps, so the runtime's map can

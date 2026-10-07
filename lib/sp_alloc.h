@@ -762,6 +762,7 @@ static inline sp_float  sp_ofloat_val(sp_ofloat o, const char *op) { if (SP_UNLI
 /* a strict Integer ARGUMENT (an index, a count, a width): the conversion TypeError */
 static inline sp_int    sp_oint_arg(sp_oint o)                     { if (SP_UNLIKELY(o.nil)) sp_raise_nil_to_int(0); return o.v; }
 static inline sp_int    sp_oint_arg_of(sp_oint o)                  { if (SP_UNLIKELY(o.nil)) sp_raise_nil_to_int(1); return o.v; }
+static inline sp_int    sp_oint_arg_offt(sp_oint o)                { if (SP_UNLIKELY(o.nil)) sp_raise_nil_to_int(2); return o.v; }   /* an off_t argument's wording */
 /* a strict Float argument: TypeError "can't convert nil into Float" */
 SP_NORETURN SP_COLD void sp_raise_nil_to_float(void);
 static inline sp_float  sp_ofloat_arg(sp_ofloat o)                 { if (SP_UNLIKELY(o.nil)) sp_raise_nil_to_float(); return o.v; }

@@ -181,7 +181,7 @@ int enum_pair_source_call(const NodeTable *nt, int recv);
 int poly_blockless_enum_name(const char *name);
 
 /* True when node `id`'s value, held in an unboxed scalar slot, can be the
-   reserved nil sentinel (SP_INT_NIL / the float twin). The slot type alone
+   nil it carries beside the value (an sp_oint / sp_ofloat). The slot type alone
    cannot say -- an `Integer?` and an `Integer` are both TY_INT -- so codegen
    asks this before choosing between sp_box_int and sp_box_int_or_nil at a poly
    boundary. Valid only after analyze_program has settled the marking. */
