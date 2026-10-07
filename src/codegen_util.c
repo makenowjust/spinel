@@ -5888,12 +5888,29 @@ void emit_oint_truthy(Compiler *c, int node, TyKind t, Buf *b) {
   else { buf_puts(b, "(("); emit_expr(c, node, b); buf_puts(b, "), 1)"); }
 }
 
+/* A typed element read (`a[j]`) whose oint is unwrapped at once: the read
+   emits the checked plain form itself (sp_*Array_get_ck(a, j, op) for an
+   operator's receiver, sp_*Array_get_arg(a, j) for a plain consumer), which
+   raises the unwrap's own error at the read -- the same observable point,
+   since nothing runs between them. g_ck_node names the node, g_ck_op the
+   operator (NULL: the plain consumer's TypeError); the emitter sets
+   g_ck_done when it took the offer. */
+int g_ck_node = -1;
+const char *g_ck_op = NULL;
+int g_ck_done = 0;
+
 void emit_scalar_operand_op(Compiler *c, int node, const char *op, Buf *b) {
   TyKind t = comp_ntype(c, node);
   if (oint_kind(t) && cmp_operand_may_be_nil(c, node)) {
-    buf_printf(b, "%s(", oint_val(t));
-    emit_oint_expr(c, node, t, b);
-    buf_printf(b, ", \"%s\")", op);
+    Buf side; memset(&side, 0, sizeof side);
+    int sv_n = g_ck_node, sv_d = g_ck_done; const char *sv_o = g_ck_op;
+    g_ck_node = node; g_ck_op = op; g_ck_done = 0;
+    emit_oint_expr(c, node, t, &side);
+    int done = g_ck_done;
+    g_ck_node = sv_n; g_ck_op = sv_o; g_ck_done = sv_d;
+    if (done) buf_puts(b, side.p ? side.p : "0");
+    else buf_printf(b, "%s(%s, \"%s\")", oint_val(t), side.p ? side.p : "", op);
+    free(side.p);
     return;
   }
   emit_scalar_operand(c, node, t == TY_FLOAT ? "0.0" : "0", b);

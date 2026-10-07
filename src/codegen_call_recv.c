@@ -1850,6 +1850,18 @@ static int emit_kind_array_call(Compiler *c, int id, Buf *b, const NodeTable *nt
       int tk = ++g_tmp;
       buf_printf(b, "({ sp_int _t%d = ", tk);
       (void)emit_int_index_raw(c, argv[0], b);
+      /* unwrapped at once by its consumer (g_ck_node): the plain cached
+         element, else the checked read raising the unwrap's error */
+      if (oread && g_ck_node == id) {
+        char hz[48]; snprintf(hz, sizeof hz, "%s", hd); if (!strncmp(hz, "_hcd", 4)) hz[3] = 'z';
+        buf_printf(b, "; ((unsigned long long)_t%d < (unsigned long long)%s && %s) ? %s[_t%d] : sp_%sArray_get_%s(",
+                   tk, hl, hz, hd, tk, k, g_ck_op ? "ck" : "arg");
+        emit_expr(c, recv, b);
+        if (g_ck_op) buf_printf(b, ", _t%d, \"%s\"); })", tk, g_ck_op);
+        else buf_printf(b, ", _t%d); })", tk);
+        g_ck_done = 1;
+        { *out = 1; return 1; }
+      }
       if (oread) {
         char hz[48]; snprintf(hz, sizeof hz, "%s", hd); if (!strncmp(hz, "_hcd", 4)) hz[3] = 'z';
         buf_printf(b, "; ((unsigned long long)_t%d < (unsigned long long)%s && (%s || !sp_%sArray_elem_nil(", tk, hl, hz, k);
@@ -1862,7 +1874,12 @@ static int emit_kind_array_call(Compiler *c, int id, Buf *b, const NodeTable *nt
       buf_printf(b, ", _t%d); })", tk);
       { *out = 1; return 1; }
     }
-    buf_printf(b, "sp_%sArray_%s(", k, (rt == TY_INT_ARRAY || rt == TY_FLOAT_ARRAY) && node_is_oint(c, id) ? "oget" : "get");
+    int uo = (rt == TY_INT_ARRAY || rt == TY_FLOAT_ARRAY) && node_is_oint(c, id);
+    /* an oint unwrapped at once by its consumer (g_ck_node): the checked read */
+    int uck = uo && g_ck_node == id;
+    const char *uop = g_ck_op;
+    buf_printf(b, "sp_%sArray_%s(", k, uck ? (uop ? "get_ck" : "get_arg") : uo ? "oget" : "get");
+    if (uck) g_ck_done = 1;
     emit_expr(c, recv, b); buf_puts(b, ", ");
     /* a splat is its one element (emit_int_expr_ex), not a boxed index */
     if (repr_of(c, argv[0]).kind == RK_BOXED && nt_kind(nt, argv[0]) != NK_SplatNode) {
@@ -1881,6 +1898,7 @@ else {
          rejects at C compile time. */
       emit_int_expr(c, argv[0], b);
     }
+    if (uck && uop) buf_printf(b, ", \"%s\"", uop);
     buf_puts(b, ")");
     { *out = 1; return 1; }
   }

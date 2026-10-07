@@ -2086,6 +2086,11 @@ void emit_oint_expr(Compiler *c, int node, TyKind t, Buf *b);
 /* set by emit_oint_expr for the one node it is about to emit: emit_expr
    consumes it (leaves the oint producer bare) before any child is emitted */
 extern int g_want_oint;
+/* an element read whose oint is unwrapped at once emits the checked plain
+   read (codegen_util.c emit_scalar_operand_op, emit_expr's sp_oint_arg) */
+extern int g_ck_node;
+extern const char *g_ck_op;
+extern int g_ck_done;
 /* the leaf slot read emit_expr is rendering is wanted as its own oint
    (codegen_expr.c) */
 extern int g_oint_read;
