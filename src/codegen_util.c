@@ -5186,7 +5186,8 @@ int node_is_oint(Compiler *c, int node) {
       TyKind at = a1a && a1n == 1 ? comp_ntype(c, a1a[0]) : TY_UNKNOWN;
       int num_l = rt == TY_INT || rt == TY_FLOAT || rt == TY_BIGINT || rt == TY_RATIONAL;
       int num_r = at == TY_INT || at == TY_FLOAT || at == TY_BIGINT || at == TY_RATIONAL;
-      int same = (num_l && num_r) || (rt == TY_STRING && at == TY_STRING) || (rt == TY_SYMBOL && at == TY_SYMBOL);
+      int same = (num_l && num_r) || (rt == TY_STRING && at == TY_STRING) || (rt == TY_SYMBOL && at == TY_SYMBOL) ||
+                 (rt == TY_TIME && at == TY_TIME);
       return same ? nullable_int_value(c, node) : 1;
     }
     /* `s[0]` / `s[:a]` / `s["a"]` / `s.dig(:a)` on a Struct or Data: the

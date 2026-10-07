@@ -1602,7 +1602,14 @@ static void emit_ivar_write_result(Compiler *c, int id, int value, TyKind slot,
 static void emit_local_orw_result(Compiler *c, int id, const char *ref, Buf *b) {
   Repr r = repr_of(c, id);
   if (repr_write_share(c, id) && !r.handle && r.as_ty == TY_STRING) emit_strbuf_slot_read(c, id, r, ref, b);
-  else buf_puts(b, ref);
+  else {
+    buf_puts(b, ref);
+    /* an oint slot answers its value where the expression is plain */
+    const char *nm = nt_str(c->nt, id, "name");
+    Scope *sc = nm ? comp_scope_of(c, id) : NULL;
+    LocalVar *lv = sc ? scope_local(sc, nm) : NULL;
+    if (lv && slot_is_oint(lv) && !node_is_oint(c, id)) buf_puts(b, ".v");
+  }
 }
 
 /* Local-variable reads and writes and instance-variable writes in value position (emit_expr_node's arms, in their order) */

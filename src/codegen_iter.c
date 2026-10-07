@@ -4147,8 +4147,8 @@ int emit_tap_then_expr(Compiler *c, int id, Buf *b) {
      keeps it: sp_poly_to_i read it as 0, so under promote `x = nil;
      x.then { |y| y.nil? }` answered false. */
   const char *unbox = NULL;
-  if (use_shadow && et == TY_POLY && tsaved0 == TY_INT) unbox = "sp_poly_to_i";
-  else if (use_shadow && et == TY_POLY && tsaved0 == TY_FLOAT) unbox = "sp_poly_to_f";
+  if (use_shadow && et == TY_POLY && tsaved0 == TY_INT) unbox = slot_is_oint(tlv0) ? "sp_unbox_oint" : "sp_poly_to_i";
+  else if (use_shadow && et == TY_POLY && tsaved0 == TY_FLOAT) unbox = slot_is_oint(tlv0) ? "sp_unbox_ofloat" : "sp_poly_to_f";
   if (unbox) use_shadow = 0;
   int din = g_indent;
   if (use_shadow) {
@@ -5034,8 +5034,9 @@ static int iter_tap_slice_string_arms(Compiler *c, int id, Buf *b, int indent, c
        while a block param is not, which is where the shape lives (#4730).
        The expression-form emitter (emit_tap_then_expr) does the same. */
     const char *tap_unbox = NULL;
-    if (use_shadow_t && et == TY_POLY && tsaved0 == TY_INT) tap_unbox = "sp_poly_to_i";
-    else if (use_shadow_t && et == TY_POLY && tsaved0 == TY_FLOAT) tap_unbox = "sp_poly_to_f";
+    /* a parameter slot holding its nil unboxes with it */
+    if (use_shadow_t && et == TY_POLY && tsaved0 == TY_INT) tap_unbox = slot_is_oint(tlv0) ? "sp_unbox_oint" : "sp_poly_to_i";
+    else if (use_shadow_t && et == TY_POLY && tsaved0 == TY_FLOAT) tap_unbox = slot_is_oint(tlv0) ? "sp_unbox_ofloat" : "sp_poly_to_f";
     if (tap_unbox) use_shadow_t = 0;
     /* tap runs the block once, not in a loop, so a `next` in it has no C loop
        to continue out of: give it one (#3978). */

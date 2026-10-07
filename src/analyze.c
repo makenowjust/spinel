@@ -27355,7 +27355,8 @@ int nullable_int_value(Compiler *c, int v) {
       if (cr >= 0 && cav && can == 1) {
         TyKind lt = infer_type(c, cr), at = infer_type(c, cav[0]);
         int num_l = lt == TY_INT || lt == TY_FLOAT, num_r = at == TY_INT || at == TY_FLOAT;
-        if ((num_l && num_r) || (lt == TY_STRING && at == TY_STRING) || (lt == TY_SYMBOL && at == TY_SYMBOL)) return 0;
+        if ((num_l && num_r) || (lt == TY_STRING && at == TY_STRING) || (lt == TY_SYMBOL && at == TY_SYMBOL) ||
+            (lt == TY_TIME && at == TY_TIME)) return 0;
       }
       return 1;
     }

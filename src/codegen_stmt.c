@@ -6302,6 +6302,12 @@ static int emit_when_lambda_inline(Compiler *c, int cond, int t, TyKind pt, int 
     else if (pt == TY_POLY && oint_kind(lt))
       buf_printf(b, "%s(%s)", slot_is_oint(plv) ? oint_unbox(lt) : lt == TY_INT ? "sp_poly_to_i" : "sp_poly_to_f", tt);
     else if (pt != TY_POLY && pt != TY_UNKNOWN && lt == TY_POLY) emit_boxed_text(c, pt, tt, b);
+    /* a parameter slot holding its nil: the subject's oint (`_oN` beside a
+       scrutinee that can be nil), else the value wrapped */
+    else if (plv && oint_kind(lt) && slot_is_oint(plv) && oint_kind(pt)) {
+      if (g_case_scrut_oint == t && pt == lt) buf_printf(b, "_o%d", t);
+      else buf_printf(b, "%s((%s)%s)", oint_of(lt), c_type_name(lt), tt);
+    }
     else buf_puts(b, tt);
     buf_puts(b, "; ");
   }
