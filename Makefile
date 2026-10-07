@@ -750,8 +750,8 @@ endif
 # float_to_int_out_of_range and float_to_int_boundary are the same case for
 # the Float -> Integer conversions: they pin the RangeError raise mode keeps,
 # which promote answers as a Bignum instead (#4688). The promote answers are
-# pinned by promote_float_to_int.rb. str_to_i_overflow,
-# string_to_i_overflow_raises and integer_argument_error's LLONG_MIN line pin
+# pinned by promote_float_to_int.rb. str_to_i_overflow and
+# string_to_i_overflow_raises pin
 # the RangeError String#to_i and Integer() answer past sp_int in raise mode;
 # promote reads a Bignum there, pinned by promote_str_to_i_bigint.rb.
 # poly_call_legacy_abi_gate / poly_call_fast_abi_gate pin the raise/wrap legacy
@@ -767,7 +767,7 @@ endif
 # int_min_overflow_raises pins the RangeError an operation on -2**63 raises
 # when its result leaves int64; promote answers a Bignum there, pinned by
 # promote_int_min_overflow.rb.
-RAISE_MODE_PINS := test/int_overflow_raises.rb test/int_overflow_op_assign.rb test/poly_int_overflow_raises.rb test/str_to_i_overflow.rb test/string_to_i_overflow_raises.rb test/integer_argument_error.rb test/bounded_counter_unchecked_add.rb test/float_to_int_out_of_range.rb test/bigrational_to_i_out_of_range.rb test/float_to_int_boundary.rb test/poly_call_legacy_abi_gate.rb test/poly_call_fast_abi_gate.rb test/poly_method_return_kinds.rb test/int_min_overflow_raises.rb
+RAISE_MODE_PINS := test/int_overflow_raises.rb test/int_overflow_op_assign.rb test/poly_int_overflow_raises.rb test/str_to_i_overflow.rb test/string_to_i_overflow_raises.rb test/bounded_counter_unchecked_add.rb test/float_to_int_out_of_range.rb test/bigrational_to_i_out_of_range.rb test/float_to_int_boundary.rb test/poly_call_legacy_abi_gate.rb test/poly_call_fast_abi_gate.rb test/poly_method_return_kinds.rb test/int_min_overflow_raises.rb
 ifeq ($(SPINEL_INT_OVERFLOW),promote)
 TESTS := $(filter-out $(RAISE_MODE_PINS),$(TESTS))
 # Drive the spinel front-end and the C compile in promote mode so the test
