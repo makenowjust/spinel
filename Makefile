@@ -2957,6 +2957,13 @@ GATE_CACHE ?= 1
 export GATE_CACHE
 RESULT_CACHE_HARNESS := 1
 RESULT_CACHE_FP = $(if $(filter 0,$(GATE_CACHE)),off,$(eval RESULT_CACHE_FP := $(shell RC_CC="$(CC)" tools/result_cache.sh fp $(SP_RT_LIB) $(SP_RT_MT_LIB) $(BUNDLED_NATIVE_OBJS) $(BUNDLED_NATIVE_MT_OBJS) $(PCH_PLAIN) $(PCH_NOPOLY) $(SPINEL_TIMEOUT)))$(RESULT_CACHE_FP))
+# A `<test>.rb.opt` file beside a test names the C optimization flag it is
+# compiled with (`-O0`), for a test whose C is a shape the optimizer does not
+# finish: test/cmethod_chain_reachability.rb's 24-deep static-inline chain,
+# which clang's inliner expands in full once the checked arithmetic lost the
+# sentinel test that kept each frame from inlining (the test checks the
+# reachability walk, not the C). Like the >= 2000-line rule it drops the
+# PCH, which was built at the default level.
 define RUN_ONE_TEST
 @mkdir -p build/test-results
 @# Raise the descriptor soft limit toward the hard one, best effort. A test
@@ -2986,6 +2993,7 @@ $(SPINEL) "$<" $(SP_OV_FLAG) -c --no-line-map -o "$$cfile" 2>/dev/null && \
   xlibs=$$(sed -n 's|^/\* SPINEL_LINK: \(.*\) \*/$$|\1|p' "$$cfile" | tr '\n' ' '); \
   bigopt=""; \
   if [ "$$(wc -l < "$$cfile")" -ge 2000 ]; then bigopt="-O0"; pchuse=""; fi; \
+  if [ -f "$<.opt" ]; then bigopt=$$(cat "$<.opt"); pchuse=""; fi; \
   mtdef=""; rtlib="$(SP_RT_LIB)"; natobjs="$(BUNDLED_NATIVE_OBJS)"; mtld=""; \
   if grep -q SPINEL_USES_THREADS "$$cfile"; then \
     mtdef="$(MT_DEF)"; rtlib="$(SP_RT_MT_LIB)"; natobjs="$(BUNDLED_NATIVE_MT_OBJS)"; mtld="-lpthread"; pchuse=""; \
