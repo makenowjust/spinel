@@ -27688,6 +27688,33 @@ int nullable_int_value(Compiler *c, int v) {
     for (int i = 0; i < n; i++) if (nullable_int_value(c, tails[i])) return 1;
     return 0;
   }
+  /* `super` answers the ancestor's method, and a yielding one answers its
+     block's value: a block written at the super (`super { nil }`,
+     `super(&proc { nil })`) with a nil-capable tail */
+  if (nt_kind(nt, v) == NK_SuperNode || nt_kind(nt, v) == NK_ForwardingSuperNode) {
+    Scope *ss = comp_scope_of(c, v);
+    int tmi = ss ? a_super_target(c, ss) : -1;
+    if (tmi >= 0 && c->scopes[tmi].ret_nullable_int) return 1;
+    int blk = nt_ref(nt, v, "block"), bb = -1;
+    if (blk >= 0 && nt_kind(nt, blk) == NK_BlockNode) bb = nt_ref(nt, blk, "body");
+    else if (blk >= 0 && nt_kind(nt, blk) == NK_BlockArgumentNode) {
+      int e = nt_ref(nt, blk, "expression");
+      if (e >= 0 && nt_kind(nt, e) == NK_LambdaNode) bb = nt_ref(nt, e, "body");
+      else if (e >= 0 && nt_kind(nt, e) == NK_CallNode && nt_ref(nt, e, "receiver") < 0 &&
+               nt_str(nt, e, "name") && (sp_streq(nt_str(nt, e, "name"), "proc") || sp_streq(nt_str(nt, e, "name"), "lambda"))) {
+        int pb = nt_ref(nt, e, "block");
+        if (pb >= 0 && nt_kind(nt, pb) == NK_BlockNode) bb = nt_ref(nt, pb, "body");
+      }
+    }
+    if (bb >= 0 && tmi >= 0 && c->scopes[tmi].yields) {
+      int n = 0; const int *st = nt_kind(nt, bb) == NK_StatementsNode ? nt_arr(nt, bb, "body", &n) : &bb;
+      if (nt_kind(nt, bb) != NK_StatementsNode) n = 1;
+      if (n <= 0) return 1;
+      int tl = st[n - 1];
+      if (nt_kind(nt, tl) == NK_NilNode || nullable_int_value(c, tl)) return 1;
+    }
+    return 0;
+  }
   if (nt_kind(nt, v) == NK_CallNode) {
     if (nn_index_inbounds(c, v)) return 0;
     /* a call that answers nothing (`$stdout.puts(x)`) is nil */

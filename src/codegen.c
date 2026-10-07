@@ -11169,11 +11169,18 @@ int emit_super_inline(Compiler *c, int id, Buf *b, int indent, int as_expr) {
     if (fwd_yield_proc || explicit_block_arg) g_yield_slot_ty = rt;
     int rtag = ++g_tmp;
     char rvbuf[32]; snprintf(rvbuf, sizeof rvbuf, "_t%d", rtag);
-    emit_indent(b, din); emit_ctype(c, rt, b);
-    buf_printf(b, " _t%d = %s;\n", rtag, default_value_from_compiler(c, rt));
+    /* the super's own form: its oint where it answers one (a block that
+       can answer nil) */
+    int ro = oint_kind(rt) && node_is_oint(c, id);
+    /* the proc's answer stays boxed for the tail to read with its nil */
+    if (ro && (fwd_yield_proc || explicit_block_arg)) g_yield_slot_ty = TY_POLY;
+    emit_indent(b, din); emit_res_ctype(c, rt, ro, b);
+    buf_printf(b, " _t%d = %s;\n", rtag, ro ? oint_nil(rt) : default_value_from_compiler(c, rt));
     const char *sv_rv = g_result_var; g_result_var = rvbuf;
     int sp = g_result_poly; g_result_poly = (rt == TY_POLY);
     TyKind srt = g_result_ty; g_result_ty = rt;
+    int sv_ro = g_result_oint; g_result_oint = ro;
+    int sv_rro = g_ret_oint; g_ret_oint = ro;
     if (m_has_ret) {
       g_method_pr_label = inl_lbl; g_method_pr_var = rvbuf; g_ret_type = rt;
       g_method_pr_exc_depth = g_exc_frame_depth;
@@ -11188,6 +11195,7 @@ int emit_super_inline(Compiler *c, int id, Buf *b, int indent, int as_expr) {
       emit_indent(b, din); buf_printf(b, "%s: ;\n", inl_lbl);
     }
     g_result_var = sv_rv; g_result_poly = sp; g_result_ty = srt;
+    g_result_oint = sv_ro; g_ret_oint = sv_rro;
     emit_indent(b, din); buf_printf(b, "_t%d;\n", rtag);
   }
   else {

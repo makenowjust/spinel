@@ -3026,7 +3026,8 @@ void emit_block_invoke(Compiler *c, int args_node, Buf *b, int indent, int as_ex
       nx_tmp = ++g_tmp;
       snprintf(nxbuf, sizeof nxbuf, "_t%d", nx_tmp);
       g_ie_next_var = nxbuf;
-      g_ie_res_poly = nx_bt != TY_STRBUF && (nx_bt == TY_POLY || (want_poly && ty_is_object(nx_bt)));
+      /* (a number carrier read where the yield is boxed is boxed too) */
+      g_ie_res_poly = nx_bt != TY_STRBUF && (nx_bt == TY_POLY || (want_poly && (ty_is_object(nx_bt) || oint_kind(nx_bt))));
       /* a `next nil` into an Integer or Float slot is the sentinel */
       g_ie_next_ty = (nx_bt == TY_INT || nx_bt == TY_FLOAT) ? nx_bt : TY_UNKNOWN;
       g_ie_next_oint = ywo && oint_kind(nx_bt);
