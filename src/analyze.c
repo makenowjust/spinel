@@ -28134,6 +28134,46 @@ static void wnh_note(int body) {
   for (int i = 0; i < wnh_n; i++) if (wnh_bodies[i] == body) return;
   if (wnh_n < 64) wnh_bodies[wnh_n++] = body;
 }
+/* Does a read of local `name` in scope sc hand the hash on whole -- a
+   statement list's last value (a method's or block's answer), a `return`,
+   another variable's write, an argument of a call other than an output one?
+   Its type then reaches slots the late widening cannot retype. */
+static int wnh_local_escapes(Compiler *c, Scope *sc, const char *name) {
+  const NodeTable *nt = c->nt;
+  NT_FOREACH_KIND(nt, NK_StatementsNode, st) {
+    int n = 0; const int *b = nt_arr(nt, st, "body", &n);
+    if (n <= 0 || nt_kind(nt, b[n - 1]) != NK_LocalVariableReadNode) continue;
+    const char *rn = nt_str(nt, b[n - 1], "name");
+    if (rn && sp_streq(rn, name) && comp_scope_of(c, b[n - 1]) == sc) return 1;
+  }
+  static const NodeKind wk[] = { NK_ReturnNode, NK_LocalVariableWriteNode, NK_InstanceVariableWriteNode,
+                                 NK_GlobalVariableWriteNode, NK_ClassVariableWriteNode, NK_CallNode };
+  for (size_t q = 0; q < sizeof wk / sizeof wk[0]; q++) {
+    NT_FOREACH_KIND(nt, wk[q], w) {
+      const int *av = NULL; int an = 0;
+      if (wk[q] == NK_ReturnNode || wk[q] == NK_CallNode) {
+        if (wk[q] == NK_CallNode) {
+          const char *cn = nt_str(nt, w, "name");
+          if (cn && (sp_streq(cn, "p") || sp_streq(cn, "puts") || sp_streq(cn, "print") || sp_streq(cn, "pp"))) continue;
+        }
+        int a = nt_ref(nt, w, "arguments");
+        av = a >= 0 ? nt_arr(nt, a, "arguments", &an) : NULL;
+      }
+      else { int v = nt_ref(nt, w, "value"); an = 0;
+        if (v >= 0 && nt_kind(nt, v) == NK_LocalVariableReadNode) {
+          const char *rn = nt_str(nt, v, "name");
+          if (rn && sp_streq(rn, name) && comp_scope_of(c, v) == sc) return 1;
+        }
+      }
+      for (int k = 0; k < an; k++)
+        if (nt_kind(nt, av[k]) == NK_LocalVariableReadNode) {
+          const char *rn = nt_str(nt, av[k], "name");
+          if (rn && sp_streq(rn, name) && comp_scope_of(c, av[k]) == sc) return 1;
+        }
+    }
+  }
+  return 0;
+}
 static void widen_nullable_keyed_hash_literals(Compiler *c) {
   const NodeTable *nt = c->nt;
   NT_FOREACH_KIND(nt, NK_HashNode, id) {
@@ -28162,6 +28202,7 @@ static void widen_nullable_keyed_hash_literals(Compiler *c) {
       Scope *sc = comp_scope_of(c, w);
       LocalVar *lv = wn && sc ? scope_local(sc, wn) : NULL;
       if (!lv || lv->type != ht) continue;
+      if (wnh_local_escapes(c, sc, wn)) { c->ntype[id] = ht; break; }   /* left typed: the store refuses */
       lv->type = want;
       c->ntype[w] = want;
       NT_FOREACH_KIND(nt, NK_LocalVariableReadNode, r) {
@@ -28195,6 +28236,7 @@ static void widen_nullable_keyed_hash_literals(Compiler *c) {
     Scope *sc = comp_scope_of(c, r);
     LocalVar *lv = ln && sc ? scope_local(sc, ln) : NULL;
     if (!lv || lv->type != ht || lv->is_param || lv->rbs_seeded) continue;
+    if (wnh_local_escapes(c, sc, ln)) continue;
     /* every write must be one the widening can rebuild */
     int ok = 1;
     NT_FOREACH_KIND(nt, NK_LocalVariableWriteNode, w) {
