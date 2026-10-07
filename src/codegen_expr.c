@@ -2162,7 +2162,10 @@ static int emit_ivar_cvar_gvar_expr(Compiler *c, int id, Buf *b, const NodeTable
     }
     if (g_ie_nil_ivars) {
       TyKind it = repr_of(c, id).as_ty;
-      emit_slot_nil_read(c, it, b);
+      /* the read's form: its oint where the dispatcher takes one */
+      int want_ni = g_oint_read; g_oint_read = 0;
+      if ((want_ni || node_is_oint(c, id)) && oint_kind(it)) buf_puts(b, oint_nil(it));
+      else emit_slot_nil_read(c, it, b);
       return 1;
     }
     /* inside a shared-mutable shim over THIS slot: both the reads and the
@@ -2213,7 +2216,9 @@ static int emit_ivar_cvar_gvar_expr(Compiler *c, int id, Buf *b, const NodeTable
     else { snprintf(pfx, sizeof pfx, "%s%s", g_self, g_self_deref); buf_printf(&ref, "%siv_%s", pfx, iv_c(nm + 1)); }
     if (is_nil) {
       TyKind it = repr_of(c, id).as_ty;
-      if (want_o && oint_kind(it)) buf_puts(b, oint_nil(it));
+      /* the read's form: its oint where the dispatcher takes one (the
+         node answers oint, or the leaf was asked for it) */
+      if ((want_o || node_is_oint(c, id)) && oint_kind(it)) buf_puts(b, oint_nil(it));
       else emit_slot_nil_read(c, it, b);
     }
     else {

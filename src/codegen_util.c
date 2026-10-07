@@ -5157,8 +5157,19 @@ int node_is_oint(Compiler *c, int node) {
     if (is_call_or_yield(nm) && r >= 0 && rt == TY_PROC) return 1;
     /* `o.instance_eval { ... }` spliced over an object answers its body's
        last expression in that expression's form */
+    TyKind iert = rt;
+    if (r < 0) { Scope *ies = comp_scope_of(c, node); if (ies && ies->class_id >= 0 && !ies->is_cmethod) iert = ty_object(ies->class_id); }
+    /* over a boxed receiver the splice runs per class, and a receiver with no
+       such ivar (nil, a builtin, Object.new) reads it nil: an Integer / Float
+       tail can be nil */
     if ((sp_streq(nm, "instance_eval") || sp_streq(nm, "instance_exec")) && blk >= 0 && r >= 0 &&
-        ty_is_object(rt) && comp_method_in_chain(c, ty_object_class(rt), nm, NULL) < 0 &&
+        rt == TY_POLY && nt_kind(nt, blk) == NK_BlockNode) {
+      int bb = nt_ref(nt, blk, "body");
+      int bn = 0; const int *bs = bb >= 0 ? nt_arr(nt, bb, "body", &bn) : NULL;
+      return bn > 0 && oint_kind(comp_ntype(c, bs[bn - 1]));
+    }
+    if ((sp_streq(nm, "instance_eval") || sp_streq(nm, "instance_exec")) && blk >= 0 &&
+        ty_is_object(iert) && comp_method_in_chain(c, ty_object_class(iert), nm, NULL) < 0 &&
         nt_kind(nt, blk) == NK_BlockNode) {
       int bb = nt_ref(nt, blk, "body");
       int bn = 0; const int *bs = bb >= 0 ? nt_arr(nt, bb, "body", &bn) : NULL;

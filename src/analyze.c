@@ -27336,6 +27336,8 @@ int nullable_int_value(Compiler *c, int v) {
   if (nt_kind(nt, v) == NK_InstanceVariableReadNode) {
     Scope *s = comp_scope_of(c, v);
     int cid = s ? s->class_id : -1;
+    /* inside an instance_eval / exec splice the ivar is the receiver's */
+    if (ie_class_of(c, v) >= 0) cid = ie_class_of(c, v);
     if (cid < 0) cid = comp_class_index(c, "Toplevel");
     if (cid < 0 || cid >= c->nclasses) return 0;
     ClassInfo *ci = &c->classes[cid];

@@ -23043,9 +23043,13 @@ int emit_ie_poly(Compiler *c, int id, Buf *b) {
   TyKind ret = repr_of(c, id).as_ty;
   int keep = is_scalar_ret(ret) && ret != TY_VOID && ret != TY_NIL && ret != TY_UNKNOWN;
   int tv = hoist_boxed_rooted(c, recv), tr = ++g_tmp;
+  /* an Integer / Float result is held as its oint: an arm's value can be
+     nil (its splice answers its form), and the call answers by its own */
+  int tro = keep && oint_kind(ret);
   if (keep) {
-    emit_indent(g_pre, g_indent); emit_ctype(c, ret, g_pre);
-    buf_printf(g_pre, " _t%d = %s;\n", tr, ret == TY_POLY ? "sp_box_nil()" : default_value_from_compiler(c, ret));
+    emit_indent(g_pre, g_indent);
+    if (tro) buf_puts(g_pre, oint_ctype(ret)); else emit_ctype(c, ret, g_pre);
+    buf_printf(g_pre, " _t%d = %s;\n", tr, tro ? oint_nil(ret) : ret == TY_POLY ? "sp_box_nil()" : default_value_from_compiler(c, ret));
   }
   int bn = 0; const int *bb = body >= 0 ? nt_arr(nt, body, "body", &bn) : NULL;
   int arms = 0;
@@ -23067,6 +23071,7 @@ int emit_ie_poly(Compiler *c, int id, Buf *b) {
     int *snap = ie_body_retype(c, body, k);
     Buf vb; memset(&vb, 0, sizeof vb);
     emit_call(c, id, &vb);
+    int arm_o = node_is_oint(c, id);   /* the form this arm's splice answered */
     TyKind vty = bn > 0 ? repr_of(c, bb[bn - 1]).as_ty : TY_NIL;
     TyKind bnt = ie_splice_value_ty(c, body);
     if (bnt != TY_UNKNOWN) vty = (vty == TY_NIL || vty == TY_UNKNOWN) ? bnt : ty_unify(vty, bnt);
@@ -23084,7 +23089,14 @@ int emit_ie_poly(Compiler *c, int id, Buf *b) {
       const char *vt = vb.p ? vb.p : "0";
       emit_indent(g_pre, g_indent + 1);
       buf_printf(g_pre, "_t%d = ", tr);
-      if (vty == ret) buf_puts(g_pre, vt);
+      if (tro && vty == ret) { if (arm_o) buf_puts(g_pre, vt); else buf_printf(g_pre, "%s(%s)", oint_of(ret), vt); }
+      else if (tro) {
+        Buf xb; memset(&xb, 0, sizeof xb);
+        emit_boxed_text(c, vty, vt, &xb);
+        buf_printf(g_pre, "%s(%s)", oint_unbox(ret), xb.p ? xb.p : "sp_box_nil()");
+        free(xb.p);
+      }
+      else if (vty == ret) buf_puts(g_pre, vt);
       else if (ret == TY_POLY_ARRAY && array_to_poly_fn(vty)) buf_printf(g_pre, "%s(%s)", array_to_poly_fn(vty), vt);
       else if (ret == TY_POLY) emit_boxed_text(c, vty, vt, g_pre);
       else if (vty == TY_POLY) emit_unbox_text(c, ret, vt, g_pre);
@@ -23118,6 +23130,7 @@ int emit_ie_poly(Compiler *c, int id, Buf *b) {
     if (fsnap) infer_subtree(c, body);
     Buf vb; memset(&vb, 0, sizeof vb);
     emit_call(c, id, &vb);
+    int fb_o = node_is_oint(c, id);
     TyKind vty = bn > 0 ? repr_of(c, bb[bn - 1]).as_ty : TY_NIL;
     ie_body_restore(c, fsnap);
     view_unbind(g_n_argov - 1);
@@ -23130,20 +23143,23 @@ int emit_ie_poly(Compiler *c, int id, Buf *b) {
     buf_puts(g_pre, ab.p ? ab.p : "");
     if (ret == TY_POLY && vty != TY_POLY) vty = TY_POLY;
     emit_indent(g_pre, g_indent + 1);
-    if (keep && vty == ret && vb.p) buf_printf(g_pre, "_t%d = %s;\n", tr, vb.p);
+    if (tro && vty == ret && vb.p) buf_printf(g_pre, fb_o ? "_t%d = %s%s;\n" : "_t%d = %s(%s);\n", tr, fb_o ? "" : oint_of(ret), vb.p);
+    else if (keep && vty == ret && vb.p) buf_printf(g_pre, "_t%d = %s;\n", tr, vb.p);
     else if (keep && ret == TY_POLY_ARRAY && array_to_poly_fn(vty) && vb.p)
       buf_printf(g_pre, "_t%d = %s(%s);\n", tr, array_to_poly_fn(vty), vb.p);
     else buf_printf(g_pre, "(void)(%s);\n", vb.p ? vb.p : "0");
     emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n");
     free(ab.p); free(vb.p);
     nd_stamp(id, ND_SWITCH);
-    buf_printf(b, "_t%d", keep ? tr : tv);
+    if (tro && !node_is_oint(c, id)) buf_printf(b, "%s(_t%d)", oint_arg(ret), tr);
+    else buf_printf(b, "_t%d", keep ? tr : tv);
     return 1;
   }
   emit_indent(g_pre, g_indent);
   buf_printf(g_pre, "%ssp_raise_nomethod(sp_nomethod_msg(\"%s\", _t%d));\n", arms ? "else " : "", need, tv);
   nd_stamp(id, ND_SWITCH);
-  buf_printf(b, "_t%d", keep ? tr : tv);
+  if (tro && !node_is_oint(c, id)) buf_printf(b, "%s(_t%d)", oint_arg(ret), tr);
+  else buf_printf(b, "_t%d", keep ? tr : tv);
   return 1;
 }
 
