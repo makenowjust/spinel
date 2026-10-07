@@ -5388,6 +5388,12 @@ int node_is_oint(Compiler *c, int node) {
     }
     const char *nm = nt_str(nt, node, "name");
     if (!nm) return 0;
+    /* `o.x = v` as a value answers v, whatever the writer returns */
+    if (call_is_setter_assign(nt, node)) {
+      int sa = nt_ref(nt, node, "arguments"), san = 0;
+      const int *sav = sa >= 0 ? nt_arr(nt, sa, "arguments", &san) : NULL;
+      if (sav && san >= 1) return nt_kind(nt, sav[san - 1]) == NK_NilNode || nullable_int_value(c, sav[san - 1]);
+    }
     int blk = nt_ref(nt, node, "block");
     int r = nt_ref(nt, node, "receiver");
     TyKind rt = r >= 0 ? comp_ntype(c, r) : TY_UNKNOWN;
