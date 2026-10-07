@@ -28536,9 +28536,10 @@ static void mark_nullable_int_locals(Compiler *c) {
        plain int at the caller (#3505). */
     for (int mi = 1; mi < c->nscopes; mi++) {
       Scope *s = &c->scopes[mi];
-      /* (a boxed return too: a call site that narrows it to a number --
-         a yielding method answering its block -- asks this mark) */
-      if (s->ret_nullable_int || (s->ret != TY_INT && s->ret != TY_FLOAT && s->ret != TY_POLY && s->ret != TY_UNKNOWN)) continue;
+      /* (a yielding method's boxed or untyped return too: a call site
+         narrows it to a number, its block's, and asks this mark) */
+      if (s->ret_nullable_int || (s->ret != TY_INT && s->ret != TY_FLOAT &&
+          !((s->ret == TY_POLY || s->ret == TY_UNKNOWN) && s->yields))) continue;
       int tail = scope_body_last(c, mi);
       /* a body with rescue / else / ensure clauses: any arm's value */
       if (tail < 0 && s->body >= 0 && nt_kind(nt, s->body) == NK_BeginNode) tail = s->body;
@@ -28552,7 +28553,8 @@ static void mark_nullable_int_locals(Compiler *c) {
       int rmi = rs ? (int)(rs - c->scopes) : -1;
       if (rmi < 1 || rmi >= c->nscopes) continue;
       Scope *s = &c->scopes[rmi];
-      if (s->ret_nullable_int || (s->ret != TY_INT && s->ret != TY_FLOAT && s->ret != TY_POLY && s->ret != TY_UNKNOWN)) continue;
+      if (s->ret_nullable_int || (s->ret != TY_INT && s->ret != TY_FLOAT &&
+          !((s->ret == TY_POLY || s->ret == TY_UNKNOWN) && s->yields))) continue;
       if (nullable_int_value(c, id)) { s->ret_nullable_int = 1; changed = 1; }
     }
     for (int id = 0; id < nt->count; id++) {

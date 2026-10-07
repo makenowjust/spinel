@@ -6431,13 +6431,12 @@ static int emit_poly_builtin_default_at(Compiler *c, int id, int recv, const cha
   volatile int ok = 1;
   EmitUnitState *sv_state = emit_state_snapshot();
   g_pre = pb; g_unsup_probe = 1;
-  /* the re-entry reads the node under the pin above: an infer_type it
-     asks must not record its unpinned (poly) answer over the pin, or the
-     emitter answers boxed and the arm boxes it again */
-  an_pure_read_begin();
   if (setjmp(g_unsup_recover) == 0) emit_expr(c, id, nb);
   else ok = 0;
-  an_pure_read_end();
+  /* an infer_type the re-entry asked can record its unpinned (poly) answer
+     over the pin above, and the emitter then answered boxed: not boxed
+     again below */
+  int reboxed = id < c->node_cap && c->ntype[id] == TY_POLY && bt != TY_POLY;
   emit_state_release(sv_state, !ok);
   memcpy(g_unsup_recover, sv_jb, sizeof(jmp_buf));
   g_conv_hold = sv_hold; g_open_defaults = sv_open_defaults;
@@ -6449,7 +6448,7 @@ static int emit_poly_builtin_default_at(Compiler *c, int id, int recv, const cha
   if (ok && nb->p) {
     /* a raise token is no value to box: the test below reads it bare */
     int is_raise = strncmp(nb->p, "sp_raise_", 9) == 0;
-    if (ret == TY_POLY && bt != TY_POLY && !is_raise) emit_boxed_text(c, bt, nb->p, &ib);
+    if (ret == TY_POLY && bt != TY_POLY && !is_raise && !reboxed) emit_boxed_text(c, bt, nb->p, &ib);
     else buf_puts(&ib, nb->p);
   }
   free(nb->p); free(nb);
