@@ -254,9 +254,9 @@ sp_int sp_str_to_i_strict(const char *s) {SP_GC_ROOT_STR(s);
    prefix recognition (0x / 0b / 0o when the base matches). Raises
    ArgumentError on invalid input or unsupported base. Issue #887. */
 /* The shared body. `lenient` is Kernel#Integer's `exception: false`: every
-   rejection answers nil (SP_INT_NIL) instead of raising (#3718). */
-static sp_int sp_str_to_i_base_impl(const char *s, sp_int base, int lenient) {SP_GC_ROOT_STR(s);
-#define SP_INT_REJECT(cls, msg) do { if (lenient) return SP_INT_NIL; sp_raise_cls(cls, msg); } while (0)
+   rejection answers nil instead of raising (#3718); `*none` says so. */
+static sp_int sp_str_to_i_base_impl(const char *s, sp_int base, int lenient, int *none) {SP_GC_ROOT_STR(s);
+#define SP_INT_REJECT(cls, msg) do { if (lenient) { *none = 1; return 0; } sp_raise_cls(cls, msg); } while (0)
   if (!s) SP_INT_REJECT("ArgumentError", "invalid value for Integer(): nil");
   /* an embedded NUL makes the Ruby string longer than its C prefix: CRuby
      rejects it, a C-string scan would silently parse the prefix. */
@@ -276,11 +276,14 @@ static sp_int sp_str_to_i_base_impl(const char *s, sp_int base, int lenient) {SP
 #undef SP_INT_REJECT
 }
 sp_int sp_str_to_i_strict_base(const char *s, sp_int base) {
-  return sp_str_to_i_base_impl(s, base, 0);
+  int none = 0;
+  return sp_str_to_i_base_impl(s, base, 0, &none);
 }
 /* Kernel#Integer(s[, base], exception: false) */
-sp_int sp_str_to_i_lenient_base(const char *s, sp_int base) {
-  return sp_str_to_i_base_impl(s, base, 1);
+sp_oint sp_str_to_i_lenient_base(const char *s, sp_int base) {
+  int none = 0;
+  sp_int n = sp_str_to_i_base_impl(s, base, 1, &none);
+  return none ? sp_oint_nil() : sp_oint_of(n);
 }
 
 /* The decimal text Float() accepts once its underscores are stripped: an
@@ -306,8 +309,8 @@ static int sp_float_text_shape_ok(const char *p) {
    on its own would silently return 0.0 for "abc" or empty input;
    match MRI semantics by validating at-least-one-digit + no-trailing-
    junk. Whitespace flanking is fine. Issue #888. */
-static sp_float sp_str_to_f_impl(const char *s, int lenient) {SP_GC_ROOT_STR(s);
-  if (!s) { if (lenient) return sp_float_nil(); sp_raise_cls("ArgumentError", "invalid value for Float(): nil"); }
+static sp_float sp_str_to_f_impl(const char *s, int lenient, int *none) {SP_GC_ROOT_STR(s);
+  if (!s) { if (lenient) { *none = 1; return 0.0; } sp_raise_cls("ArgumentError", "invalid value for Float(): nil"); }
   /* embedded NUL: the Ruby string extends past its C prefix -- reject rather
      than silently parsing the prefix ("1\\0" is not a float in CRuby). */
   size_t blen = sp_str_byte_len(s);
@@ -406,12 +409,12 @@ static sp_float sp_str_to_f_impl(const char *s, int lenient) {SP_GC_ROOT_STR(s);
   }
 bad0:
   /* Kernel#Float(s, exception: false) answers nil for everything this rejects */
-  if (lenient) return sp_float_nil();
+  if (lenient) { *none = 1; return 0.0; }
   sp_raise_cls("ArgumentError", sp_sprintf("invalid value for Float(): \"%s\"", s));
   return 0.0;  /* unreachable */
 }
-sp_float sp_str_to_f_strict(const char *s)  { return sp_str_to_f_impl(s, 0); }
-sp_float sp_str_to_f_lenient(const char *s) { return sp_str_to_f_impl(s, 1); }
+sp_float sp_str_to_f_strict(const char *s)  { int none = 0; return sp_str_to_f_impl(s, 0, &none); }
+sp_ofloat sp_str_to_f_lenient(const char *s) { int none = 0; sp_float f = sp_str_to_f_impl(s, 1, &none); return none ? sp_ofloat_nil() : sp_ofloat_of(f); }
 
 /* Kernel#sprintf's float directives (%f/%e/%g/%a with width/flags) are emitted
    by faithfully delegating to libc snprintf, which is locale-sensitive for the

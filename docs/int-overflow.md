@@ -26,6 +26,14 @@ The mode applies to integer `+`, `-`, `*`, unary `-`, and (under `promote`) `**`
 and shifts. It does not change division: `1 / 0` is always a
 `ZeroDivisionError` regardless of mode.
 
+A shift that lands exactly on the sign bit follows the mode too: `1 << 63`
+(a literal count or a run-time one) is `-2**63` under `wrap`, a `RangeError`
+under `raise`, and the Bignum `2**63` under `promote`. The value `-2**63`
+itself is an ordinary `Integer` in every mode -- reached by `-9223372036854775807 - 1`,
+by `~0x7fffffffffffffff`, by a wrapping `+ - *` -- and never reads as `nil`:
+the nil of a nullable Integer slot is a flag beside the word, not a bit
+pattern of it (see [limitations.md](limitations.md#a-nil-read-out-of-an-integer-container)).
+
 ### `raise` (default)
 
 The default refuses to be silently wrong. A computation that exceeds 64 bits is
@@ -82,9 +90,9 @@ host the compiler runs on:
   width, `String#unpack` of a 64-bit directive (`Q`, `q`) boxes a Bignum when
   the value does not fit, and a Bignum read out of a poly slot into an Integer
   is a `RangeError` when it does not fit.
-- Known gaps on 32-bit: FFI marshalling of 64-bit C types is not done, and
-  `INT32_MIN` is the sentinel an `Integer | nil` slot uses for `nil`, as
-  `INT64_MIN` is on 64-bit.
+- `INT32_MIN` is an ordinary Integer there, as `INT64_MIN` is on 64-bit: the
+  nil of an `Integer | nil` slot is a flag beside the word on both widths.
+- Known gap on 32-bit: FFI marshalling of 64-bit C types is not done.
 
 For the developer: `make test-corpus CC='cc -m32'` runs the test corpus as
 32-bit programs. Use a separate work tree, or `make clean` first: the runtime
