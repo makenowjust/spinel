@@ -25332,8 +25332,9 @@ static int nn_call_unboxes_nil(Compiler *c, int v) {
   if (is_proc_invoke(nm) && infer_type(c, rcv) == TY_PROC) return 1;
   /* Reflection reads the same sentinel-backed slot as an ivar reader.
      A boxed receiver can also lack the slot altogether. Keep that nil
-     through boxing, scalar operations and assignments to other locals. */
-  if (sp_streq(nm, "instance_variable_get")) {
+     through boxing, scalar operations and assignments to other locals.
+     remove_instance_variable answers the field it removes: the same read. */
+  if (sp_streq(nm, "instance_variable_get") || sp_streq(nm, "remove_instance_variable")) {
     int ca = nt_ref(nt, v, "arguments"), an = 0;
     const int *av = ca >= 0 ? nt_arr(nt, ca, "arguments", &an) : NULL;
     if (an != 1) return 0;

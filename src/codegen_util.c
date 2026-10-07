@@ -5538,8 +5538,10 @@ int node_is_oint(Compiler *c, int node) {
       }
     }
     /* `o.instance_variable_get(:@x)` on a typed object: the field's read,
-       with its nil where the field carries a nil bit (as an attr reader) */
-    if (sp_streq(nm, "instance_variable_get") && an2 == 1 && r >= 0 && ty_is_object(rt)) {
+       with its nil where the field carries a nil bit (as an attr reader);
+       `o.remove_instance_variable(:@x)` answers the same read */
+    if ((sp_streq(nm, "instance_variable_get") || sp_streq(nm, "remove_instance_variable")) &&
+        an2 == 1 && r >= 0 && ty_is_object(rt)) {
       int a1 = nt_ref(nt, node, "arguments"), a1n = 0;
       const int *a1a = a1 >= 0 ? nt_arr(nt, a1, "arguments", &a1n) : NULL;
       if (a1a && a1n == 1) {
