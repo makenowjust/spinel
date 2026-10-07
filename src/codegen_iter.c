@@ -4153,6 +4153,9 @@ int emit_tap_then_expr(Compiler *c, int id, Buf *b) {
   else if (p0) {
     emit_indent(g_pre, g_indent);
     if (unbox) buf_printf(g_pre, "lv_%s = %s(_t%d);\n", p0, unbox, tr);
+    /* a block parameter holding its nil beside the value takes the plain
+       receiver temp wrapped (the receiver's own nil was guarded away) */
+    else if (oint_kind(et) && slot_is_oint(tlv0)) buf_printf(g_pre, "lv_%s = %s(_t%d);\n", p0, oint_of(et), tr);
     else buf_printf(g_pre, "lv_%s = _t%d;\n", p0, tr);
     /* The block's parameter may be CELLED -- something inside the body needs it
        as a proc's capture, which here means a dispatch arm that hands the inner

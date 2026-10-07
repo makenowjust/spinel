@@ -1437,9 +1437,9 @@ void emit_expr(Compiler *c, int id, Buf *b) {
   int want_o = g_want_oint; g_want_oint = 0;
   TyKind ot = comp_ntype(c, id);
   /* a node bound to a hoisted temp (view_bind) is that plain temp */
-  int bound = 0;
-  for (int i = g_n_argov - 1; i >= 0 && !bound; i--) if (g_argov_node[i] == id) bound = 1;
-  int is_o = !bound && oint_kind(ot) && node_is_oint(c, id);
+  int bound = 0, bound_o = 0;
+  for (int i = g_n_argov - 1; i >= 0 && !bound; i--) if (g_argov_node[i] == id) { bound = 1; bound_o = g_argov_oint[i]; }
+  int is_o = oint_kind(ot) && (bound ? bound_o : node_is_oint(c, id));
   int leaf_o = !bound && want_o && !is_o && node_has_oint_form(c, id);
   NodeKind ok = nt_kind(c->nt, id);
   g_oint_read = (is_o || leaf_o) &&
@@ -1812,7 +1812,11 @@ static int emit_local_ivar_write_expr(Compiler *c, int id, Buf *b, const NodeTab
     else if (lv && emit_poly_rhs_coerced(c, lv->type, v, b)) { }
     else if (lv) emit_coerce(c, v, lv->type, CO_HOLD, "a local variable write", b);
     else emit_expr(c, v, b);
-    buf_puts(b, "; "); emit_local_ref(c, id, nm, b); buf_puts(b, "; })");
+    buf_puts(b, "; "); emit_local_ref(c, id, nm, b);
+    /* the value: the slot's oint where the write answers one, its value
+       where the write is plain (`(w = 7).to_s`) */
+    if (lv && slot_is_oint(lv) && !node_is_oint(c, id)) buf_puts(b, ".v");
+    buf_puts(b, "; })");
     return 1;
   }
   if (sp_streq(ty, "LocalVariableOperatorWriteNode")) {
@@ -1822,9 +1826,11 @@ static int emit_local_ivar_write_expr(Compiler *c, int id, Buf *b, const NodeTab
        inside a block that captured c by cell (e.g. `mutex.synchronize { c += 1 }`
        in a thread). */
     const char *nm = nt_str(nt, id, "name");
+    LocalVar *olv = nm ? scope_local(comp_scope_of(c, id), nm) : NULL;
     buf_puts(b, "({ ");
     emit_op_assign(c, id, b, 0);
     emit_local_ref(c, id, nm, b);
+    if (olv && slot_is_oint(olv) && !node_is_oint(c, id)) buf_puts(b, ".v");   /* as the plain write's value */
     buf_puts(b, "; })");
     return 1;
   }
@@ -3815,6 +3821,9 @@ static int emit_and_or_begin_expr(Compiler *c, int id, Buf *b, const NodeTable *
                 the result is one, its value where it is plain */ \
              else if (oint_kind(lt) && ro && !lo) buf_printf((TB), "%s(_t%d)", oint_of(lt), t); \
              else if (oint_kind(lt) && !ro && lo) buf_printf((TB), "_t%d.v", t); \
+             /* an untyped or falsy-constant left was declared at the result's
+                plain type: wrapped where the result is an oint */ \
+             else if ((lt == TY_UNKNOWN || lt_falsy_const) && oint_kind(res) && ro) buf_printf((TB), "%s(_t%d)", oint_of(res), t); \
              else buf_printf((TB), "_t%d", t); } \
     } while (0)
     EMIT_ARM(0, &larm);

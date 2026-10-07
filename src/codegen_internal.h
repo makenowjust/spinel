@@ -196,6 +196,8 @@ extern int  *g_argov_node;
    the C did not build (#7604). view_bind checks the length now. */
 #define ARGOV_TEXT_LEN 160
 extern char (*g_argov_text)[ARGOV_TEXT_LEN];
+extern unsigned char *g_argov_oint;   /* the bound text is an oint (view_bind_o) */
+int view_bind_o(int node, const char *fmt, ...) __attribute__((format(printf, 2, 3)));
 extern int  g_n_argov;
 /* Room for one more override whatever the fill, for a site that must run
    every argument of a call ahead of it, however many there are

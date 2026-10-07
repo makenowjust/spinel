@@ -971,6 +971,7 @@ const char *past_open_parens(const char *s) {
    shape a call on a raising receiver takes, `((void)(<raise>), nil)`)? The
    voided form nests when such a chain is itself the receiver or left operand
    of another (`a.b && a.b.c`). */
+static void emit_member_boxed_text(Compiler *c, ClassInfo *ci, int i, const char *objprefix, const char *expr, Buf *b);
 int text_diverges(const char *txt) {
   const char *p = past_open_parens(txt);
   while (strncmp(p, "void)", 5) == 0) p = past_open_parens(p + 5);
@@ -6417,13 +6418,16 @@ void emit_fiber_new(Compiler *c, int id, Buf *b, int as_gen, int size_node) {
         Buf pre2 = {0}, vb = {0};
         Buf *sv2 = g_pre; int sv2i = g_indent;
         g_pre = &pre2; g_indent = 1;
-        emit_expr(c, last, &vb);
+        /* an Integer / Float with its nil beside the value boxes as that oint */
+        int lo2 = lr.kind != RK_BOXED && oint_kind(lty) && node_has_oint_form(c, last);
+        if (lo2) emit_oint_expr(c, last, lty, &vb); else emit_expr(c, last, &vb);
         g_pre = sv2; g_indent = sv2i;
         if (pre2.p) buf_puts(pb, pre2.p);
         buf_printf(pb, "    _fb->yielded_value = ");
         if (lr.kind == RK_BOXED) {
           buf_puts(pb, vb.p ? vb.p : "sp_box_nil()");
         }
+        else if (lo2) buf_printf(pb, "%s(%s)", oint_box(lty), vb.p ? vb.p : "");
         else {
           /* Everything else goes through the generic boxer. The open/close pair
              that used to stand here knows the scalars, the arrays and the
@@ -8960,7 +8964,7 @@ void emit_class_new(Compiler *c, ClassInfo *ci, Buf *b) {
         }
         else {
           Buf ivb; memset(&ivb, 0, sizeof ivb); buf_printf(&ivb, "self->iv_%s", iv_c(ci->ivars[i] + 1));
-          Buf bx; memset(&bx, 0, sizeof bx); emit_boxed_text(c, ci->ivar_types[i], ivb.p, &bx);
+          Buf bx; memset(&bx, 0, sizeof bx); emit_member_boxed_text(c, ci, i, "self->", ivb.p, &bx);
           buf_printf(b, "  sp_String_append(s, sp_poly_inspect(%s));\n", bx.p);
           free(bx.p); free(ivb.p);
         }
@@ -9609,6 +9613,14 @@ static void emit_cls_answers_dispatch(Compiler *c, Buf *b) {
 }
 /* member j of class cid's object `o`, boxed; an Integer or Float member
    with a nil bit boxes as nil when the bit is set */
+/* A member of class `ci` (index i) read through `objprefix` ("o->",
+   "self->") boxed with its nil: an Integer / Float one by its nil bit
+   (emit_marshal_box_ivar_of), the rest by their type. */
+static void emit_member_boxed_text(Compiler *c, ClassInfo *ci, int i, const char *objprefix, const char *expr, Buf *b) {
+  TyKind mt = ci->ivar_types[i];
+  if (mt == TY_INT || mt == TY_FLOAT) emit_marshal_box_ivar_of(c, (int)(ci - c->classes), i, objprefix, expr, b);
+  else emit_boxed_text(c, mt, expr, b);
+}
 static void emit_member_boxed(Compiler *c, int cid, int j, Buf *b) {
   ClassInfo *ci = &c->classes[cid];
   TyKind mt = ci->ivar_types[j];
@@ -9893,7 +9905,7 @@ static void emit_obj_deconstruct_dispatch(Compiler *c, Buf *b) {
       snprintf(fld, sizeof fld, "o->iv_%s", iv_c(ci->ivars[j] + 1));
       buf_puts(b, "      sp_PolyArray_push(_a, ");
       Buf bx; memset(&bx, 0, sizeof bx);
-      emit_boxed_text(c, ci->ivar_types[j], fld, &bx);
+      emit_member_boxed_text(c, ci, j, "o->", fld, &bx);
       buf_puts(b, bx.p ? bx.p : "sp_box_nil()"); free(bx.p);
       buf_puts(b, ");\n");
     }
@@ -12391,7 +12403,7 @@ static void emit_obj_hashkey_dispatch(Compiler *c, Buf *b) {
                comp_class_index(c, ci->name), ci->c_name, ci->c_name);
     for (int i = 0; i < ci->nmembers; i++) {
       char fe[128]; snprintf(fe, sizeof fe, "o->iv_%s", iv_c(ci->ivars[i] + 1));
-      Buf bx; memset(&bx, 0, sizeof bx); emit_boxed_text(c, ci->ivar_types[i], fe, &bx);
+      Buf bx; memset(&bx, 0, sizeof bx); emit_member_boxed_text(c, ci, i, "o->", fe, &bx);
       buf_printf(b, "      _h = (_h ^ (uint64_t)sp_rbval_hash_key(%s)) * 1099511628211ULL;\n", bx.p ? bx.p : fe);
       free(bx.p);
     }
@@ -12456,8 +12468,8 @@ static void emit_obj_valeq_dispatch(Compiler *c, Buf *b) {
       char fa[128], fb[128];
       snprintf(fa, sizeof fa, "_a->iv_%s", iv);
       snprintf(fb, sizeof fb, "_b->iv_%s", iv);
-      emit_boxed_text(c, ci->ivar_types[i], fa, &ea);
-      emit_boxed_text(c, ci->ivar_types[i], fb, &eb);
+      emit_member_boxed_text(c, ci, i, "_a->", fa, &ea);
+      emit_member_boxed_text(c, ci, i, "_b->", fb, &eb);
       buf_printf(b, "%ssp_poly_eq(%s, %s)", i ? " && " : "", ea.p ? ea.p : fa, eb.p ? eb.p : fb);
       free(ea.p); free(eb.p);
     }

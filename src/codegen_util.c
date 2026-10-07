@@ -5104,8 +5104,23 @@ int node_is_oint(Compiler *c, int node) {
     }
     if (mi >= 0) return method_ret_is_oint(&c->scopes[mi]);
     /* `<=>` answers nil for an incomparable operand: the analysis's answer
-       (a String or Bigint compare it proves total stays plain) */
-    if (sp_streq(nm, "<=>") && an2 == 1) return nullable_int_value(c, node);
+       where both sides are of one comparable kind (numbers, Strings,
+       Symbols); any other pairing can answer nil at run time */
+    if (sp_streq(nm, "<=>") && an2 == 1) {
+      int a1 = nt_ref(nt, node, "arguments"), a1n = 0;
+      const int *a1a = a1 >= 0 ? nt_arr(nt, a1, "arguments", &a1n) : NULL;
+      TyKind at = a1a && a1n == 1 ? comp_ntype(c, a1a[0]) : TY_UNKNOWN;
+      int num_l = rt == TY_INT || rt == TY_FLOAT || rt == TY_BIGINT || rt == TY_RATIONAL;
+      int num_r = at == TY_INT || at == TY_FLOAT || at == TY_BIGINT || at == TY_RATIONAL;
+      int same = (num_l && num_r) || (rt == TY_STRING && at == TY_STRING) || (rt == TY_SYMBOL && at == TY_SYMBOL);
+      return same ? nullable_int_value(c, node) : 1;
+    }
+    /* `o.instance_variable_set(:@x, v)` answers v: its form */
+    if (sp_streq(nm, "instance_variable_set") && an2 == 2 && r >= 0) {
+      int a1 = nt_ref(nt, node, "arguments"), a1n = 0;
+      const int *a1a = a1 >= 0 ? nt_arr(nt, a1, "arguments", &a1n) : NULL;
+      return a1a && a1n == 2 && node_has_oint_form(c, a1a[1]);
+    }
     /* a receiver that stayed poly: the dispatch answers an oint when a
        target can answer nil (the analysis's dispatch set) -- except on the
        safe-navigation re-entry (g_sn_skip), where the analysis mark belongs
@@ -5125,8 +5140,10 @@ int node_is_oint(Compiler *c, int node) {
     /* the runtime functions that answer an sp_oint (RUNTIME-API.md) */
     if ((sp_streq(nm, "bsearch") || sp_streq(nm, "bsearch_index")) && blk >= 0) return 1;
     if ((sp_streq(nm, "nonzero?") && oint_kind(rt)) || (sp_streq(nm, "infinite?") && rt == TY_FLOAT)) return 1;
-    if (rt == TY_STRING && (sp_streq(nm, "getbyte") || sp_streq(nm, "index") || sp_streq(nm, "rindex") ||
+    if (rt == TY_STRING && (sp_streq(nm, "index") || sp_streq(nm, "rindex") ||
                             sp_streq(nm, "byteindex") || sp_streq(nm, "byterindex"))) return 1;
+    /* String#getbyte past the end, IO#getbyte at end of file: nil */
+    if (sp_streq(nm, "getbyte") && r >= 0 && !oint_kind(rt)) return 1;
     if (sp_streq(nm, "exitstatus") || sp_streq(nm, "termsig") ||
         sp_streq(nm, "world_readable?") || sp_streq(nm, "world_writable?")) return 1;
     if (r >= 0 && ty_is_array(rt) &&
@@ -5268,7 +5285,8 @@ int node_may_be_nil(Compiler *c, int node) {
   TyKind t = comp_ntype(c, node);
   if (t == TY_NIL) return 1;
   if (!oint_kind(t)) return 0;
-  for (int i = g_n_argov - 1; i >= 0; i--) if (g_argov_node[i] == node) return 0;
+  for (int i = g_n_argov - 1; i >= 0; i--)
+    if (g_argov_node[i] == node) return g_argov_oint[i] && nullable_int_value(c, node);
   /* an oint producer the analysis proved never nil (`[a].first`: the
      runtime function's form, not a nil) is unwrapped at the store, which
      keeps the proof honest at run time (sp_oint_arg) */
