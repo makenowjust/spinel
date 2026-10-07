@@ -1327,7 +1327,11 @@ int emit_call_cmethod_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
               buf_puts(b, "); ");
               int back[1] = { saved0 };
               nt_node_set_arr((NodeTable *)nt, argsn, "arguments", back, 1);
-              buf_printf(b, "lv_%s; })", svn);
+              /* the assignment's value is the argument as written, nil
+                 included: its oint where the consumer takes one */
+              if (sv_oint && !(node_is_oint(c, id) || repr_of(c, id).kind == RK_OPT))
+                buf_printf(b, "%s(lv_%s); })", oint_arg(at), svn);
+              else buf_printf(b, "lv_%s; })", svn);
               for (int k = esc->nlocals - 1; k >= 0; k--)
                 if (sp_streq(esc->locals[k].name, svn)) {
                   memmove(&esc->locals[k], &esc->locals[k + 1], sizeof(LocalVar) * (size_t)(esc->nlocals - k - 1));
