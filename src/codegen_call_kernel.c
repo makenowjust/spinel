@@ -1058,12 +1058,14 @@ int emit_call_kernel_flow_arms(Compiler *c, int id, Buf *b, const NodeTable *nt,
     if (blk >= 0) {
       TyKind bt = repr_of(c, id).as_ty;
       /* NIL: a body whose tail is a break-less loop; ride the int slot (0). */
-      if (bt == TY_UNKNOWN || bt == TY_VOID || bt == TY_NIL) bt = TY_INT;
+      int was_nil_typed = bt == TY_UNKNOWN || bt == TY_VOID || bt == TY_NIL;
+      if (was_nil_typed) bt = TY_INT;
       int ptr = proc_slot_is_ptr(bt);
       int t = ++g_tmp;
-      /* a number answer that can be nil (a thrown nil, a nullable tail) is
-         held with its nil beside the value */
-      int c_oint = oint_kind(bt) && node_is_oint(c, id);
+      /* a number answer that can be nil (a thrown nil, a nullable tail, a
+         bare `throw` into a nil-typed catch riding the int slot) is held
+         with its nil beside the value */
+      int c_oint = oint_kind(bt) && (was_nil_typed || node_is_oint(c, id));
       emit_indent(g_pre, g_indent);
       if (c_oint) buf_printf(g_pre, "%s _t%d = %s;\n", oint_ctype(bt), t, oint_nil(bt));
       else { emit_ctype(c, bt, g_pre); buf_printf(g_pre, " _t%d = %s;\n", t, default_value_from_compiler(c, bt)); }
@@ -1184,7 +1186,10 @@ int emit_call_kernel_flow_arms(Compiler *c, int id, Buf *b, const NodeTable *nt,
         buf_puts(g_pre, ";\n");
       }
       emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n");
-      buf_printf(b, "_t%d", t);
+      /* a nil-typed catch held its slot as the oint only to take a bare
+         throw's nil: its consumer reads the int slot as before */
+      if (c_oint && !node_is_oint(c, id)) buf_printf(b, "_t%d.v", t);
+      else buf_printf(b, "_t%d", t);
       return 1;
     }
   }

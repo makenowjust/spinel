@@ -6339,7 +6339,7 @@ int emit_nullable_scalar_nil_only(Compiler *c, int id, Buf *b) {
   else buf_puts(b, ans);
   /* Object#!~ is =~ negated, and it is =~ that the number lacks */
   buf_printf(b, " : (sp_raise_nomethod(sp_nomethod_msg(\"%s\", %s(_t%d))), %s); })",
-             sp_streq(nm, "!~") ? "=~" : nm, rt == TY_FLOAT ? "sp_box_float" : "sp_box_int", tr,
+             sp_streq(nm, "!~") ? "=~" : nm, oint_box(rt), tr,
              ct == TY_BOOL ? "0" : "sp_box_nil()");
   return 1;
 }
