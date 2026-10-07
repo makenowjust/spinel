@@ -2161,19 +2161,24 @@ void emit_proc_call_args(Compiler *c, int call, int argc, const int *argv, Buf *
        published both unboxed (the sp_int[] slot, for a concrete parameter)
        and boxed (the side-channel, for a poly parameter). A nil/unknown arg
        has no storable C type; it rides an sp_int temp and boxes to nil. */
-    int atmp[16], slot[16];
+    int atmp[16], slot[16], aoint[16];
     for (int k = 0; k < nargs; k++) {
       TyKind at = proc_arg_ty(c, argv[k]);
       int storable = ty_is_object(at) || c_type_name(at) != NULL;
       atmp[k] = ++g_tmp;
       slot[k] = -1;
+      /* an Integer or Float argument that can be nil rides an oint temp:
+         boxed with its nil, its value in the sp_int slot */
+      aoint[k] = oint_kind(at) && node_has_oint_form(c, argv[k]);
       /* render the value into a side buffer first: emit_expr drains the arg's
          own prelude (e.g. a nested proc call) into g_pre, which must land
          before -- not inside -- this temp's declaration line. */
       Buf vb; memset(&vb, 0, sizeof vb);
-      if (!emit_strbuf_write_handle(c, argv[k], &vb)) emit_expr(c, argv[k], &vb);
+      if (aoint[k]) emit_oint_expr(c, argv[k], at, &vb);
+      else if (!emit_strbuf_write_handle(c, argv[k], &vb)) emit_expr(c, argv[k], &vb);
       emit_indent(g_pre, g_indent);
-      if (storable) emit_ctype(c, at, g_pre); else buf_puts(g_pre, "sp_int");
+      if (aoint[k]) buf_puts(g_pre, oint_ctype(at));
+      else if (storable) emit_ctype(c, at, g_pre); else buf_puts(g_pre, "sp_int");
       buf_printf(g_pre, " _t%d = ", atmp[k]);
       store_check(c, argv[k], storable ? at : TY_INT, "a block or proc argument's temp", g_pre);
       buf_printf(g_pre, "%s;\n", vb.p ? vb.p : "");
@@ -2238,6 +2243,7 @@ void emit_proc_call_args(Compiler *c, int call, int argc, const int *argv, Buf *
       buf_printf(b, "_sp_proc_poly_args[%d] = ", k);
       /* a handle parameter is NULL for a nil argument: it boxes as nil */
       if (at == TY_STRBUF) buf_printf(b, "(%s ? sp_box_obj(%s, SP_BUILTIN_STRBUF) : sp_box_nil())", tn, tn);
+      else if (aoint[k]) buf_printf(b, "%s(%s)", oint_box(at), tn);
       else if (storable) emit_boxed_text(c, at, tn, b);
       else buf_puts(b, "sp_box_nil()");
       buf_puts(b, ", ");
@@ -2252,6 +2258,8 @@ void emit_proc_call_args(Compiler *c, int call, int argc, const int *argv, Buf *
          typed -- speculative, exactly like the dead float slot below, so an
          object here must not raise. */
       if (at == TY_POLY) buf_printf(b, "sp_poly_slot_i(_t%d)", atmp[k]);
+      /* an oint temp: the value; a parameter that can be nil reads the box */
+      else if (aoint[k] && at == TY_INT) buf_printf(b, "_t%d.v", atmp[k]);
       /* the by-value test goes first: proc_slot_is_ptr answers yes for every
          object type, a value-type one included, and a struct cast to
          (sp_int)(uintptr_t) does not compile */

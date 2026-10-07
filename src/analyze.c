@@ -28123,6 +28123,115 @@ static int named_method_first(const NamedMethod *v, int n, const char *name) {
   return lo;
 }
 
+/* A5: a Hash literal whose Integer or Float key or value can be nil is
+   the boxed-keyed / boxed-valued kind, as a literal nil makes it. The nil
+   marks settle after the types, so the literal (and a local it is written
+   to, with that local's reads) widens here; a typed key or value slot has no
+   nil (nil out of band). */
+void infer_subtree(Compiler *c, int id);   /* analyze_infer.c */
+static int wnh_bodies[64], wnh_n;
+static void wnh_note(int body) {
+  for (int i = 0; i < wnh_n; i++) if (wnh_bodies[i] == body) return;
+  if (wnh_n < 64) wnh_bodies[wnh_n++] = body;
+}
+static void widen_nullable_keyed_hash_literals(Compiler *c) {
+  const NodeTable *nt = c->nt;
+  NT_FOREACH_KIND(nt, NK_HashNode, id) {
+    TyKind ht = c->ntype[id];
+    if (!ty_is_hash(ht)) continue;
+    TyKind kt = ty_hash_key(ht), vt = ty_hash_val(ht);
+    int kn = 0, vn = 0;
+    int n = 0; const int *els = nt_arr(nt, id, "elements", &n);
+    for (int j = 0; j < n; j++) {
+      if (nt_kind(nt, els[j]) != NK_AssocNode) continue;
+      int k = nt_ref(nt, els[j], "key"), v = nt_ref(nt, els[j], "value");
+      if ((kt == TY_INT || kt == TY_FLOAT) && nullable_int_value(c, k)) kn = 1;
+      if ((vt == TY_INT || vt == TY_FLOAT) && nullable_int_value(c, v)) vn = 1;
+    }
+    if (!kn && !vn) continue;
+    TyKind nk = kn ? TY_POLY : kt, nv = vn ? TY_POLY : vt;
+    TyKind want = nk == TY_SYMBOL ? TY_SYM_POLY_HASH : ty_hash_of(nk, nv);
+    if (!ty_is_hash(want)) want = nk == TY_STRING ? TY_STR_POLY_HASH : TY_POLY_POLY_HASH;
+    if (want == ht) continue;
+    c->ntype[id] = want;
+    { Scope *ls = comp_scope_of(c, id); if (ls && ls->body >= 0) wnh_note(ls->body); }
+    /* the local it is written to, and that local's reads */
+    NT_FOREACH_KIND(nt, NK_LocalVariableWriteNode, w) {
+      if (nt_ref(nt, w, "value") != id) continue;
+      const char *wn = nt_str(nt, w, "name");
+      Scope *sc = comp_scope_of(c, w);
+      LocalVar *lv = wn && sc ? scope_local(sc, wn) : NULL;
+      if (!lv || lv->type != ht) continue;
+      lv->type = want;
+      c->ntype[w] = want;
+      NT_FOREACH_KIND(nt, NK_LocalVariableReadNode, r) {
+        const char *rn = nt_str(nt, r, "name");
+        if (rn && sp_streq(rn, wn) && comp_scope_of(c, r) == sc) c->ntype[r] = want;
+      }
+    }
+  }
+  /* ... and a local Hash a `[]=` / `store` stores such a key or value into
+     (`h = Hash.new; h["k"] = a[1]`): the local, its reads, and its writes
+     whose value is an empty literal or a bare Hash.new built at its kind */
+  NT_FOREACH_KIND(nt, NK_CallNode, id) {
+    const char *nm = nt_str(nt, id, "name");
+    if (!nm || (!sp_streq(nm, "[]=") && !sp_streq(nm, "store"))) continue;
+    int r = nt_ref(nt, id, "receiver");
+    if (r < 0 || nt_kind(nt, r) != NK_LocalVariableReadNode) continue;
+    TyKind ht = c->ntype[r];
+    if (!ty_is_hash(ht)) continue;
+    int a = nt_ref(nt, id, "arguments"), an = 0;
+    const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &an) : NULL;
+    if (!av || an != 2) continue;
+    TyKind kt = ty_hash_key(ht), vt = ty_hash_val(ht);
+    int kn = (kt == TY_INT || kt == TY_FLOAT) && nullable_int_value(c, av[0]);
+    int vn = (vt == TY_INT || vt == TY_FLOAT) && nullable_int_value(c, av[1]);
+    if (!kn && !vn) continue;
+    TyKind nk = kn ? TY_POLY : kt, nv = vn ? TY_POLY : vt;
+    TyKind want = nk == TY_SYMBOL ? TY_SYM_POLY_HASH : ty_hash_of(nk, nv);
+    if (!ty_is_hash(want)) want = nk == TY_STRING ? TY_STR_POLY_HASH : TY_POLY_POLY_HASH;
+    if (want == ht) continue;
+    const char *ln = nt_str(nt, r, "name");
+    Scope *sc = comp_scope_of(c, r);
+    LocalVar *lv = ln && sc ? scope_local(sc, ln) : NULL;
+    if (!lv || lv->type != ht || lv->is_param || lv->rbs_seeded) continue;
+    /* every write must be one the widening can rebuild */
+    int ok = 1;
+    NT_FOREACH_KIND(nt, NK_LocalVariableWriteNode, w) {
+      const char *wn = nt_str(nt, w, "name");
+      if (!wn || !sp_streq(wn, ln) || comp_scope_of(c, w) != sc) continue;
+      int v = nt_ref(nt, w, "value");
+      NodeKind vk = v >= 0 ? nt_kind(nt, v) : NK_NilNode;
+      int en = 0;
+      if (vk == NK_HashNode) nt_arr(nt, v, "elements", &en);
+      int bare_new = vk == NK_CallNode && sp_streq(nt_str(nt, v, "name"), "new") && nt_ref(nt, v, "arguments") < 0 &&
+                     nt_ref(nt, v, "block") < 0;
+      if (!((vk == NK_HashNode && en == 0) || bare_new)) { ok = 0; break; }
+    }
+    if (!ok) continue;
+    lv->type = want;
+    NT_FOREACH_KIND(nt, NK_LocalVariableWriteNode, w) {
+      const char *wn = nt_str(nt, w, "name");
+      if (!wn || !sp_streq(wn, ln) || comp_scope_of(c, w) != sc) continue;
+      c->ntype[w] = want;
+      int v = nt_ref(nt, w, "value");
+      if (v >= 0) {
+        c->ntype[v] = want;
+        if (nt_kind(nt, v) == NK_HashNode && c->hash_want && v < c->node_cap) c->hash_want[v] = want;
+      }
+    }
+    NT_FOREACH_KIND(nt, NK_LocalVariableReadNode, rr) {
+      const char *rn = nt_str(nt, rr, "name");
+      if (rn && sp_streq(rn, ln) && comp_scope_of(c, rr) == sc) c->ntype[rr] = want;
+    }
+    if (sc->body >= 0) wnh_note(sc->body);
+  }
+  /* the expressions over a widened hash (its reads' `[]`, a call it is an
+     argument of) re-infer against it */
+  for (int i = 0; i < wnh_n; i++) infer_subtree(c, wnh_bodies[i]);
+  wnh_n = 0;
+}
+
 static void mark_nullable_int_locals(Compiler *c) {
   const NodeTable *nt = c->nt;
   /* A scalar local a read can reach before any write starts as its nil and
@@ -36554,6 +36663,7 @@ static void an_phase_reconcile_check(Compiler *c) {
   /* An --rbs seed the settled types statically contradict is a compile error,
      not something to emit a reinterpretation for. */
   mark_nullable_int_locals(c);
+  widen_nullable_keyed_hash_literals(c);
   mark_array_or_nil_slots(c);
   /* A local's array KIND has to agree with what its writes actually build. A
      value whose type widens to a poly array LATE -- a map whose block value

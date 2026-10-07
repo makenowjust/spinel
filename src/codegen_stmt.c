@@ -288,8 +288,9 @@ void emit_print_one(Compiler *c, int arg, Buf *b, int indent) {
     char ref[24];
     buf_puts(b, "{ "); emit_sentinel_bind(c, t, arg, ref, sizeof ref, b);
     buf_puts(b, "if "); emit_slot_truthy(t, ref, b);
-    if (t == TY_INT) buf_printf(b, " printf(\"%%lld\", (long long)%s); }\n", ref);
-    else buf_printf(b, " fputs(sp_float_to_s(%s), stdout); }\n", ref);
+    /* the bound ref is the oint (emit_sentinel_bind): its value prints */
+    if (t == TY_INT) buf_printf(b, " printf(\"%%lld\", (long long)(%s).v); }\n", ref);
+    else buf_printf(b, " fputs(sp_float_to_s((%s).v), stdout); }\n", ref);
   }
   else if (t == TY_INT) {
     buf_puts(b, "printf(\"%lld\", (long long)"); emit_expr(c, arg, b); buf_puts(b, ");\n");
@@ -3820,7 +3821,7 @@ int emit_pm_cond(Compiler *c, int pat, int t, TyKind pt, Buf *b) {
   if (sp_streq(pty, "NilNode")) {
     if (pt == TY_POLY) buf_printf(b, "(_t%d.tag == SP_TAG_NIL)", t);
     else if (t == g_pm_sentinel_t) {
-      char ref[24]; snprintf(ref, sizeof ref, "_t%d", t);
+      char ref[24]; snprintf(ref, sizeof ref, "_o%d", t);   /* the subject's oint (emit_case_match) */
       buf_puts(b, "!"); emit_slot_truthy(pt, ref, b);
     }
     /* a no-match MatchData is a NULL pointer, and a String slot holds nil
@@ -3884,7 +3885,7 @@ int emit_pm_cond(Compiler *c, int pat, int t, TyKind pt, Buf *b) {
        nil too, as in the is_a? fold. A String slot holds nil as NULL. */
     if ((t == g_pm_sentinel_t || pt == TY_STRING) && !is_object_root(cn2) &&
         (yes > 0 || sp_streq(cn2, "NilClass"))) {
-      char ref[24]; snprintf(ref, sizeof ref, "_t%d", t);
+      char ref[24]; snprintf(ref, sizeof ref, "_o%d", t);   /* the subject's oint (emit_case_match) */
       if (!sp_streq(cn2, "NilClass")) emit_slot_truthy(pt, ref, b);
       else { buf_puts(b, "!"); emit_slot_truthy(pt, ref, b); }
       return 1;
@@ -3936,7 +3937,7 @@ int emit_pm_cond(Compiler *c, int pat, int t, TyKind pt, Buf *b) {
       int wrote = 0;
       /* the sentinel is below every bound: a beginless range covered it */
       if (t == g_pm_sentinel_t) {
-        char ref[24]; snprintf(ref, sizeof ref, "_t%d", t);
+        char ref[24]; snprintf(ref, sizeof ref, "_o%d", t);   /* the subject's oint (emit_case_match) */
         emit_slot_truthy(pt, ref, b); buf_puts(b, " && ");
       }
       if (lo >= 0) { buf_printf(b, "_t%d >= ", t); emit_expr(c, lo, b); wrote = 1; }
@@ -4657,6 +4658,16 @@ void emit_case_match(Compiler *c, int id, Buf *b, int indent, int tail, int valu
   /* Evaluate the scrutinee first so its own prelude is flushed to g_pre before
      the `_tN =` initializer. In value position b IS g_pre, so emitting the
      scrutinee inline would splice its prelude into the middle of this line. */
+  /* an Integer or Float subject that can be nil: its oint `_oN` beside the
+     value `_tN`, which the arms testing nil, a class or a range ask */
+  if (case_subject_boxes_sentinel(c, pred, pt)) {
+    Buf ob; memset(&ob, 0, sizeof ob);
+    emit_oint_expr(c, pred, pt, &ob);   /* its prelude lands ahead of this line */
+    emit_indent(b, indent);
+    buf_printf(b, "%s _o%d = %s; %s _t%d = _o%d.v;\n", oint_ctype(pt), t, ob.p ? ob.p : oint_nil(pt), c_type_name(pt), t, t);
+    free(ob.p);
+  }
+  else {
   Buf sb; memset(&sb, 0, sizeof sb);
   if (pred >= 0) sb = expr_buf(c, pred);
   emit_indent(b, indent); emit_ctype(c, pt, b);
@@ -4669,6 +4680,7 @@ void emit_case_match(Compiler *c, int id, Buf *b, int indent, int tail, int valu
   else buf_puts(b, sb.p ? sb.p : default_value_from_compiler(c, pt));
   free(sb.p);
   buf_puts(b, ";\n");
+  }
   if (needs_root(pt)) {
     emit_indent(b, indent);
     emit_gc_root_tmp(c, pt, t, b);
