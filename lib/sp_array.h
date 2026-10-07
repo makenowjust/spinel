@@ -67,14 +67,18 @@ static inline sp_int sp_nilbits_count(const uint64_t *b, sp_int from, sp_int to)
   for (sp_int i = from; i < to; i++) n += sp_nilbit_get(b, i);
   return n;
 }
-/* the live window moved from `from` to `to` (a memmove of the data): bit
-   to+i takes bit from+i for i in [0, n), and the rest of the bitmap is clear */
+/* a block of elements moved from `from` to `to` (a memmove of the data): bit
+   to+i takes bit from+i for i in [0, n); the bits of the vacated slots are
+   clear, and bits outside both spans keep their value */
 static SP_NOINLINE SP_COLD void sp_nilbits_move(uint64_t *b, sp_int cap, sp_int from, sp_int to, sp_int n) {
+  if (from == to || n <= 0) return;
   size_t nw = sp_nilbits_words(cap);
   uint64_t *t = (uint64_t *)sp_pl_zalloc((nw ? nw : 1) * sizeof(uint64_t));
   if (!t) sp_oom_die();
   for (sp_int i = 0; i < n; i++) if (sp_nilbit_get(b, from + i)) sp_nilbit_set(t, to + i);
-  memcpy(b, t, nw * sizeof(uint64_t));
+  sp_nilbits_clear_range(b, from, from + n);
+  sp_nilbits_clear_range(b, to, to + n);
+  for (size_t w = 0; w < nw; w++) b[w] |= t[w];
   sp_pl_free(t);
 }
 
@@ -164,8 +168,12 @@ sp_IntArray *sp_IntArray_dup(sp_IntArray *a);
 sp_IntArray *sp_IntArray_slice(sp_IntArray *a, sp_int start, sp_int len);
 sp_IntArray *sp_IntArray_slice_range(sp_IntArray *a, sp_int start, sp_int end_, sp_int excl);
 void sp_IntArray_replace(sp_IntArray *dst, sp_IntArray *src);
+/* a[start, len] = plain values (no nil among them) */
 void sp_IntArray_splice(sp_IntArray *a, sp_int start, sp_int len, const sp_int *src, sp_int srcn);
 void sp_FloatArray_splice(sp_FloatArray *a, sp_int start, sp_int len, const sp_float *src, sp_int srcn);
+/* a[start, len] = a whole typed array, whose nil elements come along */
+void sp_IntArray_splice_o(sp_IntArray *a, sp_int start, sp_int len, sp_IntArray *src);
+void sp_FloatArray_splice_o(sp_FloatArray *a, sp_int start, sp_int len, sp_FloatArray *src);
 void sp_StrArray_splice(sp_StrArray *a, sp_int start, sp_int len, const char *const *src, sp_int srcn);
 void sp_PolyArray_splice(sp_PolyArray *a, sp_int start, sp_int len, sp_RbVal src);
 void sp_IntArray_reverse_bang(sp_IntArray *a);
@@ -199,7 +207,7 @@ void sp_IntArray_unshift(sp_IntArray *a, sp_int v);
 void sp_IntArray_unshift_nil(sp_IntArray *a);
 const char *sp_IntArray_join(sp_IntArray *a, const char *sep);
 sp_bool sp_IntArray_eq(sp_IntArray *a, sp_IntArray *b);
-sp_int sp_IntArray_cmp(sp_IntArray *a, sp_IntArray *b);
+sp_oint sp_IntArray_cmp_o(sp_IntArray *a, sp_IntArray *b);   /* <=>: nil once a nil meets a number */
 
 /* =========================== sp_FloatArray =========================== */
 static void sp_FloatArray_fin(void*p){sp_FloatArray*a=(sp_FloatArray*)p;sp_gc_hdr*h=(sp_gc_hdr*)((char*)a-sizeof(sp_gc_hdr));sp_gc_bytes_sub(sizeof(sp_float)*a->cap);h->size-=sizeof(sp_float)*a->cap;sp_pl_free(a->data);sp_pl_free(a->nilbits);}
@@ -533,7 +541,7 @@ sp_RbVal sp_FloatArray_index_poly(sp_FloatArray *a, sp_float v);
 sp_RbVal sp_FloatArray_rindex_poly(sp_FloatArray *a, sp_float v);
 sp_RbVal sp_FloatArray_index_key(sp_FloatArray *a, sp_RbVal v);
 sp_RbVal sp_FloatArray_rindex_key(sp_FloatArray *a, sp_RbVal v);
-sp_float sp_FloatArray_delete_key(sp_FloatArray *a, sp_RbVal v);
+sp_ofloat sp_FloatArray_delete_key(sp_FloatArray *a, sp_RbVal v);
 const int64_t *sp_IntArray_ffi_data(sp_IntArray *a);
 const double *sp_FloatArray_ffi_data(sp_FloatArray *a);
 sp_IntArray *sp_IntArray_concat(sp_IntArray *a, sp_IntArray *b);

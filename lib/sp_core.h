@@ -12,6 +12,7 @@
 
 #include <stdint.h>
 #include <stddef.h>   /* size_t (sp_snprintf_c_float) */
+#include "sp_types.h" /* sp_oint / sp_ofloat: the nil of Integer() / Float() with exception: false */
 
 /* String -> number parsers (cold, I/O-boundary). */
 intptr_t sp_str_to_i_cruby(const char *s);
