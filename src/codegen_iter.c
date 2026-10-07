@@ -3195,7 +3195,10 @@ void emit_block_invoke(Compiler *c, int args_node, Buf *b, int indent, int as_ex
       Buf *svp3 = g_pre; int svi3 = g_indent; g_pre = b; g_indent = 0;
       emit_unresolved_coerced(c, bd3[bn3 - 1], want_ty, &tb);
       g_pre = svp3; g_indent = svi3;
-      if (tb.p) buf_puts(b, tb.p);
+      /* a slot holding its nil beside the value takes the raise's dummy as
+         its nil: the raise never returns */
+      if (ywo) buf_printf(b, "((void)(%s), %s)", tb.p ? tb.p : "0", oint_nil(want_ty));
+      else if (tb.p) buf_puts(b, tb.p);
       free(tb.p); }
     buf_puts(b, "; ");
   }

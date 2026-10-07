@@ -7631,7 +7631,7 @@ static void emit_tail_value(Compiler *c, int node, Buf *b) {
   /* A poly tail slot (a poly return, or a poly result var -- e.g. an inlined
      method's result temp) takes the value as-is: do not rewrite a poly
      `sp_box_nil()` into the scalar emit_ret_nil(g_ret_type) form below. */
-  if (g_ret_type == TY_POLY || (g_result_var && g_result_poly)) { emit_expr(c, node, b); return; }
+  if (g_result_var ? g_result_poly : g_ret_type == TY_POLY) { emit_expr(c, node, b); return; }
   /* A call that answers no type -- a method whose value is a call on a
      constant defined nowhere, which raises NameError when it runs -- is a
      C void function: evaluate it, and give the slot its nil (never reached,

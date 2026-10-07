@@ -28417,9 +28417,9 @@ static void mark_nullable_int_locals(Compiler *c) {
       int scid = ty_is_object(srt) ? ty_object_class(srt) : -1;
       if (scid < 0 && nt_kind(nt, srecv) == NK_SelfNode) { Scope *ss = comp_scope_of(c, id); scid = ss ? ss->class_id : -1; }
       if (scid < 0 || scid >= c->nclasses) continue;
-      const char *ivn = nt_str(nt, sav[0], "unescaped");
-      if (!ivn) ivn = nt_str(nt, sav[0], "value");
-      if (!ivn || ivn[0] != '@') continue;
+      const char *ivn0 = nt_str(nt, sav[0], "value");
+      if (!ivn0 || !ivn0[0]) continue;
+      char ivn[300]; snprintf(ivn, sizeof ivn, "%s%s", ivn0[0] == '@' ? "" : "@", ivn0);   /* the symbol's text, with or without its `@` */
       ClassInfo *sci = NULL; int siv = -1;
       for (int k = scid; k >= 0 && siv < 0; k = c->classes[k].parent) { sci = &c->classes[k]; siv = comp_ivar_index(sci, ivn); }
       if (siv < 0 || sci->ivar_nullable_int[siv]) continue;

@@ -6949,14 +6949,22 @@ static void emit_proc_param_slot(Compiler *c, Buf *pb, const char *name, const c
    (cs_type_params); the caller's mark covers the calls it cannot see
    (`pr === x`, an alias). A Proc rides the slot as a stuffed pointer and is
    cast back rather than assigned straight to sp_Proc * (#2874). */
-static void emit_proc_scalar_param_bind(Buf *pb, TyKind pt, int k) {
+/* a Float parameter from the boxed side channel: the slot's oint; a plain
+   slot unwraps it (a missing argument raises) */
+static void emit_proc_float_param_bind(Buf *pb, int k, int oint) {
+  buf_printf(pb, "%s(argc > %d) ? sp_unbox_ofloat(_sp_proc_poly_args[%d]) : sp_ofloat_nil()%s;\n",
+             oint ? "" : "sp_ofloat_arg(", k, k, oint ? "" : ")");
+}
+static void emit_proc_scalar_param_bind(Buf *pb, TyKind pt, int k, int oint) {
   const char *nilv = pt == TY_BOOL ? "0" : (pt == TY_SYMBOL) ? "((sp_sym)-1)" : NULL;
   if (pt == TY_INT && k < 16) {
+    /* the slot's oint; a plain slot (the analysis saw no nil) unwraps it,
+       so a missing argument raises rather than reads as 0 */
     g_needs_proc_poly_argslot = 1;
-    buf_printf(pb, "(argc > %d) ? (_sp_proc_poly_args[%d].tag == SP_TAG_NIL ? sp_oint_nil() : sp_oint_of(args[%d])) : sp_oint_nil();\n",
-               k, k, k);
+    buf_printf(pb, "%s(argc > %d) ? (_sp_proc_poly_args[%d].tag == SP_TAG_NIL ? sp_oint_nil() : sp_oint_of(args[%d])) : sp_oint_nil()%s;\n",
+               oint ? "" : "sp_oint_arg(", k, k, k, oint ? "" : ")");
   }
-  else if (pt == TY_INT) buf_puts(pb, "sp_oint_nil();\n");
+  else if (pt == TY_INT) buf_puts(pb, oint ? "sp_oint_nil();\n" : "sp_oint_arg(sp_oint_nil());\n");
   else if (nilv) buf_printf(pb, "(argc > %d) ? args[%d] : %s;\n", k, k, nilv);
   else if (pt == TY_PROC) buf_printf(pb, "(argc > %d) ? (sp_Proc *)(uintptr_t)args[%d] : NULL;\n", k, k);
   else buf_printf(pb, "args[%d];\n", k);
@@ -7737,8 +7745,7 @@ else if (orecv >= 0 && onm) {
          (the proc-call ABI cap). */
       if (k < 16) {
         g_needs_proc_poly_argslot = 1;  /* channel array now lives in spinel_rt.h */
-        if (pt == TY_FLOAT)
-          buf_printf(pb, "(argc > %d) ? sp_unbox_ofloat(_sp_proc_poly_args[%d]) : sp_ofloat_nil();\n", k, k);
+        if (pt == TY_FLOAT) emit_proc_float_param_bind(pb, k, slot_is_oint(lv));
         else
           buf_printf(pb, "(argc > %d) ? _sp_proc_poly_args[%d] : sp_box_nil();\n", k, k);
       }
@@ -7759,7 +7766,7 @@ else if (orecv >= 0 && onm) {
       buf_printf(pb, "(argc > %d) ? (", k); emit_ctype(c, pt, pb);
       buf_printf(pb, ")(uintptr_t)args[%d] : NULL;\n", k);
     }
-    else emit_proc_scalar_param_bind(pb, pt, k);
+    else emit_proc_scalar_param_bind(pb, pt, k, slot_is_oint(lv));
   }
   /* A celled param: this proc's frame OWNS a variable an inner proc captures,
      so materialize its heap cell here and copy the bound value in -- reads and
@@ -10005,7 +10012,7 @@ static void emit_conv_bridge(Compiler *c, Buf *b, const char *mname, TyKind want
     if (callee != i) continue;   /* an ancestor's own row declares it */
     int poly_ret = c->scopes[tmi].ret == TY_POLY;
     buf_printf(b, "%s%s sp_%s_%s(sp_%s *self%s);\n", g_debug ? "" : "static ",
-               poly_ret ? "sp_RbVal" : rett,
+               poly_ret ? "sp_RbVal" : method_ret_is_oint(&c->scopes[tmi]) ? oint_ctype(c->scopes[tmi].ret) : rett,
                c->classes[callee].c_name, mc(c->scopes[tmi].name),
                c->classes[callee].c_name, bridge_blk_param(c, tmi));
   }
@@ -10036,10 +10043,12 @@ static void emit_conv_bridge(Compiler *c, Buf *b, const char *mname, TyKind want
       buf_printf(b, "      %s }\n", dflt);
       continue;
     }
-    buf_printf(b, "    case %d: %sreturn sp_%s_%s((sp_%s *)p%s);\n",
-               i, with_ok ? "*ok = 1; " : "",
+    /* a target answering its nil beside the value: nil is no conversion */
+    int oret = method_ret_is_oint(&c->scopes[tmi]);
+    buf_printf(b, "    case %d: %sreturn %ssp_%s_%s((sp_%s *)p%s)%s;\n",
+               i, with_ok ? "*ok = 1; " : "", oret ? "sp_oint_arg(" : "",
                c->classes[callee].c_name, mc(c->scopes[tmi].name),
-               c->classes[callee].c_name, bridge_blk_arg(c, tmi));
+               c->classes[callee].c_name, bridge_blk_arg(c, tmi), oret ? ")" : "");
   }
   buf_printf(b, "    default: %s\n  }\n}\n", dflt);
 }

@@ -1461,13 +1461,14 @@ void emit_expr(Compiler *c, int id, Buf *b) {
   }
   else emit_expr_node(c, id, ob);
   if (ob == &side) {
-    int diverges = side.p && text_diverges(side.p);
-    if (wrap_arg && !diverges) buf_printf(b, "%s(", oint_arg(ot));
-    else if (wrap_of && !diverges) buf_printf(b, "%s(", oint_of(oint_kind(ot) ? ot : TY_INT));
+    /* a diverging text (a raise token) carries the plain default: it is
+       never unwrapped (sp_oint_arg would not take it), and wrapped as the
+       plain scalar it is where the oint is wanted */
+    int skip = wrap_arg && side.p && text_diverges(side.p);
+    if (wrap_arg && !skip) buf_printf(b, "%s(", oint_arg(ot));
+    else if (wrap_of) buf_printf(b, "%s(", oint_of(oint_kind(ot) ? ot : TY_INT));
     buf_puts(b, side.p ? side.p : "");
-    if (!diverges) buf_puts(b, ")");
-    /* a diverging text read as an oint: the plain default it carries, wrapped */
-    else if (wrap_of) { /* the value never reads: its C type is the plain scalar, which sp_oint_of takes */ }
+    if (!skip) buf_puts(b, ")");
     free(side.p);
   }
   g_oint_read = 0;

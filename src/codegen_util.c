@@ -5068,7 +5068,11 @@ int node_is_oint(Compiler *c, int node) {
        re-entry for the same node (g_sn_skip), which emits the plain call on
        the guarded receiver and wraps it itself */
     const char *sop = nt_str(nt, node, "call_operator");
-    if (sop && sp_streq(sop, "&.") && g_sn_skip != node) return 1;
+    if (sop && sp_streq(sop, "&.") && g_sn_skip != node) {
+      /* nil when the receiver is -- only where a guard stands (a receiver
+         that cannot be nil, `3&.fdiv(2)`, has neither guard nor nil) */
+      if (sn_guard_pending(c, node)) return 1;
+    }
     const char *nm = nt_str(nt, node, "name");
     if (!nm) return 0;
     int blk = nt_ref(nt, node, "block");
