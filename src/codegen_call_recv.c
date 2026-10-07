@@ -12786,8 +12786,11 @@ static int emit_poly_call0_arms(Compiler *c, int id, Buf *b, const NodeTable *nt
       }
     }
     if (!has_user_cnt && argc == 0 && cblk < 0) {
-      buf_puts(b, "sp_poly_count("); emit_expr(c, recv, b);
-      buf_puts(b, ")");
+      /* never nil, lifted where the slot holds its nil (a dispatch whose
+         reader arm can answer nil) */
+      int lo = node_is_oint(c, id);
+      buf_puts(b, lo ? "sp_oint_of(sp_poly_count(" : "sp_poly_count("); emit_expr(c, recv, b);
+      buf_puts(b, lo ? "))" : ")");
       { *out = 1; return 1; }
     }
   }
