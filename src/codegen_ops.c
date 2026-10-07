@@ -23,7 +23,7 @@ static char *op_recv_text(Compiler *c, const BopCtx *x) {
      $r   the receiver, emitted at its first occurrence (or the text the
           caller rendered, x->rtext); a later $r repeats the same text
      $R   the receiver emitted again, for an arm that emitted it twice
-     $o   an Integer or Float receiver with its nil beside the value (an
+     $N   an Integer or Float receiver with its nil beside the value (an
           sp_oint / sp_ofloat, emit_oint_expr): a receiver that can be nil
           hands the row its flag, one that cannot is wrapped as never nil.
           Emitted at its first occurrence, repeated after, as $r is. The
@@ -86,7 +86,7 @@ static int emit_op_template(Compiler *c, const BopCtx *x, Buf *b) {
       else buf_puts(b, r);
       p++;
     }
-    else if (p[0] == '$' && p[1] == 'o') {
+    else if (p[0] == '$' && p[1] == 'N') {
       if (!o && x->rtext && !node_has_oint_form(c, x->recv)) {
         Buf ob; memset(&ob, 0, sizeof ob);
         buf_printf(&ob, "%s(%s)", oint_of(x->rt), x->rtext);

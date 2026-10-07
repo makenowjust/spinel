@@ -159,7 +159,8 @@ static inline sp_int sp_IntArray_nil_count(sp_IntArray*a){return (a&&a->nilbits)
 /* the bitmap dropped once no nil is left (compact!, delete(nil), clear, replace) */
 static SP_COLD void sp_IntArray_drop_nilbits(sp_IntArray*a){if(a&&a->nilbits){sp_nilbits_free(a,a->nilbits,a->cap);a->nilbits=NULL;}}
 /* element i of `a` boxed: nil where the bitmap says so */
-static inline sp_RbVal sp_IntArray_box_elem(sp_IntArray*a,sp_int i){return sp_IntArray_elem_nil(a,i)?sp_box_nil():sp_box_int(a->data[a->start+i]);}
+/* an index past the end (zip's padding, a gap) is nil, as the read is */
+static inline sp_RbVal sp_IntArray_box_elem(sp_IntArray*a,sp_int i){if(!a||i<0||i>=a->len||sp_IntArray_elem_nil(a,i))return sp_box_nil();return sp_box_int(a->data[a->start+i]);}
 
 /* ---- sp_IntArray cold ops (compiled in lib/sp_array.c) ---- */
 sp_IntArray *sp_IntArray_from_range(sp_int s, sp_int e);
@@ -257,7 +258,7 @@ static inline void sp_FloatArray_push_o(sp_FloatArray*a,sp_ofloat o){if(SP_UNLIK
 static inline sp_bool sp_FloatArray_has_nil(sp_FloatArray*a){return a&&a->nilbits&&sp_nilbits_any(a->nilbits,0,a->len);}
 static inline sp_int sp_FloatArray_nil_count(sp_FloatArray*a){return (a&&a->nilbits)?sp_nilbits_count(a->nilbits,0,a->len):0;}
 static SP_COLD void sp_FloatArray_drop_nilbits(sp_FloatArray*a){if(a&&a->nilbits){sp_nilbits_free(a,a->nilbits,a->cap);a->nilbits=NULL;}}
-static inline sp_RbVal sp_FloatArray_box_elem(sp_FloatArray*a,sp_int i){return sp_FloatArray_elem_nil(a,i)?sp_box_nil():sp_box_float(a->data[i]);}
+static inline sp_RbVal sp_FloatArray_box_elem(sp_FloatArray*a,sp_int i){if(!a||i<0||i>=a->len||sp_FloatArray_elem_nil(a,i))return sp_box_nil();return sp_box_float(a->data[i]);}
 
 /* One step of CRuby's compensated summation (array.c ary_sum): Kahan-Babuska-
    Neumaier, where `comp` collects the low-order bits each add drops and is

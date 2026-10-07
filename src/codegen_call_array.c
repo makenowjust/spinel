@@ -1789,8 +1789,9 @@ int emit_call_append_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, cons
         emit_boxed(c, argv[a], b); buf_puts(b, ")");
         if (oint_kind(elem)) buf_puts(b, ")");
       }
-      /* an Integer or Float value stores with its nil where it can be one */
-      else if (oint_kind(elem)) emit_elem_store_value(c, k, argv[a], b);
+      /* an Integer or Float value that can be nil stores with it; any other
+         value keeps the push's own coercion (and its refusal wording) */
+      else if (oint_kind(elem) && nil_store_sfx(c, k, argv[a])[0]) emit_elem_store_value(c, k, argv[a], b);
       else emit_coerce(c, argv[a], elem, CO_HOLD, "an Array push", b);
       buf_puts(b, "); ");
     }
@@ -2031,14 +2032,22 @@ int emit_call_array_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const
       else {
         TyKind et = ty_array_elem(rt);
         int vboxed = repr_of(c, argv[1]).kind == RK_BOXED;
-        /* a boxed number arrives with its nil (sp_poly_elem_i / _f answer
-           an oint), which the _nilable store takes */
-        if (vboxed && oint_kind(et)) buf_puts(b, oint_ctype(et)); else emit_ctype(c, et, b);
+        /* a number that can be nil (a boxed one: sp_poly_elem_i / _f answer
+           an oint; a nullable read, a bound oint temp) travels as its oint
+           into the _nilable store; a plain one into the plain store */
+        int voint = oint_kind(et) && nil_store_sfx(c, k, argv[1])[0];
+        if (voint) buf_puts(b, oint_ctype(et)); else emit_ctype(c, et, b);
         buf_printf(b, " _t%d = ", tv);
         if (vboxed && et == TY_INT) { buf_puts(b, "sp_poly_elem_i("); emit_expr(c, argv[1], b); buf_puts(b, ")"); }
         else if (vboxed && et == TY_STRING) { buf_puts(b, "sp_poly_elem_s("); emit_expr(c, argv[1], b); buf_puts(b, ")"); }
         else if (vboxed && et == TY_FLOAT) { buf_puts(b, "sp_poly_elem_f("); emit_expr(c, argv[1], b); buf_puts(b, ")"); }
+        else if (voint) emit_oint_expr(c, argv[1], et, b);
         else emit_coerce(c, argv[1], et, CO_HOLD, "an Array element store", b);
+        buf_printf(b, "; sp_%sArray_set%s(_t%d, _t%d, _t%d); ", k, nil_store_sfx(c, k, argv[1]), t, ti, tv);
+        /* the store answers the value: with its nil where the consumer takes the oint */
+        if (voint) { oint_open(c, id, et, b); buf_printf(b, "_t%d", tv); oint_close(c, id, b); buf_puts(b, "; })"); }
+        else buf_printf(b, "_t%d; })", tv);
+        return 1;
       }
       buf_printf(b, "; sp_%sArray_set%s(_t%d, _t%d, _t%d); _t%d; })", k, nil_store_sfx(c, k, argv[1]), t, ti, tv, tv);
       return 1;

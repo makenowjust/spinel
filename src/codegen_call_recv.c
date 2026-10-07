@@ -2157,8 +2157,12 @@ else {
                   " (long long)_t%d, (long long)(-((_t%d ? _t%d->len : 0) + 1)))); }",
                to2, ti2, ti2, ti2, t, t, ti2, to2, t, t);
     for (int a2 = 1; a2 < argc; a2++) {
-      buf_printf(b, " sp_%sArray_insert%s(_t%d, _t%d + %d, ", k, nil_store_sfx(c, k, argv[a2]), t, ti2, a2 - 1);
-      emit_typed_elem_value(c, argv[a2], ty_array_elem(rt), b); buf_puts(b, ");");
+      const char *isfx = nil_store_sfx(c, k, argv[a2]);
+      buf_printf(b, " sp_%sArray_insert%s(_t%d, _t%d + %d, ", k, isfx, t, ti2, a2 - 1);
+      /* the _nilable store takes the value with its nil */
+      if (isfx[0]) emit_elem_store_value(c, k, argv[a2], b);
+      else emit_typed_elem_value(c, argv[a2], ty_array_elem(rt), b);
+      buf_puts(b, ");");
     }
     buf_printf(b, " _t%d; })", t);
     { *out = 1; return 1; }
@@ -10711,14 +10715,19 @@ int emit_range_call(Compiler *c, int id, Buf *b) {
     if (argc == 0 && block < 0) {
       int fe = range_lit_float_end(c, recv);
       if (fe >= 0 && (is_range_end_reader(name))) {
+        /* a bound reader's consumer may take the oint form (node_is_oint) */
+        oint_lift_open(c, id, TY_FLOAT, b);
         emit_float_expr(c, fe, b);
+        oint_lift_close(c, id, b);
         return 1;
       }
       /* max is nil for an empty one and CRuby's TypeError for an excluded end */
       if (fe >= 0 && sp_streq(name, "max")) {
         int trm = ++g_tmp;
+        oint_open(c, id, TY_FLOAT, b);
         buf_printf(b, "({ sp_Range _t%d = ", trm); emit_expr(c, recv, b);
         buf_printf(b, "; sp_range_max_f(_t%d); })", trm);
+        oint_close(c, id, b);
         return 1;
       }
     }

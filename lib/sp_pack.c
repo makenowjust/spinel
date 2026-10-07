@@ -674,11 +674,10 @@ const char *sp_FloatArray_pack(sp_FloatArray *arr, const char *fmt) {
       continue;
     }
     /* a String directive converts the element as CRuby does: a Float is no
-       String (TypeError), the nil sentinel is nil */
+       String (TypeError), a nil element (its bit) is nil */
     if (pk_is_str_spec(spec)) {
       int have = idx < arr->len;
-      sp_float v = have ? arr->data[idx] : 0.0;
-      pk_str_spec(spec, count, sp_float_is_nil(v) ? sp_box_nil() : sp_box_float(v), have, &buf, &len, &cap);
+      pk_str_spec(spec, count, have ? sp_FloatArray_box_elem(arr, idx) : sp_box_float(0.0), have, &buf, &len, &cap);
       idx++;
       continue;
     }

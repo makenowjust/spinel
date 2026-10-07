@@ -15,8 +15,11 @@
    consumer takes the oint) and otherwise reads it as the plain scalar through
    sp_oint_arg (TypeError for nil) -- the same wrap the dispatcher applies to an
    oint producer, applied here because this emitter decides the form. */
-static void oint_open(Compiler *c, int id, TyKind t, Buf *b) { if (!node_is_oint(c, id)) buf_printf(b, "%s(", oint_arg(t)); }
-static void oint_close(Compiler *c, int id, Buf *b) { if (!node_is_oint(c, id)) buf_puts(b, ")"); }
+/* A call the analysis typed nil or void (`:s <=> 3`) has no number to
+   unwrap: its oint is left bare, discarded or boxed as nil by the consumer. */
+static int oint_unwrap_wanted(Compiler *c, int id) { return !node_is_oint(c, id) && oint_kind(comp_ntype(c, id)); }
+static void oint_open(Compiler *c, int id, TyKind t, Buf *b) { if (oint_unwrap_wanted(c, id)) buf_printf(b, "%s(", oint_arg(t)); }
+static void oint_close(Compiler *c, int id, Buf *b) { if (oint_unwrap_wanted(c, id)) buf_puts(b, ")"); }
 /* A plain answer where the call's consumer wants its oint form (the
    analysis marks the call nullable): wrapped as never nil. */
 static void oint_lift_open(Compiler *c, int id, TyKind t, Buf *b) { if (node_is_oint(c, id)) buf_printf(b, "%s(", oint_of(t)); }

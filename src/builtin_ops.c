@@ -1443,10 +1443,10 @@ static const BuiltinOp bop_rows[] = {
   /* Integer: the arms that read only the receiver (rendered once, possibly
      behind the nullable-Integer guard) and the arguments */
   /* a receiver that can be nil answers as nil does: "" / "nil" / 0.0 / 0 */
-  { TY_INT,   "to_s",        0,   0, BF_ANY,      TY_STRING,      BOPE_TEMPLATE, "sp_int_opt_to_s($o)" },
-  { TY_INT,   "inspect",     0, 127, BF_ANY,      TY_STRING,      BOPE_TEMPLATE, "sp_int_opt_inspect($o)" },
-  { TY_INT,   "to_f",        0, 127, BF_ANY,      TY_FLOAT,       BOPE_TEMPLATE, "({ sp_oint _t$t = $o; _t$t.nil ? 0.0 : (sp_float)_t$t.v; })" },  /* #4070 */
-  { TY_INT,   "to_i",        0,   0, BF_ANY,      TY_INT,         BOPE_TEMPLATE, "({ sp_oint _t$t = $o; _t$t.nil ? (sp_int)0 : _t$t.v; })" },
+  { TY_INT,   "to_s",        0,   0, BF_ANY,      TY_STRING,      BOPE_TEMPLATE, "sp_int_opt_to_s($N)" },
+  { TY_INT,   "inspect",     0, 127, BF_ANY,      TY_STRING,      BOPE_TEMPLATE, "sp_int_opt_inspect($N)" },
+  { TY_INT,   "to_f",        0, 127, BF_ANY,      TY_FLOAT,       BOPE_TEMPLATE, "({ sp_oint _t$t = $N; _t$t.nil ? 0.0 : (sp_float)_t$t.v; })" },  /* #4070 */
+  { TY_INT,   "to_i",        0,   0, BF_ANY,      TY_INT,         BOPE_TEMPLATE, "({ sp_oint _t$t = $N; _t$t.nil ? (sp_int)0 : _t$t.v; })" },
   { TY_INT,   "abs",         0, 127, BF_ANY,      TY_INT,         BOPE_TEMPLATE, "sp_int_abs($r)" },
   { TY_INT,   "size",        0,   0, BF_ANY,      TY_UNKNOWN,     BOPE_TEMPLATE, "((sp_int)sizeof(sp_int))" },
   { TY_INT,   "to_int",      1, 127, BF_ANY,      TY_UNKNOWN,     BOPE_TEMPLATE, "($r)" },
@@ -1532,8 +1532,8 @@ static const BuiltinOp bop_rows[] = {
   { TY_INT,   "to_s",        1,   1, BF_ANY,      TY_STRING,      BOPE_TEMPLATE, "sp_int_to_s_base($r, $i0)" },
   /* Float: arms with no inference row of their own */
   /* a receiver that can be nil answers as nil does: "" / "nil" / 0.0 */
-  { TY_FLOAT, "to_s",        0, 127, BF_ANY,      TY_STRING,      BOPE_TEMPLATE, "sp_float_opt_to_s($o)" },
-  { TY_FLOAT, "inspect",     0, 127, BF_ANY,      TY_STRING,      BOPE_TEMPLATE, "sp_float_opt_inspect($o)" },
+  { TY_FLOAT, "to_s",        0, 127, BF_ANY,      TY_STRING,      BOPE_TEMPLATE, "sp_float_opt_to_s($N)" },
+  { TY_FLOAT, "inspect",     0, 127, BF_ANY,      TY_STRING,      BOPE_TEMPLATE, "sp_float_opt_inspect($N)" },
   { TY_FLOAT, "arg",         1, 127, BF_ANY,      TY_UNKNOWN,     BOPE_TEMPLATE, "sp_float_arg($r)" },
   { TY_FLOAT, "angle",       1, 127, BF_ANY,      TY_UNKNOWN,     BOPE_TEMPLATE, "sp_float_arg($r)" },
   { TY_FLOAT, "phase",       1, 127, BF_ANY,      TY_UNKNOWN,     BOPE_TEMPLATE, "sp_float_arg($r)" },
@@ -1566,7 +1566,7 @@ static const BuiltinOp bop_rows[] = {
   { TY_FLOAT, "modulo",      0, 127, BF_ANY,      TY_FLOAT,       BOPE_NONE },
   { TY_FLOAT, "remainder",   1,   1, BF_ANY,      TY_FLOAT,       BOPE_TEMPLATE, "sp_fremainder($r, $f0)" },
   { TY_FLOAT, "remainder",   0, 127, BF_ANY,      TY_FLOAT,       BOPE_NONE },
-  { TY_FLOAT, "to_f",        0, 127, BF_ANY,      TY_FLOAT,       BOPE_TEMPLATE, "({ sp_ofloat _t$t = $o; _t$t.nil ? 0.0 : _t$t.v; })" },
+  { TY_FLOAT, "to_f",        0, 127, BF_ANY,      TY_FLOAT,       BOPE_TEMPLATE, "({ sp_ofloat _t$t = $N; _t$t.nil ? 0.0 : _t$t.v; })" },
   { TY_FLOAT, "imag",        0, 127, BF_ANY,      TY_INT,         BOPE_TEMPLATE, "((void)($r), (sp_int)0)" },
   { TY_FLOAT, "imaginary",   0, 127, BF_ANY,      TY_INT,         BOPE_TEMPLATE, "((void)($r), (sp_int)0)" },
   { TY_FLOAT, "rect",        0, 127, BF_ANY,      TY_POLY_ARRAY,  BOPE_TEMPLATE, "({ sp_PolyArray *_t$t = sp_PolyArray_new(); SP_GC_ROOT(_t$t); sp_PolyArray_push(_t$t, sp_box_float($r)); sp_PolyArray_push(_t$t, sp_box_int(0)); _t$t; })" },
