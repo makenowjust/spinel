@@ -100,6 +100,11 @@ objects and the precompiled header are built for one width. A test that
 assumes a 64-bit Integer (values or arithmetic past 2^31, `Integer#size`, a
 printed hash, a 64-bit FFI width) says `# spinel: int64` in its first line and
 is filtered out there; CI runs that lane on every push.
+`SPINEL_INT_OVERFLOW=promote make test` and `SPINEL_INT_OVERFLOW=wrap make
+test` run the corpus in the other two modes (each with its own precompiled
+header): the tests that pin a raise-mode RangeError stay out of both, the
+`promote_*` tests run only in promote, and a test whose answer is the Bignum
+the default mode's growth-pattern promotion produced stays out of wrap.
 
 ## Using it when you compile the C yourself
 

@@ -767,12 +767,22 @@ endif
 # int_min_overflow_raises pins the RangeError an operation on -2**63 raises
 # when its result leaves int64; promote answers a Bignum there, pinned by
 # promote_int_min_overflow.rb.
+RAISE_MODE_PINS := test/int_overflow_raises.rb test/int_overflow_op_assign.rb test/poly_int_overflow_raises.rb test/str_to_i_overflow.rb test/string_to_i_overflow_raises.rb test/integer_argument_error.rb test/bounded_counter_unchecked_add.rb test/float_to_int_out_of_range.rb test/bigrational_to_i_out_of_range.rb test/float_to_int_boundary.rb test/poly_call_legacy_abi_gate.rb test/poly_call_fast_abi_gate.rb test/poly_method_return_kinds.rb test/int_min_overflow_raises.rb
 ifeq ($(SPINEL_INT_OVERFLOW),promote)
-TESTS := $(filter-out test/int_overflow_raises.rb test/int_overflow_op_assign.rb test/poly_int_overflow_raises.rb test/str_to_i_overflow.rb test/string_to_i_overflow_raises.rb test/integer_argument_error.rb test/bounded_counter_unchecked_add.rb test/float_to_int_out_of_range.rb test/bigrational_to_i_out_of_range.rb test/float_to_int_boundary.rb test/poly_call_legacy_abi_gate.rb test/poly_call_fast_abi_gate.rb test/poly_method_return_kinds.rb test/int_min_overflow_raises.rb,$(TESTS))
+TESTS := $(filter-out $(RAISE_MODE_PINS),$(TESTS))
 # Drive the spinel front-end and the C compile in promote mode so the test
 # rule actually exercises the auto-promotion path end to end.
 SP_OV_FLAG := --int-overflow=promote
 SP_OV_DEFINE := -DSP_INT_OVERFLOW_MODE_PROMOTE
+else ifeq ($(SPINEL_INT_OVERFLOW),wrap)
+# The wrap lane (`SPINEL_INT_OVERFLOW=wrap make test`): the same corpus with
+# wraparound arithmetic. The raise-mode pins expect a RangeError wrap never
+# raises, and promote_*.rb a Bignum wrap never makes, so both stay out; a
+# test whose answer is a Bignum the default mode's growth-pattern promotion
+# produced differs here too and is filtered as the wrap runs find it.
+TESTS := $(filter-out $(RAISE_MODE_PINS) test/promote_%.rb,$(TESTS))
+SP_OV_FLAG := --int-overflow=wrap
+SP_OV_DEFINE := -DSP_INT_OVERFLOW_MODE_WRAP
 else
 # `promote_*` tests overflow on purpose and only have defined output under
 # --int-overflow=promote; in raise/wrap mode they would (correctly) raise.
@@ -894,7 +904,7 @@ CC_KIND  := $(if $(findstring clang,$(shell $(CC) --version 2>/dev/null | head -
 sp_empty :=
 sp_space := $(sp_empty) $(sp_empty)
 sp_pathify = $(subst =,,$(subst /,,$(subst $(sp_space),,$(subst -,,$(1)))))
-PCH_ROOT := build/pch/$(CC_KIND)$(call sp_pathify,$(OPT))$(if $(SP_OV_DEFINE),promote)
+PCH_ROOT := build/pch/$(CC_KIND)$(call sp_pathify,$(OPT))$(if $(SP_OV_DEFINE),$(SPINEL_INT_OVERFLOW))
 PCH_FLAGS = $(CFLAGS) $(SP_OV_DEFINE) -Werror $(TEST_WARN_SUPPRESS) $(SEC_FLAGS)
 PCH_PLAIN  := $(PCH_ROOT)/plain/spinel_rt.h.gch
 PCH_NOPOLY := $(PCH_ROOT)/nopoly/spinel_rt.h.gch
