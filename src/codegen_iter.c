@@ -1342,7 +1342,7 @@ int emit_inline_call_x(Compiler *c, int id, Buf *b, int indent, int as_expr) {
     int rtag = ++g_tmp;
     char rvbuf[32]; snprintf(rvbuf, sizeof rvbuf, "_t%d", rtag);
     /* the callee's nullable Integer / Float answer is its oint */
-    int ro = oint_kind(rt) && method_ret_is_oint(m);
+    int ro = oint_kind(rt) && (method_ret_is_oint(m) || node_is_oint(c, id));
     emit_indent(b, din); emit_res_ctype(c, rt, ro, b);
     /* a value-type object is a struct, whose zero is `{0}`, not NULL */
     buf_printf(b, " _t%d = %s;\n", rtag, ro ? oint_nil(rt) : comp_ty_value_obj(c, rt) ? "{0}" : default_value_from_compiler(c, rt));
@@ -1980,19 +1980,22 @@ void emit_block_kw_binds(Compiler *c, int blk, int ykw, Scope *bsc, Buf *b, int 
     }
     if (!as_expr) emit_indent(b, indent);
     buf_printf(b, "lv_%s = ", kpr);
+    /* a keyword slot that holds its nil takes the value with it */
+    int ko = kl && oint_kind(kt) && slot_is_oint(kl);
     if (kwh_tmp >= 0) {
       buf_printf(b, "({ sp_bool _f = 0; sp_RbVal _v = sp_poly_hash_get_pair_val(_t%d, "
                     "sp_box_sym(sp_sym_intern(\"%s\")), &_f); _f ? ", kwh_tmp, kn);
       if (kt == TY_POLY || kt == TY_UNKNOWN) buf_puts(b, "_v");
+      else if (ko) buf_printf(b, "%s(_v)", oint_unbox(kt));
       else emit_unbox_text(c, kt, "_v", b);
       buf_puts(b, " : ");
-      if (dv >= 0) { bi_block_side(bi); emit_block_arg_coerced(c, dv, kt, b); bi_method_side(bi); }
-      else buf_puts(b, kt == TY_RANGE ? "(sp_Range){0}" : default_value_from_compiler(c, kt));
+      if (dv >= 0) { bi_block_side(bi); emit_block_arg_coerced_lv(c, dv, kl, kt, b); bi_method_side(bi); }
+      else buf_puts(b, ko ? oint_nil(kt) : kt == TY_RANGE ? "(sp_Range){0}" : default_value_from_compiler(c, kt));
       buf_puts(b, "; })");
     }
-    else if (vn >= 0) emit_block_arg_coerced(c, vn, kt, b);
-    else if (dv >= 0) { bi_block_side(bi); emit_block_arg_coerced(c, dv, kt, b); bi_method_side(bi); }
-    else buf_puts(b, kt == TY_RANGE ? "(sp_Range){0}" : default_value_from_compiler(c, kt));
+    else if (vn >= 0) emit_block_arg_coerced_lv(c, vn, kl, kt, b);
+    else if (dv >= 0) { bi_block_side(bi); emit_block_arg_coerced_lv(c, dv, kl, kt, b); bi_method_side(bi); }
+    else buf_puts(b, ko ? oint_nil(kt) : kt == TY_RANGE ? "(sp_Range){0}" : default_value_from_compiler(c, kt));
     buf_puts(b, as_expr ? "; " : ";\n");
   }
   /* `**kw` keyword-rest: the remaining pairs of the trailing yielded kwargs
@@ -2317,14 +2320,20 @@ static void emit_block_binds_gathered(Compiler *c, int blk, int t, TyKind at, in
     char acc[96];
     if (at == TY_POLY_ARRAY) snprintf(acc, sizeof acc, "sp_PolyArray_get(_t%d, _t%d)", t, te);
     else snprintf(acc, sizeof acc, "sp_%sArray_get(_t%d, _t%d)", array_kind(at) ? array_kind(at) : "Int", t, te);
-    if (qt == TY_POLY && et != TY_POLY && et != TY_UNKNOWN) {
+    /* a post that holds its nil takes the element with it, nil past the end */
+    int qo = ql && oint_kind(qt) && slot_is_oint(ql);
+    if (qo && at == TY_POLY_ARRAY) buf_printf(b, "%s(%s)", oint_unbox(qt), acc);
+    else if (qo && array_kind(at) && oint_kind(et))
+      buf_printf(b, "sp_%sArray_oget(_t%d, _t%d)", array_kind(at), t, te);
+    else if (qo) buf_printf(b, "%s(%s)", oint_of(qt), acc);
+    else if (qt == TY_POLY && et != TY_POLY && et != TY_UNKNOWN) {
       Buf bx; memset(&bx, 0, sizeof bx); emit_boxed_text(c, et, acc, &bx);
       buf_puts(b, bx.p ? bx.p : acc); free(bx.p);
     }
     else if (et == TY_POLY && qt != TY_POLY && qt != TY_UNKNOWN)
       emit_unbox_text(c, qt, acc, b);
     else buf_puts(b, acc);
-    buf_printf(b, " : %s); })", qdflt);
+    buf_printf(b, " : %s); })", qo ? oint_nil(qt) : qdflt);
     buf_puts(b, as_expr ? "; " : ";\n");
   }
   emit_block_binds_close(c, blk, ykw, bsc, rest_tmp, rest_lv, b, indent, as_expr, bi, al);
@@ -2803,8 +2812,8 @@ void emit_block_binds(Compiler *c, int blk, const int *yargs, int yc,
       /* a post that is the shared handle takes a handle yielded to it
          itself (yield_splice_handles), as a required one does */
       if (idx < yc && repr_of_slot(c, ql).handle && emit_handle_var_ref(c, yargs[idx], b)) {}
-      else if (idx < yc) emit_block_arg_coerced(c, yargs[idx], qt, b);
-      else buf_puts(b, qdflt);
+      else if (idx < yc) emit_block_arg_coerced_lv(c, yargs[idx], ql, qt, b);
+      else buf_puts(b, ql && oint_kind(qt) && slot_is_oint(ql) ? oint_nil(qt) : qdflt);
       buf_puts(b, as_expr ? "; " : ";\n");
     }
   }
@@ -3806,6 +3815,17 @@ void emit_iter_param_assign(Compiler *c, int block, const char *p0_orig,
     emit_boxed_text(c, src_type, src_expr, &bx);
     buf_printf(b, "lv_%s = %s;\n", p0_ren, bx.p ? bx.p : src_expr);
     free(bx.p);
+  }
+  /* a param that holds its nil beside the value takes the source with it:
+     an element read through `_oget`, a box through its oint unbox, a
+     plain value lifted */
+  else if (oint_kind(pt) && slot_is_oint(lv)) {
+    const char *g = strstr(src_expr, "Array_get(");
+    if (src_type == TY_NIL) buf_printf(b, "lv_%s = %s;\n", p0_ren, oint_nil(pt));
+    else if (src_type == TY_POLY) buf_printf(b, "lv_%s = %s(%s);\n", p0_ren, oint_unbox(pt), src_expr);
+    else if (g && !strncmp(src_expr, "sp_", 3) && !strstr(src_expr, "PolyArray_get("))
+      buf_printf(b, "lv_%s = %.*sArray_oget(%s;\n", p0_ren, (int)(g - src_expr), src_expr, g + 10);
+    else buf_printf(b, "lv_%s = %s(%s);\n", p0_ren, oint_of(pt), src_expr);
   }
   else {
     buf_printf(b, "lv_%s = %s;\n", p0_ren, src_expr);
@@ -5385,7 +5405,9 @@ static int iter_range_upto_arms(Compiler *c, int id, Buf *b, int indent, const N
        walked up from INTPTR_MIN, whose first value read back as nil */
     emit_indent(b, indent);
     buf_printf(b, "if (_t%d.nobeg && _t%d > 0) sp_range_nil_begin_raise();\n", t, ts);
-    if (clv && clv->type == TY_POLY) {
+    /* a param boxed, or holding its nil beside the value: a plain counter
+       drives the walk and the param is rebound from it */
+    if (clv && (clv->type == TY_POLY || (clv->type == TY_INT && slot_is_oint(clv)))) {
       int tc = ++g_tmp;
       emit_indent(b, indent);
       { char v[32], f[40], s[32], l[32];
@@ -5393,7 +5415,7 @@ static int iter_range_upto_arms(Compiler *c, int id, Buf *b, int indent, const N
         snprintf(s, sizeof s, "_t%d", ts); snprintf(l, sizeof l, "_t%d", te);
         emit_range_walk_head(b, indent, v, 1, f, s, l); }
       emit_indent(b, indent + 1);
-      buf_printf(b, "lv_%s = sp_box_int(_t%d);\n", p0, tc);
+      buf_printf(b, "lv_%s = %s(_t%d);\n", p0, clv->type == TY_POLY ? "sp_box_int" : "sp_oint_of", tc);
       emit_loop_body(c, body, b, indent + 1);
       emit_indent(b, indent); buf_puts(b, "}\n");
       return 1;

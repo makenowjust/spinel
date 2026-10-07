@@ -5531,6 +5531,9 @@ static int emit_poly_kw_param(Compiler *c, Scope *ms, int a, const PolyKw *kw,
       if (oint_kind(kpt) && !(kpv && slot_is_oint(kpv))) emit_unbox_text(c, kpt, tn, pa);
       else emit_unbox_nilable_text(c, kpt, tn, pa);
     }
+    /* a plain number into a keyword slot that holds its nil: lifted */
+    else if (oint_kind(kpt) && kpv && slot_is_oint(kpv) && at == kpt) buf_printf(pa, "%s(%s)", oint_of(kpt), tn);
+    else if (oint_kind(kpt) && kpv && slot_is_oint(kpv) && at == TY_NIL) buf_puts(pa, oint_nil(kpt));
     else { emit_obj_upcast_prefix(c, kpt, at, pa); buf_puts(pa, tn); }
   }
   else emit_arg_or_default(c, ms, a, -1, pa);
@@ -6428,8 +6431,13 @@ static int emit_poly_builtin_default_at(Compiler *c, int id, int recv, const cha
   volatile int ok = 1;
   EmitUnitState *sv_state = emit_state_snapshot();
   g_pre = pb; g_unsup_probe = 1;
+  /* the re-entry reads the node under the pin above: an infer_type it
+     asks must not record its unpinned (poly) answer over the pin, or the
+     emitter answers boxed and the arm boxes it again */
+  int sv_pin = an_pin_node(id);
   if (setjmp(g_unsup_recover) == 0) emit_expr(c, id, nb);
   else ok = 0;
+  an_pin_node(sv_pin);
   emit_state_release(sv_state, !ok);
   memcpy(g_unsup_recover, sv_jb, sizeof(jmp_buf));
   g_conv_hold = sv_hold; g_open_defaults = sv_open_defaults;
@@ -6439,7 +6447,9 @@ static int emit_poly_builtin_default_at(Compiler *c, int id, int recv, const cha
   view_unbind(slot);
   Buf ib; memset(&ib, 0, sizeof ib);
   if (ok && nb->p) {
-    if (ret == TY_POLY && bt != TY_POLY) emit_boxed_text(c, bt, nb->p, &ib);
+    /* a raise token is no value to box: the test below reads it bare */
+    int is_raise = strncmp(nb->p, "sp_raise_", 9) == 0;
+    if (ret == TY_POLY && bt != TY_POLY && !is_raise) emit_boxed_text(c, bt, nb->p, &ib);
     else buf_puts(&ib, nb->p);
   }
   free(nb->p); free(nb);
@@ -6858,6 +6868,9 @@ static void emit_poly_temp_as(Compiler *c, TyKind pt, const LocalVar *pv, int tm
     if (oint_kind(pt) && !(pv && slot_is_oint(pv))) emit_unbox_text(c, pt, tn, pa);
     else emit_unbox_nilable_text(c, pt, tn, pa);
   }
+  /* a plain number into a parameter slot that holds its nil: lifted */
+  else if (oint_kind(pt) && pv && slot_is_oint(pv) && at == pt) buf_printf(pa, "%s(%s)", oint_of(pt), tn);
+  else if (oint_kind(pt) && pv && slot_is_oint(pv) && at == TY_NIL) buf_puts(pa, oint_nil(pt));
   /* a subclass argument into an ancestor-typed parameter: layout-compatible,
      but C wants it spelled (#3418) */
   else { emit_obj_upcast_prefix(c, pt, at, pa); buf_puts(pa, tn); }

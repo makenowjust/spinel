@@ -5128,6 +5128,14 @@ int node_is_oint(Compiler *c, int node) {
   case NK_ClassVariableReadNode:
   case NK_GlobalVariableReadNode:
     return nullable_int_value(c, node);
+  case NK_LocalVariableAndWriteNode: {
+    /* `x &&= v` answers the slot: its oint where the slot holds its nil
+       (the untaken arm answers the nil the slot held) */
+    const char *ln = nt_str(nt, node, "name");
+    Scope *s = ln ? comp_scope_of(c, node) : NULL;
+    LocalVar *lv = s ? scope_local(s, ln) : NULL;
+    return lv && slot_is_oint(lv);
+  }
   case NK_InstanceVariableWriteNode:
     /* `@x = v` as an expression answers the slot it wrote: its oint where
        the field carries a nil bit (or the static is an oint); the `||=` /
@@ -5210,9 +5218,10 @@ int node_is_oint(Compiler *c, int node) {
     if (r < 0) { Scope *ies = comp_scope_of(c, node); if (ies && ies->class_id >= 0 && !ies->is_cmethod) iert = ty_object(ies->class_id); }
     /* over a boxed receiver the splice runs per class, and a receiver with no
        such ivar (nil, a builtin, Object.new) reads it nil: an Integer / Float
-       tail can be nil */
+       tail can be nil -- so too over a typed receiver that is no object of
+       the program's (nil, a number, a String) */
     if ((sp_streq(nm, "instance_eval") || sp_streq(nm, "instance_exec")) && blk >= 0 && r >= 0 &&
-        rt == TY_POLY && nt_kind(nt, blk) == NK_BlockNode) {
+        (rt == TY_POLY || (rt != TY_UNKNOWN && !ty_is_object(rt))) && nt_kind(nt, blk) == NK_BlockNode) {
       int bb = nt_ref(nt, blk, "body");
       int bn = 0; const int *bs = bb >= 0 ? nt_arr(nt, bb, "body", &bn) : NULL;
       return bn > 0 && oint_kind(comp_ntype(c, bs[bn - 1]));
@@ -5244,6 +5253,9 @@ int node_is_oint(Compiler *c, int node) {
       int rci = comp_class_index(c, nt_str(nt, r, "name"));
       if (rci >= 0) mi = comp_cmethod_in_chain(c, rci, nm, NULL);
     }
+    /* a method whose return widened past the call's (a yielding method
+       answering its block, typed per call site): the call's own analysis */
+    if (mi >= 0 && (c->scopes[mi].ret == TY_POLY || c->scopes[mi].ret == TY_UNKNOWN)) return nullable_int_value(c, node);
     if (mi >= 0) return method_ret_is_oint(&c->scopes[mi]);
     /* `<=>` answers nil for an incomparable operand: the analysis's answer
        where both sides are of one comparable kind (numbers, Strings,
@@ -5418,7 +5430,8 @@ int node_is_oint(Compiler *c, int node) {
     /* an element read that can miss, a fold or a search over a container
        that can hold nil: the analysis's answer, for a container receiver */
     if (r >= 0 && (ty_is_array(rt) || ty_is_hash(rt) || rt == TY_RANGE) &&
-        (sp_streq(nm, "[]") || sp_streq(nm, "at") || sp_streq(nm, "fetch") || sp_streq(nm, "dig") ||
+        (sp_streq(nm, "[]") || (sp_streq(nm, "slice") && an2 == 1) || sp_streq(nm, "at") ||
+         sp_streq(nm, "fetch") || sp_streq(nm, "dig") ||
          sp_streq(nm, "first") || sp_streq(nm, "last") || sp_streq(nm, "min") || sp_streq(nm, "max") ||
          sp_streq(nm, "sum") || sp_streq(nm, "sample") || sp_streq(nm, "find_index") ||
          is_find_alias(nm) || is_reduce_alias(nm)))

@@ -1413,6 +1413,9 @@ static int yvt_callee_index(Compiler *c, int cid) {
   int rmi = -1;
   if (crecv < 0) {
     rmi = comp_cbody_call_mi(c, cid, cn);
+    /* resolved as emission resolves it: a class method's own chain before
+       a top-level def of the same name */
+    if (rmi < 0 && cn) rmi = comp_self_call_mi(c, cid, cn);
     if (rmi < 0) rmi = comp_method_index(c, cn);
     if (rmi < 0) {
       Scope *cs = comp_scope_of(c, cid);

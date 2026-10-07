@@ -2029,9 +2029,9 @@ int emit_slice_when_chunk_inspect_expr(Compiler *c, int id, Buf *b) {
     emit_indent(g_pre, g_indent);
     buf_printf(g_pre, "for (sp_int _t%d = 0; _t%d < sp_IntArray_length(_t%d); _t%d++) {\n", ti, ti, ta, ti);
     emit_indent(g_pre, g_indent + 1);
-    buf_printf(g_pre, "lv_%s = sp_IntArray_get(_t%d, _t%d);\n", p0, ta, ti);
+    buf_printf(g_pre, "lv_%s = sp_IntArray_%s(_t%d, _t%d);\n", p0, bp_getter(c, block, BP0(c, block), "Int"), ta, ti);
     emit_indent(g_pre, g_indent + 1);
-    buf_printf(g_pre, "sp_IntArray_push_nilable(_t%d, lv_%s);\n", tcur, p0);
+    buf_printf(g_pre, "sp_IntArray_push_o(_t%d, sp_IntArray_oget(_t%d, _t%d));\n", tcur, ta, ti);   /* the element with its nil */
     emit_indent(g_pre, g_indent + 1);
     buf_printf(g_pre, "if (_t%d + 1 < sp_IntArray_length(_t%d)) {\n", ti, ta);
     emit_indent(g_pre, g_indent + 2);
@@ -2084,7 +2084,7 @@ int emit_slice_when_chunk_inspect_expr(Compiler *c, int id, Buf *b) {
   emit_indent(g_pre, g_indent);
   buf_printf(g_pre, "for (sp_int _t%d = 0; _t%d < sp_IntArray_length(_t%d); _t%d++) {\n", ti, ti, ta, ti);
   emit_indent(g_pre, g_indent + 1);
-  buf_printf(g_pre, "lv_%s = sp_IntArray_get(_t%d, _t%d);\n", p0, ta, ti);
+  buf_printf(g_pre, "lv_%s = sp_IntArray_%s(_t%d, _t%d);\n", p0, bp_getter(c, block, BP0(c, block), "Int"), ta, ti);
   /* emit key expression */
   Scope *bsc = comp_scope_of(c, block);
   LocalVar *lv0 = bsc ? scope_local(bsc, p0n) : NULL;
@@ -2108,7 +2108,7 @@ int emit_slice_when_chunk_inspect_expr(Compiler *c, int id, Buf *b) {
   buf_printf(g_pre, "_t%d = _tkey_%d;\n", tpk, ta);
   emit_indent(g_pre, g_indent + 1); buf_puts(g_pre, "}\n");
   emit_indent(g_pre, g_indent + 1);
-  buf_printf(g_pre, "sp_IntArray_push_nilable(_t%d, lv_%s);\n", tcur, p0);
+  buf_printf(g_pre, "sp_IntArray_push_o(_t%d, sp_IntArray_oget(_t%d, _t%d));\n", tcur, ta, ti);   /* the element with its nil */
   emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n");
   /* build inspect string */
   emit_indent(g_pre, g_indent);
@@ -2302,7 +2302,7 @@ int emit_chunk_first_class_expr(Compiler *c, int id, Buf *b) {
   emit_indent(g_pre, g_indent);
   buf_printf(g_pre, "for (sp_int _t%d = 0; _t%d < sp_IntArray_length(_t%d); _t%d++) {\n", ti, ti, ta, ti);
   emit_indent(g_pre, g_indent + 1);
-  buf_printf(g_pre, "lv_%s = sp_IntArray_get(_t%d, _t%d);\n", p0, ta, ti);
+  buf_printf(g_pre, "lv_%s = sp_IntArray_%s(_t%d, _t%d);\n", p0, bp_getter(c, block, BP0(c, block), "Int"), ta, ti);
   Scope *bsc = comp_scope_of(c, block);
   LocalVar *lv0 = bsc ? scope_local(bsc, p0n) : NULL;
   TyKind pt0 = lv0 ? lv0->type : TY_UNKNOWN;
@@ -2331,7 +2331,7 @@ int emit_chunk_first_class_expr(Compiler *c, int id, Buf *b) {
   buf_printf(g_pre, "_t%d = _tkey_%d; _t%d = 1;\n", tpk, ta, thas);
   emit_indent(g_pre, g_indent + 1); buf_puts(g_pre, "}\n");
   emit_indent(g_pre, g_indent + 1);
-  buf_printf(g_pre, "sp_IntArray_push_nilable(_t%d, lv_%s);\n", tcur, p0);
+  buf_printf(g_pre, "sp_IntArray_push_o(_t%d, sp_IntArray_oget(_t%d, _t%d));\n", tcur, ta, ti);   /* the element with its nil */
   emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n");
   buf_printf(b, "_t%d", tout);
   return 1;
@@ -2439,9 +2439,9 @@ int emit_chunk_while_expr(Compiler *c, int id, Buf *b) {
   emit_indent(g_pre, g_indent);
   buf_printf(g_pre, "for (sp_int _t%d = 0; _t%d < sp_IntArray_length(_t%d); _t%d++) {\n", ti, ti, ta, ti);
   emit_indent(g_pre, g_indent + 1);
-  buf_printf(g_pre, "lv_%s = sp_IntArray_get(_t%d, _t%d);\n", p0, ta, ti);
+  buf_printf(g_pre, "lv_%s = sp_IntArray_%s(_t%d, _t%d);\n", p0, bp_getter(c, block, BP0(c, block), "Int"), ta, ti);
   emit_indent(g_pre, g_indent + 1);
-  buf_printf(g_pre, "sp_IntArray_push_nilable(_t%d, lv_%s);\n", tcur, p0);
+  buf_printf(g_pre, "sp_IntArray_push_o(_t%d, sp_IntArray_oget(_t%d, _t%d));\n", tcur, ta, ti);   /* the element with its nil */
   emit_indent(g_pre, g_indent + 1);
   buf_printf(g_pre, "if (_t%d + 1 < sp_IntArray_length(_t%d)) {\n", ti, ta);
   emit_indent(g_pre, g_indent + 2);
@@ -6567,6 +6567,23 @@ int ran_first_handle(int node) {
 static void emit_arg_or_default_fill(Compiler *c, Scope *m, int idx, int provided, Buf *out) {
   LocalVar *p = scope_local(m, m->pnames[idx]);
   TyKind pt = p ? p->type : TY_INT;
+  /* The boxed receiver of a builtin written in Ruby (`v.digits` is
+     `__int_digits(v, 10)`; promote boxes it): a nil one raises CRuby's
+     NoMethodError naming the method ahead of the body, whose first
+     operation would name itself. A specialization's `__N` suffix is no
+     part of the Ruby name. */
+  if (provided >= 0 && idx == 0 && pt == TY_POLY && m->pnames[0] && sp_streq(m->pnames[0], "__self") &&
+      m->name && (!strncmp(m->name, "__int_", 6) || !strncmp(m->name, "__flt_", 6) || !strncmp(m->name, "__cmp_", 6)) &&
+      repr_of(c, provided).kind == RK_BOXED) {
+    const char *rn = m->name + 6;
+    size_t rl = strlen(rn);
+    while (rl > 0 && rn[rl - 1] >= '0' && rn[rl - 1] <= '9') rl--;
+    if (rl >= 2 && rl < strlen(rn) && rn[rl - 1] == '_' && rn[rl - 2] == '_') rl -= 2; else rl = strlen(rn);
+    int tn = ++g_tmp;
+    buf_printf(out, "({ sp_RbVal _t%d = ", tn); emit_expr(c, provided, out);
+    buf_printf(out, "; if (_t%d.tag == SP_TAG_NIL) sp_nil_recv(\"%.*s\"); _t%d; })", tn, (int)rl, rn, tn);
+    return;
+  }
   /* An omitted `*rest` is an empty Array, not a NULL the body reads as nil:
      a dispatch arm that calls with no arguments (the boxed `call` switch)
      fills every parameter through here. */
@@ -6848,7 +6865,21 @@ static void emit_arg_or_default_fill(Compiler *c, Scope *m, int idx, int provide
         unsupported_feature(c, provided, msg);
       }
     }
-    if (pt == TY_POLY) emit_boxed(c, provided, out);   /* box into a poly param */
+    /* the receiver of a builtin written in Ruby, boxed (a promote-widened
+       slot): nil has none of these methods, CRuby's NoMethodError naming
+       the method */
+    if (pt == TY_POLY && idx == 0 && m->pnames[0] && sp_streq(m->pnames[0], "__self") && m->name &&
+        (!strncmp(m->name, "__int_", 6) || !strncmp(m->name, "__flt_", 6) || !strncmp(m->name, "__cmp_", 6)) &&
+        (comp_ntype(c, provided) == TY_POLY || node_may_be_nil(c, provided))) {
+      const char *rn = m->name + 6;
+      size_t rl = strlen(rn);
+      while (rl > 0 && rn[rl - 1] >= '0' && rn[rl - 1] <= '9') rl--;
+      if (rl >= 2 && rl < strlen(rn) && rn[rl - 1] == '_' && rn[rl - 2] == '_') rl -= 2; else rl = strlen(rn);
+      int tn = ++g_tmp;
+      buf_printf(out, "({ sp_RbVal _t%d = ", tn); emit_boxed(c, provided, out);
+      buf_printf(out, "; if (_t%d.tag == SP_TAG_NIL) sp_raise_poly_nomethod(\"%.*s\", _t%d); _t%d; })", tn, (int)rl, rn, tn, tn);
+    }
+    else if (pt == TY_POLY) emit_boxed(c, provided, out);   /* box into a poly param */
     else {
       Repr ar = repr_of(c, provided);
       TyKind at = ar.as_ty;
@@ -7026,21 +7057,26 @@ static void emit_arg_or_default_fill(Compiler *c, Scope *m, int idx, int provide
            takes the argument's oint form (nil, boxed, plain, a raise token);
            a nil into a plain slot raises the operand TypeError (a plain emit
            rendered nil as 0 and the callee saw an integer, #2438) */
+        int self_rb = idx == 0 && m->pnames[0] && sp_streq(m->pnames[0], "__self") && m->name &&
+                      (!strncmp(m->name, "__int_", 6) || !strncmp(m->name, "__flt_", 6) || !strncmp(m->name, "__cmp_", 6));
+        /* the Ruby name of a builtin written in Ruby (`v.digits` is
+           `__int_digits(v, 10)`; a specialization's `__N` suffix is no part of it) */
+        const char *rn = self_rb ? m->name + 6 : "?";
+        size_t rl = strlen(rn);
+        if (self_rb) {
+          while (rl > 0 && rn[rl - 1] >= '0' && rn[rl - 1] <= '9') rl--;
+          if (rl >= 2 && rl < strlen(rn) && rn[rl - 1] == '_' && rn[rl - 2] == '_') rl -= 2; else rl = strlen(rn);
+        }
         if (oint_kind(pt) && idx == 0 && m->pnames[0] && sp_streq(m->pnames[0], "__self")) {
-          /* the receiver of a builtin written in Ruby (`v.digits` is
-             `__int_digits(v, 10)`): a nil receiver is CRuby's NoMethodError
-             naming the method, raised here where the oint is unwrapped */
+          /* its receiver: a nil one is CRuby's NoMethodError naming the
+             method, raised here where the oint is unwrapped */
           if (node_may_be_nil(c, provided)) {
-            const char *rn = m->name ? m->name : "?";
-            if (!strncmp(rn, "__int_", 6) || !strncmp(rn, "__flt_", 6) || !strncmp(rn, "__cmp_", 6)) rn += 6;
-            /* a specialization's `__N` suffix is no part of the Ruby name */
-            size_t rl = strlen(rn);
-            while (rl > 0 && rn[rl - 1] >= '0' && rn[rl - 1] <= '9') rl--;
-            if (rl >= 2 && rl < strlen(rn) && rn[rl - 1] == '_' && rn[rl - 2] == '_') rl -= 2; else rl = strlen(rn);
+            if (!self_rb) { rn = m->name ? m->name : "?"; rl = strlen(rn); }
             buf_printf(out, "%s(", oint_val(pt)); emit_oint_expr(c, provided, pt, out); buf_printf(out, ", \"%.*s\")", (int)rl, rn);
           }
           else emit_expr(c, provided, out);
         }
+
         else if (oint_kind(pt) && slot_is_oint(p))
           emit_oint_expr(c, provided, pt, out);
         else if (oint_kind(pt) && node_may_be_nil(c, provided)) {

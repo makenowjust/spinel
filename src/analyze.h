@@ -165,6 +165,8 @@ TyKind infer_type(Compiler *c, int id);
    builtin_only, kept for the inference asking). So asking cannot change
    what codegen reads next. They nest. */
 void an_pure_read_begin(void);
+/* pin one node against infer_type recording its answer; returns the previous pin */
+int an_pin_node(int id);
 void an_pure_read_end(void);
 
 /* String#lines' argument shapes besides none: (sep), (chomp: ...) and
