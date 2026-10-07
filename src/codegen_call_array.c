@@ -1921,13 +1921,21 @@ int emit_call_store_value_arms(Compiler *c, Buf *b, const NodeTable *nt, const c
       const char *k = rt == TY_POLY_ARRAY ? "Poly" : array_kind(rt);
       if (k) {
         int tv = ++g_tmp;
+        const char *vsfx = nil_store_sfx(c, k, argv[1]);
+        /* a number that can be nil travels as its oint into the _nilable store */
+        int voint = rt != TY_POLY_ARRAY && oint_kind(vt) && vsfx[0];
         buf_puts(b, "({ ");
-        emit_ctype(c, vt != TY_UNKNOWN ? vt : TY_POLY, b);
+        if (voint) buf_puts(b, oint_ctype(vt)); else emit_ctype(c, vt != TY_UNKNOWN ? vt : TY_POLY, b);
         buf_printf(b, " _t%d = ", tv);
         if (rt == TY_POLY_ARRAY && vt != TY_POLY) emit_boxed(c, argv[1], b);
+        else if (voint) emit_oint_expr(c, argv[1], vt, b);
         else emit_expr(c, argv[1], b);
-        buf_printf(b, "; sp_%sArray_set%s(", k, nil_store_sfx(c, k, argv[1])); emit_expr(c, recv, b); buf_puts(b, ", ");
-        emit_expr(c, argv[0], b); buf_printf(b, ", _t%d); _t%d; })", tv, tv);
+        buf_printf(b, "; sp_%sArray_set%s(", k, vsfx); emit_expr(c, recv, b); buf_puts(b, ", ");
+        emit_expr(c, argv[0], b); buf_printf(b, ", _t%d); ", tv);
+        /* the store answers the value; this arm has no node to ask for the
+           oint form, so a nil here raises as a plain consumer's would */
+        if (voint) buf_printf(b, "%s(_t%d); })", oint_arg(vt), tv);
+        else buf_printf(b, "_t%d; })", tv);
         return 1;
       }
     }
@@ -2270,9 +2278,15 @@ int emit_arysub_call(Compiler *c, int id, Buf *b) {
   if (ka >= 0 && comp_ty_ary_root(c, comp_ntype(c, ka)) >= 0) { emit_expr(c, ka, b); return 1; }
   int recv = nt_ref(c->nt, id, "receiver");
   TyKind rt = recv >= 0 ? comp_ntype(c, recv) : TY_UNKNOWN;
+  /* the view below retypes the call as the Array's own: a name that answers
+     its oint there (last, pop, ...) is plain to the consumer outside the
+     view, which sees the subclass receiver, so the answer is unwrapped */
+  int outer_o = node_is_oint(c, id);
   ArysubView v;
   if (!arysub_view_open(c, id, &v)) return 0;
+  int inner_o = node_is_oint(c, id) && oint_kind(comp_ntype(c, id)) && !outer_o;
   const char *cn = recv >= 0 && ty_is_object(rt) ? c->classes[ty_object_class(rt)].c_name : NULL;
+  if (inner_o) buf_printf(b, "%s(", oint_arg(comp_ntype(c, id)));
   if (v.vi >= 0 && v.nat == TY_POLY) {
     int t = ++g_tmp;
     buf_printf(b, "({ sp_RbVal _t%d = ", t);
@@ -2289,6 +2303,7 @@ int emit_arysub_call(Compiler *c, int id, Buf *b) {
     emit_call(c, id, b);
     if (v.vi >= 0) buf_puts(b, "))");
   }
+  if (inner_o) buf_puts(b, ")");
   arysub_view_close(c, &v);
   return 1;
 }

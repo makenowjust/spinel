@@ -1462,9 +1462,12 @@ static int emit_kind_array_iter_call(Compiler *c, int id, Buf *b, const NodeTabl
       int sv = g_indent; g_indent++;
       Buf vb; memset(&vb, 0, sizeof vb); emit_iter_step_tail(c, &st, &vb); g_indent = sv;
       emit_indent(g_pre, g_indent + 1);
-      buf_printf(g_pre, "sp_%sArray_set%s(_t%d, _t%d, ", k, nil_store_sfx(c, k, bb[bn - 1]), trecv, ti);
-      emit_typed_sink_text(c, bb[bn - 1], et, vb.p ? vb.p : "0", g_pre);
-      buf_puts(g_pre, ");\n");
+      { const char *msfx = nil_store_sfx(c, k, bb[bn - 1]);
+        buf_printf(g_pre, "sp_%sArray_set%s(_t%d, _t%d, ", k, msfx, trecv, ti);
+        /* the _nilable store takes the block value with its nil */
+        if (msfx[0]) emit_oint_expr(c, bb[bn - 1], et, g_pre);
+        else emit_typed_sink_text(c, bb[bn - 1], et, vb.p ? vb.p : "0", g_pre);
+        buf_puts(g_pre, ");\n"); }
       free(vb.p);
       emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n");
       if (mlv) mlv->type = msaved;
@@ -7196,7 +7199,21 @@ static int str_arms_pattern(Compiler *c, int id, Buf *b, const NodeTable *nt, co
 /* An Integer receiver's clamp, digits, allbits? / anybits? / nobits?,
    ceildiv, pow, coerce, eql? and equal? (emit_scalar_recv_arms's Integer
    chain; answers 1 when a branch was taken) */
-static int int_arms_clamp_pow(Compiler *c, Buf *b, const NodeTable *nt, const char *name, int recv, int argc, const int *argv, TyKind a0, const char *r) {
+/* --int-overflow=promote typed the call poly: its value can leave the word
+   (2**63 - 1 + 1, |-2**63|, a power), so the boxed helper answers it, ahead
+   of the rows that compute in sp_int. Answers 1 when it emitted. */
+static int int_arms_promote(Compiler *c, int id, Buf *b, const char *name, int argc, const int *argv, const char *r) {
+  if (!g_promote_mode || repr_of(c, id).kind != RK_BOXED) return 0;
+  if (argc == 0 && (sp_streq(name, "succ") || sp_streq(name, "next"))) { buf_printf(b, "sp_poly_succ_m(sp_box_int(%s), 0)", r); return 1; }
+  if (argc == 0 && sp_streq(name, "pred")) { buf_printf(b, "sp_poly_int_pred(sp_box_int(%s))", r); return 1; }
+  if (argc == 0 && (sp_streq(name, "abs") || sp_streq(name, "magnitude"))) { buf_printf(b, "sp_poly_abs(sp_box_int(%s))", r); return 1; }
+  if (sp_streq(name, "pow") && argc == 1 && (comp_ntype(c, argv[0]) == TY_INT || comp_ntype(c, argv[0]) == TY_POLY)) {
+    buf_printf(b, "sp_poly_int_pow(sp_box_int(%s), ", r); emit_boxed(c, argv[0], b); buf_puts(b, ")"); return 1;
+  }
+  return 0;
+}
+
+static int int_arms_clamp_pow(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv, int argc, const int *argv, TyKind a0, const char *r) {
   /* a nil bound is an open side: clamp one-sided (or return the receiver),
      boxed so the chosen operand keeps its class (#2588) */
   if (sp_streq(name, "clamp") && argc == 2 &&
@@ -7557,6 +7574,11 @@ static int int_arms_round_divide(Compiler *c, int id, Buf *b, const NodeTable *n
                   " sp_PolyArray_push(_t%d, sp_box_float(_t%d)); _t%d; })",
                tq, tm, r, tb, tq, tm, o, o, o, tq, o, tm, o);
   }
+  /* promote typed the pair poly: the quotient can be the Bignum 2**63 */
+  else if (sp_streq(name, "divmod") && argc == 1 && repr_of(c, id).as_ty == TY_POLY_ARRAY &&
+           comp_ntype(c, argv[0]) == TY_INT) {
+    buf_printf(b, "sp_poly_divmod(sp_box_int(%s), ", r); emit_boxed(c, argv[0], b); buf_puts(b, ")");
+  }
   else if (sp_streq(name, "divmod") && argc == 1 &&
            comp_ntype(c, argv[0]) != TY_RATIONAL) {
     int tb = ++g_tmp, o = ++g_tmp;
@@ -7804,10 +7826,11 @@ static int emit_scalar_recv_arms(Compiler *c, int id, Buf *b, const NodeTable *n
   }
   else if (rt == TY_INT) {
     /* the arms that read only the receiver and the arguments: builtin-op
-       rows (builtin_ops.c) */
-    if (emit_builtin_op_text(c, id, recv, rt, name, r, b)) ;
+       rows (builtin_ops.c), behind the promote-mode answers that leave the word */
+    if (int_arms_promote(c, id, b, name, argc, argv, r)) ;
+    else if (emit_builtin_op_text(c, id, recv, rt, name, r, b)) ;
     else if (int_arms_round_divide(c, id, b, nt, name, argc, argv, r)) ;
-    else if (int_arms_clamp_pow(c, b, nt, name, recv, argc, argv, a0, r)) ;
+    else if (int_arms_clamp_pow(c, id, b, nt, name, recv, argc, argv, a0, r)) ;
     else handled = 0;
   }
   else { /* TY_FLOAT */

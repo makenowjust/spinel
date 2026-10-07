@@ -442,10 +442,16 @@ int emit_call_callable_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
     if (pass == 2) buf_printf(b, ") : _t%d->legacy_ret == SP_BM_RET_NIL ? ((", tr);
     if (pass == 1) buf_printf(b, "), sp_box_nil()) : sp_bm_box_ret(_t%d, ", tr);
     buf_printf(b, "_t%d->recv_bound ? ", tr);
+    /* a target that answers its nil beside the value is called through
+       that return type; the Method call's own consumer takes the plain
+       value (nil raises as a plain consumer's would) */
+    int oret = !bm_kinds && tm && method_ret_is_oint(tm);
     for (int arm = 0; arm < 2; arm++) {
       if (arm) buf_puts(b, " : ");
+      if (oret) buf_printf(b, "%s(", oint_arg(tret));
       buf_puts(b, "((");
       if (bm_kinds) buf_puts(b, pass == 0 ? "sp_RbVal" : pass == 2 ? "void" : "sp_int");
+      else if (oret) buf_puts(b, oint_ctype(tret));
       else emit_ctype(c, tret, b);
       buf_puts(b, " (*)(");
       const char *sct = bm_self_ctype(tm, shift);
@@ -467,6 +473,7 @@ int emit_call_callable_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
         buf_printf(b, "_t%d", atmp[k]);
       }
       buf_puts(b, ")");
+      if (oret) buf_puts(b, ")");
     }
     if (pass == 1) buf_puts(b, ")");
     }
