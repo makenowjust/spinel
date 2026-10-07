@@ -3646,8 +3646,9 @@ static int infer_range_lazy_call(Compiler *c, int id, const NodeTable *nt, const
       { *out = (sfloat || bfloat) ? TY_FLOAT_ARRAY : TY_INT_ARRAY; return 1; }
     }
     if (is_quantifier(name)) { *out = TY_BOOL; return 1; }
+    /* an endless one cannot materialize: walked as it is read, like step */
     if (sp_streq(name, "each") && nt_ref(nt, id, "block") < 0)
-      { *out = range_each_is_external(c, id) ? TY_ENUMERATOR : TY_INT_ARRAY; return 1; }
+      { *out = (range_each_is_external(c, id) || range_lit_endless(c, recv)) ? TY_ENUMERATOR : TY_INT_ARRAY; return 1; }
     if ((is_each_window(name)) &&
         argc == 1 && nt_ref(nt, id, "block") < 0) { *out = TY_ENUMERATOR; return 1; }
     if ((is_endpoint_query(name)) && argc == 1) { *out = TY_INT_ARRAY; return 1; }
