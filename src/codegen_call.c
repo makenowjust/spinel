@@ -22655,7 +22655,9 @@ int emit_method_tramp_fn(Compiler *c, Scope *tm, int shift, const char *fname,
         g_self = sv_self2; g_self_deref = sv_deref2; g_emitting_class_id = sv_cls2;
         g_line_map = sv_lm2;
       }
-      buf_puts(pb, "  "); emit_ctype(c, pt, pb);
+      buf_puts(pb, "  ");
+      /* a parameter that takes nil is declared as the oint it binds */
+      if (bm_param_nil_ok(pp, pt)) buf_puts(pb, oint_ctype(pt)); else emit_ctype(c, pt, pb);
       if (is_kw) {
         char kv[96];
         int ksym = comp_sym_intern(c, tm->pnames[k]);
@@ -22670,7 +22672,7 @@ int emit_method_tramp_fn(Compiler *c, Scope *tm, int shift, const char *fname,
           if (dpre.p) buf_puts(pb, dpre.p);
           buf_printf(pb, "_a%d = %s; }\n", j, dexpr.p ? dexpr.p : default_value_from_compiler(c, pt));
         }
-        else buf_printf(pb, "_a%d = %s; }\n", j, pt == TY_RANGE ? "(sp_Range){0}" : default_value_from_compiler(c, pt));
+        else buf_printf(pb, "_a%d = %s; }\n", j, bm_param_nil_ok(pp, pt) ? oint_nil(pt) : pt == TY_RANGE ? "(sp_Range){0}" : default_value_from_compiler(c, pt));
       }
       else {
         /* a post, read from the end, is there once the count is judged */
@@ -22694,7 +22696,7 @@ int emit_method_tramp_fn(Compiler *c, Scope *tm, int shift, const char *fname,
           if (dpre.p) buf_puts(pb, dpre.p);
           buf_printf(pb, "_a%d = ", j);
           if (hasdef) buf_puts(pb, dexpr.p ? dexpr.p : default_value_from_compiler(c, pt));
-          else buf_puts(pb, pt == TY_RANGE ? "(sp_Range){0}" : default_value_from_compiler(c, pt));
+          else buf_puts(pb, bm_param_nil_ok(pp, pt) ? oint_nil(pt) : pt == TY_RANGE ? "(sp_Range){0}" : default_value_from_compiler(c, pt));
           buf_puts(pb, "; }\n");
         }
       }
@@ -22710,7 +22712,8 @@ int emit_method_tramp_fn(Compiler *c, Scope *tm, int shift, const char *fname,
         buf_puts(pb, "\n");
       }
       if (tm->pnames[k] && g_nren < MAX_RENAME) {
-        buf_puts(pb, "  "); emit_ctype(c, pt, pb);
+        buf_puts(pb, "  ");
+        if (bm_param_nil_ok(pp, pt)) buf_puts(pb, oint_ctype(pt)); else emit_ctype(c, pt, pb);
         buf_printf(pb, " lv__a%d = _a%d;\n", j, j);
         snprintf(g_ren_from[g_nren], sizeof g_ren_from[0], "%s", tm->pnames[k]);
         snprintf(g_ren_to[g_nren], sizeof g_ren_to[0], "_a%d", j);
@@ -22771,15 +22774,18 @@ int emit_method_tramp_fn(Compiler *c, Scope *tm, int shift, const char *fname,
   }
   if (takes_blk) buf_puts(&args, np > shift ? ", _blk" : "_blk");
   Buf selfc = {0}, selfless = {0};
+  int ret_o = is_scalar_ret(tret) && oint_kind(tret) && method_ret_is_oint(tm);
   buf_puts(&selfc, "((");
-  if (is_scalar_ret(tret)) emit_ctype(c, tret, &selfc);
+  if (ret_o) buf_puts(&selfc, oint_ctype(tret));
+  else if (is_scalar_ret(tret)) emit_ctype(c, tret, &selfc);
   else buf_puts(&selfc, "void");
   { const char *sct = bm_self_ctype(tm, shift);
     buf_printf(&selfc, " (*)(%s", sct);
     for (int k = shift; k < np; k++) {
       buf_puts(&selfc, ", ");
       LocalVar *pp = scope_local(tm, tm->pnames[k]);
-      emit_ctype(c, pp ? pp->type : TY_INT, &selfc);
+      /* the target's own C parameter type: an oint slot included */
+      if (pp && pp->type != TY_UNKNOWN) emit_slot_ctype(c, pp, &selfc); else emit_ctype(c, pp ? pp->type : TY_INT, &selfc);
     }
     if (takes_blk) buf_puts(&selfc, ", sp_Proc *");
     buf_printf(&selfc, "))(uintptr_t)_m->fn)((%s)(uintptr_t)_m->self", sct); }
@@ -22787,7 +22793,8 @@ int emit_method_tramp_fn(Compiler *c, Scope *tm, int shift, const char *fname,
   buf_puts(&selfc, args.p ? args.p : "");
   buf_puts(&selfc, ")");
   buf_puts(&selfless, "((");
-  if (is_scalar_ret(tret)) emit_ctype(c, tret, &selfless);
+  if (ret_o) buf_puts(&selfless, oint_ctype(tret));
+  else if (is_scalar_ret(tret)) emit_ctype(c, tret, &selfless);
   else buf_puts(&selfless, "void");
   buf_puts(&selfless, " (*)(");
   /* an inherited class method reading its class runs on the one the
@@ -22800,7 +22807,8 @@ int emit_method_tramp_fn(Compiler *c, Scope *tm, int shift, const char *fname,
     for (int k = shift; k < np; k++) {
       if (k > shift) buf_puts(&selfless, ", ");
       LocalVar *pp = scope_local(tm, tm->pnames[k]);
-      emit_ctype(c, pp ? pp->type : TY_INT, &selfless);
+      /* the target's own C parameter type: an oint slot included */
+      if (pp && pp->type != TY_UNKNOWN) emit_slot_ctype(c, pp, &selfless); else emit_ctype(c, pp ? pp->type : TY_INT, &selfless);
     }
     if (takes_blk) buf_puts(&selfless, np > shift ? ", sp_Proc *" : "sp_Proc *");
   }
@@ -22818,10 +22826,10 @@ int emit_method_tramp_fn(Compiler *c, Scope *tm, int shift, const char *fname,
   free(args.p); free(selfc.p); free(selfless.p);
   if (is_scalar_ret(tret)) {
     buf_puts(pb, "  ");
-    emit_ctype(c, tret, pb);
+    if (ret_o) buf_puts(pb, oint_ctype(tret)); else emit_ctype(c, tret, pb);
     buf_printf(pb, " _r = %s;\n", cb.p ? cb.p : "");
     buf_puts(pb, "  _sp_proc_poly_ret = ");
-    emit_boxed_text(c, tret, "_r", pb);
+    if (ret_o) buf_printf(pb, "%s(_r)", oint_box(tret)); else emit_boxed_text(c, tret, "_r", pb);
     buf_puts(pb, ";\n");
   }
   else {

@@ -5158,7 +5158,12 @@ void emit_method(Compiler *c, Scope *s, Buf *b) {
     g_fn_pr_label = g_method_pr_label; g_fn_pr_var = g_method_pr_var;
   }
   const char *sv_rv2 = g_result_var; int sv_rp2 = g_result_poly;
-  if (pr_frame && !is_void) { g_result_var = "_prret"; g_result_poly = (s->ret == TY_POLY); }
+  TyKind sv_rty2 = g_result_ty; int sv_ro2 = g_result_oint;
+  /* the slot is the method's return: its oint where the method answers one */
+  if (pr_frame && !is_void) {
+    g_result_var = "_prret"; g_result_poly = (s->ret == TY_POLY);
+    g_result_ty = (TyKind)s->ret; g_result_oint = method_ret_is_oint(s);
+  }
 
   if (is_void) {
     emit_stmts(c, s->body, b, 1);
@@ -5166,7 +5171,7 @@ void emit_method(Compiler *c, Scope *s, Buf *b) {
   }
   else if (pr_frame) {
     emit_stmts_tail(c, s->body, b, 1);
-    g_result_var = sv_rv2; g_result_poly = sv_rp2;
+    g_result_var = sv_rv2; g_result_poly = sv_rp2; g_result_ty = sv_rty2; g_result_oint = sv_ro2;
     buf_puts(b, "    }\n  _pr_done: ;\n  sp_proc_ret_head = _h.prev;\n  return _prret;\n");
   }
   else {
@@ -5186,7 +5191,7 @@ void emit_method(Compiler *c, Scope *s, Buf *b) {
       buf_printf(b, "%s;\n", s->ret == TY_STRING ? "NULL" : default_value_from_compiler(c, s->ret));
     else buf_printf(b, "%s;\n", default_value_from_compiler(c, s->ret));
   }
-  g_result_var = sv_rv2; g_result_poly = sv_rp2;
+  g_result_var = sv_rv2; g_result_poly = sv_rp2; g_result_ty = sv_rty2; g_result_oint = sv_ro2;
   g_method_pr_label = NULL; g_method_pr_var = NULL;
   g_fn_pr_label = NULL; g_fn_pr_var = NULL; g_fn_ret_type = TY_UNKNOWN;
   g_self_deref = saved_deref;
