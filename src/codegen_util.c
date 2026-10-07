@@ -4824,3 +4824,304 @@ void emit_into_pre_line(Compiler *c, void (*fn)(Compiler *, int, Buf *), int nod
   if (val.p) buf_puts(pre, val.p);
   free(val.p); free(hoist.p);
 }
+
+/* ---- nil out of band: sp_oint / sp_ofloat (codegen_internal.h) ---- */
+
+int oint_kind(TyKind t) { return t == TY_INT || t == TY_FLOAT; }
+const char *oint_ctype(TyKind t) { return t == TY_FLOAT ? "sp_ofloat" : "sp_oint"; }
+const char *oint_nil(TyKind t)   { return t == TY_FLOAT ? "sp_ofloat_nil()" : "sp_oint_nil()"; }
+const char *oint_of(TyKind t)    { return t == TY_FLOAT ? "sp_ofloat_of" : "sp_oint_of"; }
+const char *oint_val(TyKind t)   { return t == TY_FLOAT ? "sp_ofloat_val" : "sp_oint_val"; }
+const char *oint_arg(TyKind t)   { return t == TY_FLOAT ? "sp_ofloat_arg" : "sp_oint_arg"; }
+const char *oint_box(TyKind t)   { return t == TY_FLOAT ? "sp_box_ofloat" : "sp_box_oint"; }
+const char *oint_unbox(TyKind t) { return t == TY_FLOAT ? "sp_unbox_ofloat" : "sp_unbox_oint"; }
+
+/* A local's slot holds its nil beside the value when the analysis says a
+   write can leave nil in it (nullable_int), when only its boxing has to
+   answer nil (box_nullable, a parameter bound from an unset ivar), when a
+   call passes a literal nil to the proc parameter (nil_passed), or when a
+   read can run before any write (or_written / maybe_unset: the slot starts
+   nil). A parameter is bound at entry, so the last two do not apply. */
+int slot_is_oint(const LocalVar *lv) {
+  if (!lv || !oint_kind(lv->type)) return 0;
+  if (lv->nullable_int || lv->box_nullable || lv->nil_passed) return 1;
+  return (lv->or_written || lv->maybe_unset) && !lv->is_param && !lv->is_block_param;
+}
+
+void emit_slot_ctype(Compiler *c, const LocalVar *lv, Buf *b) {
+  if (slot_is_oint(lv)) buf_puts(b, oint_ctype(lv->type));
+  else emit_ctype(c, lv->type, b);
+}
+
+/* An instance ivar carries its nil as a bit in the object's iv__nilbits
+   when a write can leave nil in it (ivar_nullable_int) or initialize does
+   not assign it (an unset ivar reads nil). The bit's index is the ivar's
+   own index, which a subclass shares with its parent (inherit_members keeps
+   the prefix), so the words sit at the same offset in every struct of a
+   hierarchy and hold the largest ivar count in it. */
+int ivar_has_nilbit(Compiler *c, int cid, int iv) {
+  if (cid < 0 || cid >= c->nclasses) return 0;
+  ClassInfo *ci = &c->classes[cid];
+  if (iv < 0 || iv >= ci->nivars || !oint_kind(ci->ivar_types[iv])) return 0;
+  if (ci->ivar_nullable_int && ci->ivar_nullable_int[iv]) return 1;
+  /* a Struct / Data member is assigned by the generated constructor */
+  if ((ci->is_struct || ci->is_data) && iv < ci->nmembers) return 0;
+  return !ivar_assigned_in_initialize(c, cid, ci->ivars[iv]);
+}
+int ivar_nilbit_index(Compiler *c, int cid, int iv) { (void)c; (void)cid; return iv; }
+static int class_root(Compiler *c, int cid) {
+  int hop = 0;
+  while (cid >= 0 && c->classes[cid].parent >= 0 && hop++ < 64) cid = c->classes[cid].parent;
+  return cid;
+}
+int class_nilbit_words(Compiler *c, int cid) {
+  static int *memo = NULL, memo_n = -1;
+  if (cid < 0 || cid >= c->nclasses) return 0;
+  if (memo_n != c->nclasses) {
+    free(memo); memo_n = c->nclasses;
+    memo = (int *)malloc(sizeof(int) * (size_t)(memo_n > 0 ? memo_n : 1));
+    if (!memo) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+    for (int i = 0; i < memo_n; i++) memo[i] = -1;
+  }
+  if (memo[cid] >= 0) return memo[cid];
+  int root = class_root(c, cid), maxn = 0;
+  for (int k = 0; k < c->nclasses; k++) {
+    if (class_root(c, k) != root) continue;
+    ClassInfo *ck = &c->classes[k];
+    for (int iv = 0; iv < ck->nivars; iv++)
+      if (ivar_has_nilbit(c, k, iv) && iv + 1 > maxn) maxn = iv + 1;
+  }
+  int words = (maxn + 63) / 64;
+  for (int k = 0; k < c->nclasses; k++)
+    if (class_root(c, k) == root) memo[k] = words;
+  return words;
+}
+void ivar_nilbit_test(Compiler *c, int cid, int iv, const char *obj, char *out, size_t cap) {
+  int k = ivar_nilbit_index(c, cid, iv);
+  snprintf(out, cap, "(%siv__nilbits[%d] & (1ULL << %d))", obj, k / 64, k % 64);
+}
+void ivar_nilbit_set(Compiler *c, int cid, int iv, const char *obj, char *out, size_t cap) {
+  int k = ivar_nilbit_index(c, cid, iv);
+  snprintf(out, cap, "%siv__nilbits[%d] |= (1ULL << %d)", obj, k / 64, k % 64);
+}
+void ivar_nilbit_clear(Compiler *c, int cid, int iv, const char *obj, char *out, size_t cap) {
+  int k = ivar_nilbit_index(c, cid, iv);
+  snprintf(out, cap, "%siv__nilbits[%d] &= ~(1ULL << %d)", obj, k / 64, k % 64);
+}
+
+/* The ivar an InstanceVariableReadNode / write names, as the read emitter
+   resolves it (emit_ivar_cvar_gvar_expr): the object's field of class
+   `*cid` (kind 1), or the class-level / top-level static civ_C_x (kind 2);
+   0 when the class has no such slot. */
+int ivar_node_slot(Compiler *c, int node, int *cid, int *iv) {
+  HolderRef h;
+  *cid = *iv = -1;
+  Scope *cs = comp_scope_of(c, node);
+  const char *nm = nt_str(c->nt, node, "name");
+  if (!nm) return 0;
+  /* inside an instance_eval / instance_exec splice: the receiver's class */
+  if (cs && cs->class_id < 0 && !cs->is_cmethod && g_ie_class_id >= 0) {
+    for (int k = g_ie_class_id; k >= 0; k = c->classes[k].parent) {
+      int i = comp_ivar_index(&c->classes[k], nm);
+      if (i >= 0) { *cid = k; *iv = i; return 1; }
+    }
+    return 0;
+  }
+  /* a class body outside any def: the class-level static */
+  if (cs && cs->class_id < 0 && !cs->is_cmethod && g_class_body_id >= 0) {
+    int i = comp_ivar_index(&c->classes[g_class_body_id], nm);
+    if (i < 0) return 0;
+    *cid = g_class_body_id; *iv = i; return 2;
+  }
+  if (!holder_of_node_in(c, node, g_class_body_id, &h) || h.idx < 0) return 0;
+  *cid = h.cid; *iv = h.idx;
+  return h.cls_slot ? 2 : 1;
+}
+int ivar_read_slot_is_oint(Compiler *c, int node) {
+  int cid, iv;
+  int kind = ivar_node_slot(c, node, &cid, &iv);
+  if (kind == 1) return ivar_has_nilbit(c, cid, iv);
+  if (kind == 2) return civ_is_oint(c, cid, iv);
+  return 0;
+}
+
+int gvar_seeded_before_read(Compiler *c, const char *gname);   /* analyze_internal.h */
+/* A global starts nil and keeps it until its first write: its static is an
+   sp_oint when a read can see that nil (not seeded before every read) or a
+   write leaves nil in it. A class-level or top-level ivar static starts
+   nil too, and nothing seeds it: always an oint. A class variable read
+   before its write is a NameError in Ruby, so only a nil write makes one. */
+int gvar_is_oint(Compiler *c, const LocalVar *g) {
+  if (!g || !oint_kind(g->type)) return 0;
+  if (g->nullable_int) return 1;
+  return !gvar_seeded_before_read(c, g->name);
+}
+int civ_is_oint(Compiler *c, int cid, int iv) {
+  if (cid < 0 || cid >= c->nclasses || iv < 0 || iv >= c->classes[cid].nivars) return 0;
+  return oint_kind(c->classes[cid].ivar_types[iv]);
+}
+int cvar_is_oint(Compiler *c, int cid, int idx) {
+  if (cid < 0 || cid >= c->nclasses || idx < 0 || idx >= c->classes[cid].ncvars) return 0;
+  ClassInfo *ci = &c->classes[cid];
+  return oint_kind(ci->cvar_types[idx]) && ci->cvar_nullable_int && ci->cvar_nullable_int[idx];
+}
+
+/* The reader method `nm` resolved on class cid: the ivar it answers, when
+   that ivar carries a nil bit (its read is an sp_oint). */
+static int reader_ivar_has_nilbit(Compiler *c, int cid, const char *nm) {
+  int defc = -1;
+  if (cid < 0 || cid >= c->nclasses || !nm || !comp_reader_in_chain(c, cid, nm, &defc)) return 0;
+  char ivb[300];
+  snprintf(ivb, sizeof ivb, "@%s", comp_resolve_alias(c, cid, nm));
+  int k = defc >= 0 ? defc : cid;
+  int iv = comp_ivar_index(&c->classes[k], ivb);
+  return iv >= 0 && ivar_has_nilbit(c, k, iv);
+}
+
+int node_is_oint(Compiler *c, int node) {
+  const NodeTable *nt = c->nt;
+  if (node < 0) return 0;
+  NodeKind k = nt_kind(nt, node);
+  if (k == NK_NilNode) return 1;
+  TyKind t = comp_ntype(c, node);
+  if (!oint_kind(t)) return 0;
+  switch (k) {
+  case NK_LocalVariableReadNode: {
+    /* the slot's own oint, unless a nil guard narrowed this read */
+    const char *ln = nt_str(nt, node, "name");
+    Scope *s = ln ? comp_scope_of(c, node) : NULL;
+    LocalVar *lv = s ? scope_local(s, ln) : NULL;
+    return lv && slot_is_oint(lv) && nullable_int_value(c, node);
+  }
+  case NK_InstanceVariableReadNode:
+  case NK_ClassVariableReadNode:
+  case NK_GlobalVariableReadNode:
+    return nullable_int_value(c, node);
+  case NK_CallNode: {
+    if (nullable_int_value(c, node)) return 1;
+    const char *sop = nt_str(nt, node, "call_operator");
+    if (sop && sp_streq(sop, "&.")) return 1;
+    const char *nm = nt_str(nt, node, "name");
+    if (!nm) return 0;
+    int blk = nt_ref(nt, node, "block");
+    int r = nt_ref(nt, node, "receiver");
+    /* a proc's result comes back boxed and is unboxed with its nil */
+    if (is_call_or_yield(nm) && r >= 0 && comp_ntype(c, r) == TY_PROC) return 1;
+    /* the runtime functions that answer an sp_oint (RUNTIME-API.md) */
+    if ((sp_streq(nm, "bsearch") || sp_streq(nm, "bsearch_index")) && blk >= 0) return 1;
+    if (sp_streq(nm, "nonzero?") || sp_streq(nm, "infinite?") || sp_streq(nm, "getbyte")) return 1;
+    if (sp_streq(nm, "index") || sp_streq(nm, "rindex") || sp_streq(nm, "delete_at") ||
+        sp_streq(nm, "byteindex") || sp_streq(nm, "byterindex") ||
+        sp_streq(nm, "pop") || sp_streq(nm, "shift") || sp_streq(nm, "delete")) return 1;
+    if (is_range_bound_reader(nm) && r >= 0) {
+      TyKind rrt = comp_ntype(c, r);
+      if (rrt == TY_MATCHDATA || rrt == TY_RANGE || rrt == TY_FLOAT_RANGE) return 1;
+    }
+    /* an attr reader over an ivar with a nil bit answers the ivar's oint */
+    if (r >= 0 && blk < 0) {
+      int a2 = nt_ref(nt, node, "arguments"), an2 = 0;
+      if (a2 >= 0) nt_arr(nt, a2, "arguments", &an2);
+      TyKind rt2 = comp_ntype(c, r);
+      if (an2 == 0 && ty_is_object(rt2) && reader_ivar_has_nilbit(c, ty_object_class(rt2), nm)) return 1;
+    }
+    return 0;
+  }
+  default:
+    return nullable_int_value(c, node);
+  }
+}
+
+int g_want_oint = 0;
+
+/* The slot a leaf read names, when that slot is an oint: the local, the
+   instance ivar with a nil bit, the oint static. */
+static int leaf_slot_is_oint(Compiler *c, int node) {
+  const NodeTable *nt = c->nt;
+  NodeKind k = nt_kind(nt, node);
+  if (k == NK_LocalVariableReadNode) {
+    const char *ln = nt_str(nt, node, "name");
+    Scope *s = ln ? comp_scope_of(c, node) : NULL;
+    return slot_is_oint(s ? scope_local(s, ln) : NULL);
+  }
+  if (k == NK_InstanceVariableReadNode) return ivar_read_slot_is_oint(c, node);
+  if (k == NK_ClassVariableReadNode) {
+    HolderRef h;
+    return holder_of_node_in(c, node, g_class_body_id, &h) && cvar_is_oint(c, h.cid, h.idx);
+  }
+  if (k == NK_GlobalVariableReadNode) {
+    const char *gn = nt_str(nt, node, "name");
+    const char *rn = gn ? comp_resolve_gvar(c, gn + 1) : NULL;
+    return gvar_is_oint(c, rn ? comp_gvar(c, rn) : NULL);
+  }
+  return 0;
+}
+
+void emit_slot_nil_read(Compiler *c, TyKind t, Buf *b) {
+  if (oint_kind(t)) { buf_printf(b, "%s(%s)", oint_arg(t), oint_nil(t)); return; }
+  const char *nv = nil_value(t);
+  buf_puts(b, nv ? nv : default_value_from_compiler(c, t));
+}
+
+int node_has_oint_form(Compiler *c, int node) {
+  return node >= 0 && (node_is_oint(c, node) || leaf_slot_is_oint(c, node));
+}
+
+void emit_oint_expr(Compiler *c, int node, TyKind t, Buf *b) {
+  if (b == g_pre) {
+    /* as emit_into_pre_line, with the kind threaded through */
+    Buf tmp; memset(&tmp, 0, sizeof tmp);
+    emit_oint_expr(c, node, t, &tmp);
+    buf_puts(b, tmp.p ? tmp.p : "");
+    free(tmp.p);
+    return;
+  }
+  if (!oint_kind(t)) t = TY_INT;
+  if (node < 0) { buf_puts(b, oint_nil(t)); return; }
+  const NodeTable *nt = c->nt;
+  NodeKind k = nt_kind(nt, node);
+  if (k == NK_NilNode) { buf_puts(b, oint_nil(t)); return; }
+  Repr r = repr_of(c, node);
+  TyKind vt = r.as_ty;
+  /* a value with no C type of its own: evaluated for its effect, then nil */
+  if (vt == TY_NIL || vt == TY_VOID) {
+    buf_puts(b, "((void)("); emit_expr(c, node, b); buf_printf(b, "), %s)", oint_nil(t));
+    return;
+  }
+  /* a boxed value: unboxed with its nil */
+  if (r.kind == RK_BOXED || vt == TY_POLY) {
+    buf_printf(b, "%s(", oint_unbox(t)); emit_expr(c, node, b); buf_puts(b, ")");
+    return;
+  }
+  /* an Integer into a Float slot (or the reverse) converts the value */
+  if (oint_kind(vt) && vt != t) {
+    if (node_is_oint(c, node) || leaf_slot_is_oint(c, node)) {
+      int tn = ++g_tmp;
+      buf_printf(b, "({ %s _t%d = ", oint_ctype(vt), tn);
+      emit_oint_expr(c, node, vt, b);
+      buf_printf(b, "; _t%d.nil ? %s : %s((%s)_t%d.v); })", tn, oint_nil(t), oint_of(t), c_type_name(t), tn);
+    }
+    else {
+      buf_printf(b, "%s((%s)(", oint_of(t), c_type_name(t)); emit_expr(c, node, b); buf_puts(b, "))");
+    }
+    return;
+  }
+  if (node_is_oint(c, node) || leaf_slot_is_oint(c, node)) {
+    /* the bare producer: emit_expr consumes the flag for this node */
+    g_want_oint = 1;
+    emit_expr(c, node, b);
+    g_want_oint = 0;
+    return;
+  }
+  buf_printf(b, "%s(", oint_of(t)); emit_expr(c, node, b); buf_puts(b, ")");
+}
+
+void emit_scalar_operand_op(Compiler *c, int node, const char *op, Buf *b) {
+  TyKind t = comp_ntype(c, node);
+  if (oint_kind(t) && cmp_operand_may_be_nil(c, node)) {
+    buf_printf(b, "%s(", oint_val(t));
+    emit_oint_expr(c, node, t, b);
+    buf_printf(b, ", \"%s\")", op);
+    return;
+  }
+  emit_scalar_operand(c, node, t == TY_FLOAT ? "0.0" : "0", b);
+}

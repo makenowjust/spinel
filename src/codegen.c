@@ -1755,15 +1755,14 @@ static void emit_boxed_impl(Compiler *c, int node, Buf *b) {
     emit_expr(c, node, b);
     RC(RF_PASS, RW_NONE);
     return;
-  case RK_SENTINEL:
-    /* The Integer or Float slot can hold its nil sentinel (repr_nil_scalar:
-       a nilable builtin's answer, an ivar read, a parameter bound from one,
-       a local assigned one, a Ruby-defined builtin, every Integer under
-       --int-overflow=promote), so boxing it has to yield nil (#3493,
-       #5085). Elsewhere a real number is never the sentinel and the plain
-       box is the hot path (every Integer into a poly slot). */
-    buf_printf(b, "%s(", ty_box_nil_fn(t == TY_FLOAT ? TY_FLOAT : TY_INT));
-    emit_expr(c, node, b);
+  case RK_OPT:
+    /* The Integer or Float has an sp_oint form of its own (repr_nil_scalar:
+       a nilable builtin's answer, a read of a slot that holds its nil, a
+       parameter bound from one), so boxing it reads that nil (#3493,
+       #5085). Elsewhere a plain number is boxed plainly, the hot path
+       (every Integer into a poly slot). */
+    buf_printf(b, "%s(", oint_box(t == TY_FLOAT ? TY_FLOAT : TY_INT));
+    emit_oint_expr(c, node, t == TY_FLOAT ? TY_FLOAT : TY_INT, b);
     buf_puts(b, ")");
     RC(t == TY_FLOAT ? RF_FLT_NIL : RF_INT_NIL, RW_NONE);
     return;

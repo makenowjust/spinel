@@ -1417,6 +1417,20 @@ void emit_expr(Compiler *c, int id, Buf *b) {
   }
   if (g_repr_check) repr_check_ask(c, id);
   g_expr_depth++;
+  /* nil out of band: emit_oint_expr asked for the bare sp_oint of this one
+     node (g_want_oint, consumed here before any child is emitted). Without
+     that, an oint producer is read as a plain scalar through sp_oint_arg
+     (TypeError for nil), and a leaf read of an oint slot as its `.v`. */
+  int want_o = g_want_oint; g_want_oint = 0;
+  TyKind ot = comp_ntype(c, id);
+  int is_o = oint_kind(ot) && node_is_oint(c, id);
+  int leaf_o = want_o && !is_o && node_has_oint_form(c, id);
+  NodeKind ok = nt_kind(c->nt, id);
+  g_oint_read = (is_o || leaf_o) &&
+                (ok == NK_LocalVariableReadNode || ok == NK_InstanceVariableReadNode ||
+                 ok == NK_ClassVariableReadNode || ok == NK_GlobalVariableReadNode);
+  if (is_o && !want_o) buf_printf(b, "%s(", oint_arg(ot));
+  else if (want_o && !is_o && !leaf_o) buf_printf(b, "%s(", oint_of(oint_kind(ot) ? ot : TY_INT));
   /* an Array subclass instance read where an Array is wanted -- a splat, a
      destructuring, a `for` collection, an element write that is no call --
      is typed as its Array (an_ary_viewed): the same pointer, cast to the
@@ -1427,7 +1441,21 @@ void emit_expr(Compiler *c, int id, Buf *b) {
     buf_puts(b, "))");
   }
   else emit_expr_node(c, id, b);
+  if ((is_o && !want_o) || (want_o && !is_o && !leaf_o)) buf_puts(b, ")");
+  g_oint_read = 0;
   g_expr_depth--;
+}
+
+/* The slot read emit_expr is about to render (a local, an ivar, a cvar, a
+   global) is wanted as its own sp_oint: set by emit_expr for that one leaf,
+   consumed by the leaf's emitter. A plain read of an oint slot is its `.v`. */
+int g_oint_read = 0;
+/* The read face of local `name`'s slot at node `id`: the slot itself, or its
+   `.v` when the slot is an oint read as a plain scalar. */
+static void emit_local_read_face(Compiler *c, int id, const char *name, LocalVar *lv, Buf *b) {
+  int want = g_oint_read; g_oint_read = 0;
+  emit_local_ref(c, id, name, b);
+  if (slot_is_oint(lv) && !want) buf_puts(b, ".v");
 }
 
 /* `_tN = v` inside the guard of an `a[i] ||= v` / `&&= v` value, with v's
@@ -1558,8 +1586,8 @@ static int emit_local_ivar_write_expr(Compiler *c, int id, Buf *b, const NodeTab
       {
         LocalVar *nlv = lrn ? scope_local(comp_scope_of(c, id), lrn) : NULL;
         if (nlv && nlv->type == c->nilnarrow[id] && nlv->type != TY_POLY) {
-          buf_puts(b, rb2.p ? rb2.p : "");
           free(rb2.p);
+          emit_local_read_face(c, id, lrn, nlv, b);
           return 1;
         }
       }
@@ -1582,7 +1610,9 @@ static int emit_local_ivar_write_expr(Compiler *c, int id, Buf *b, const NodeTab
         repr_of_slot(c, slv).kind != RK_STRBUF && repr_of(c, id).kind == RK_BOXED) {
       Buf rb3; memset(&rb3, 0, sizeof rb3);
       emit_local_ref(c, id, lrn, &rb3);
-      emit_boxed_text(c, slv->type, rb3.p ? rb3.p : "", b);
+      /* an oint slot boxes with its nil */
+      if (slot_is_oint(slv)) buf_printf(b, "%s(%s)", oint_box(slv->type), rb3.p ? rb3.p : "");
+      else emit_boxed_text(c, slv->type, rb3.p ? rb3.p : "", b);
       free(rb3.p);
       return 1;
     }
@@ -1647,7 +1677,7 @@ static int emit_local_ivar_write_expr(Compiler *c, int id, Buf *b, const NodeTab
       free(rl.p);
       return 1;
     }
-    emit_local_ref(c, id, lrn, b); return 1;
+    emit_local_read_face(c, id, lrn, slv, b); return 1;
   }
   if (sp_streq(ty, "LocalVariableWriteNode")) {
     /* assignment used as expression: ({ lv = rhs; lv; }) */
@@ -2057,8 +2087,7 @@ static int emit_ivar_cvar_gvar_expr(Compiler *c, int id, Buf *b, const NodeTable
     }
     if (g_ie_nil_ivars) {
       TyKind it = repr_of(c, id).as_ty;
-      const char *nv = nil_value(it);
-      buf_puts(b, nv ? nv : default_value_from_compiler(c, it));
+      emit_slot_nil_read(c, it, b);
       return 1;
     }
     /* inside a shared-mutable shim over THIS slot: both the reads and the
@@ -2078,8 +2107,18 @@ static int emit_ivar_cvar_gvar_expr(Compiler *c, int id, Buf *b, const NodeTable
         emit_strbuf_slot_read(c, id, rp, srefI, b);
         return 1;
       } }
-    if (cs && cs->is_cmethod && cs->class_id >= 0)
-      buf_printf(b, "civ_%s_%s", c->classes[cs->class_id].name, iv_c(nm + 1));  /* module/class-level ivar */
+    /* the slot: an object field through the receiver prefix (`self->`,
+       `_t3.`), or a class-level / top-level static. A field with a nil bit
+       read as its sp_oint pairs the value with its bit; an oint static read
+       as a plain scalar is its `.v`. */
+    int want_o = g_oint_read; g_oint_read = 0;
+    char pfx[128]; pfx[0] = 0;
+    int is_static = 0, is_nil = 0;
+    Buf ref; memset(&ref, 0, sizeof ref);
+    if (cs && cs->is_cmethod && cs->class_id >= 0) {
+      buf_printf(&ref, "civ_%s_%s", c->classes[cs->class_id].name, iv_c(nm + 1));  /* module/class-level ivar */
+      is_static = 1;
+    }
     else if (cs && cs->class_id < 0 && g_ie_class_id >= 0) {
       /* inside instance_eval block: access ivar via receiver pointer; one
          the receiver's class never writes is nil, as on that object (the
@@ -2087,21 +2126,35 @@ static int emit_ivar_cvar_gvar_expr(Compiler *c, int id, Buf *b, const NodeTable
       int has = 0;
       for (int k = g_ie_class_id; k >= 0 && !has; k = c->classes[k].parent)
         has = comp_ivar_index(&c->classes[k], nm) >= 0;
-      if (!has) {
-        TyKind it = repr_of(c, id).as_ty;
-        const char *nv = nil_value(it);
-        buf_puts(b, nv ? nv : default_value_from_compiler(c, it));
-      }
-      else buf_printf(b, "%s%siv_%s", g_self, g_self_deref, iv_c(nm + 1));
+      if (!has) is_nil = 1;
+      else { snprintf(pfx, sizeof pfx, "%s%s", g_self, g_self_deref); buf_printf(&ref, "%siv_%s", pfx, iv_c(nm + 1)); }
     }
     else if (cs && cs->class_id < 0) {
       /* top-level method: ivar stored as file-scope global in Toplevel pseudo-class */
       int tl = comp_class_index(c, "Toplevel");
-      if (tl >= 0) buf_printf(b, "civ_Toplevel_%s", iv_c(nm + 1));
-      else buf_printf(b, "%s%siv_%s", g_self, g_self_deref, iv_c(nm + 1));
+      if (tl >= 0) { buf_printf(&ref, "civ_Toplevel_%s", iv_c(nm + 1)); is_static = 1; }
+      else { snprintf(pfx, sizeof pfx, "%s%s", g_self, g_self_deref); buf_printf(&ref, "%siv_%s", pfx, iv_c(nm + 1)); }
     }
-    else
-      buf_printf(b, "%s%siv_%s", g_self, g_self_deref, iv_c(nm + 1));
+    else { snprintf(pfx, sizeof pfx, "%s%s", g_self, g_self_deref); buf_printf(&ref, "%siv_%s", pfx, iv_c(nm + 1)); }
+    if (is_nil) {
+      TyKind it = repr_of(c, id).as_ty;
+      if (want_o && oint_kind(it)) buf_puts(b, oint_nil(it));
+      else emit_slot_nil_read(c, it, b);
+    }
+    else {
+      int icid, iiv;
+      int sk = ivar_node_slot(c, id, &icid, &iiv);
+      TyKind it = sk > 0 ? c->classes[icid].ivar_types[iiv] : TY_UNKNOWN;
+      if (sk == 1 && ivar_has_nilbit(c, icid, iiv) && want_o) {
+        char bt[160];
+        ivar_nilbit_test(c, icid, iiv, pfx, bt, sizeof bt);
+        buf_printf(b, "((%s){ %s, %s != 0 })", oint_ctype(it), ref.p ? ref.p : "", bt);
+      }
+      else if (is_static && sk == 2 && civ_is_oint(c, icid, iiv) && !want_o)
+        buf_printf(b, "%s.v", ref.p ? ref.p : "");
+      else buf_puts(b, ref.p ? ref.p : "");
+    }
+    free(ref.p);
     return 1;
   }
   if (sp_streq(ty, "ClassVariableReadNode")) {

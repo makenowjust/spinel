@@ -82,13 +82,7 @@ int repr_nil_scalar(const Compiler *c, int node, TyKind t) {
   Compiler *mc = (Compiler *)c;
   int r = 0;
   an_pure_read_begin();
-  if (t == TY_INT)
-    r = g_promote_mode || call_returns_nullable_int(mc, node) ||
-        nt_kind(c->nt, node) == NK_InstanceVariableReadNode ||
-        box_nullable_arg(mc, node) || enum_builtin_node(mc, node);
-  else if (t == TY_FLOAT)
-    r = call_returns_nullable_int(mc, node) || box_nullable_arg(mc, node) ||
-        enum_builtin_node(mc, node);
+  if (t == TY_INT || t == TY_FLOAT) r = node_has_oint_form(mc, node);
   an_pure_read_end();
   return r;
 }
@@ -263,7 +257,7 @@ Repr repr_of(const Compiler *c, int node) {
   r.dyn_cls = repr_dyn_cls(c, kt);
   repr_layout(&r, kt);
   if (repr_nil_scalar(c, node, kt)) {
-    r.kind = RK_SENTINEL;
+    r.kind = RK_OPT;
     r.may_nil = r.nil_scalar = 1;
   }
   r.strbuf_src = (unsigned char)repr_strbuf_src(c, node, kt);
@@ -285,7 +279,7 @@ ReprForm repr_box_form(const Compiler *c, Repr r) {
   switch ((ReprKind)r.kind) {
   case RK_NONE:     return RF_NIL_EFFECT;
   case RK_BOXED:    return RF_PASS;
-  case RK_SENTINEL: return t == TY_FLOAT ? RF_FLT_NIL : RF_INT_NIL;
+  case RK_OPT: return t == TY_FLOAT ? RF_FLT_NIL : RF_INT_NIL;
   case RK_STRUCT:   return RF_STRUCT;
   case RK_VOBJ:     return RF_VOBJ;
   case RK_STRBUF:
@@ -462,10 +456,8 @@ void repr_check_ask(const Compiler *c, int node) {
 
 ReprKind repr_slot_kind(const Compiler *c, const LocalVar *lv) {
   if (!lv) return RK_NONE;
-  /* an Integer or Float slot some write leaves nil in: its sentinel */
-  if ((lv->type == TY_INT || lv->type == TY_FLOAT) &&
-      (lv->nullable_int || lv->box_nullable || lv->maybe_unset))
-    return RK_SENTINEL;
+  /* an Integer or Float slot that holds its nil beside the value */
+  if (slot_is_oint(lv)) return RK_OPT;
   return repr_kind_of_type(c, lv->type);
 }
 Repr repr_of_slot(const Compiler *c, const LocalVar *lv) {
@@ -477,7 +469,7 @@ Repr repr_of_slot(const Compiler *c, const LocalVar *lv) {
   r.ty = r.as_ty = lv->type;
   repr_layout(&r, lv->type);
   ReprKind k = repr_slot_kind(c, lv);
-  if (k == RK_SENTINEL) r.may_nil = 1;
+  if (k == RK_OPT) r.may_nil = 1;
   /* a `||=` can read the slot before any write: nil until then */
   if (lv->or_written) r.may_nil = 1;
   /* an object slot, or a builtin pointer's, the nil fact says may hold nil */
@@ -742,7 +734,7 @@ int g_dump_repr = 0;
 
 static const char *repr_kind_name(int k) {
   static const char *const names[] = {
-    "none", "scalar", "sentinel", "struct", "vobj", "ptr", "strbuf", "boxed",
+    "none", "scalar", "opt", "struct", "vobj", "ptr", "strbuf", "boxed",
   };
   return k >= 0 && k <= RK_BOXED ? names[k] : "?";
 }
@@ -757,8 +749,8 @@ Repr repr_of_ivar(const Compiler *c, int cid, int iv) {
   r.ty = r.as_ty = ci->ivar_types[iv];
   r.narrowed = TY_UNKNOWN;
   r.kind = (unsigned char)repr_kind_of_type(c, r.ty);
-  if (r.ty == TY_INT || (r.ty == TY_FLOAT && ci->ivar_nullable_int[iv])) {
-    r.kind = RK_SENTINEL;
+  if (ivar_has_nilbit((Compiler *)c, cid, iv)) {
+    r.kind = RK_OPT;
     r.may_nil = 1;
   }
   if (ty_is_object(r.ty) && nil_fact_ivar(c, cid, ci->ivars[iv])) r.may_nil = 1;
@@ -773,7 +765,7 @@ Repr repr_of_ivar(const Compiler *c, int cid, int iv) {
 ReprKind repr_cvar_kind(const Compiler *c, int cid, int idx) {
   const ClassInfo *ci = &c->classes[cid];
   TyKind t = ci->cvar_types[idx];
-  if ((t == TY_INT || t == TY_FLOAT) && ci->cvar_nullable_int[idx]) return RK_SENTINEL;
+  if (cvar_is_oint((Compiler *)c, cid, idx)) return RK_OPT;
   return repr_kind_of_type(c, t);
 }
 /* Only the rule makes a class variable the shared handle
@@ -788,7 +780,7 @@ Repr repr_of_cvar(const Compiler *c, int cid, int idx) {
   r.narrowed = r.elem = r.key = r.val = TY_UNKNOWN;
   repr_layout(&r, r.ty);
   r.kind = (unsigned char)repr_cvar_kind(c, cid, idx);
-  if (r.kind == RK_SENTINEL || ty_is_object(r.ty)) r.may_nil = 1;
+  if (r.kind == RK_OPT || ty_is_object(r.ty)) r.may_nil = 1;
   if (r.ty == TY_STRBUF && ci->cvar_str_shared[idx]) r.handle = 1;
   r.share = r.handle && c->share_strings;
   r.dyn_cls = repr_dyn_cls(c, r.ty);
@@ -803,7 +795,7 @@ static Repr repr_of_ret(const Compiler *c, const Scope *sc) {
   r.narrowed = TY_UNKNOWN;
   r.kind = (unsigned char)repr_kind_of_type(c, r.ty);
   if ((r.ty == TY_INT || r.ty == TY_FLOAT) && (sc->ret_nullable_int || sc->ret_rbs_nilable)) {
-    r.kind = RK_SENTINEL;
+    r.kind = RK_OPT;
     r.may_nil = 1;
   }
   if (ty_is_object(r.ty) && sc->ret_obj_may_nil) r.may_nil = 1;

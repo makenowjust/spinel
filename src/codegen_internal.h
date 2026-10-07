@@ -1951,4 +1951,71 @@ extern const char *g_iow_recv_ref;
 extern const char *g_iow_key_ref;
 
 void refuse_yield_capwrap(Compiler *c, int blk, int yc, const int *yv);
+
+/* ---- nil out of band: sp_oint / sp_ofloat (codegen_util.c) ----
+   No bit pattern of an sp_int or an sp_float means nil. A nullable Integer
+   or Float is carried as an sp_oint / sp_ofloat (value + nil flag) in a
+   local, a parameter, a return, a temp, a static; an instance ivar keeps its
+   sp_int field and a bit in the object's iv__nilbits. One predicate decides
+   a node's C value (node_is_oint); emit_expr always yields the plain scalar
+   and emit_oint_expr the oint form. */
+/* the C spellings for the Integer (TY_INT) or Float (TY_FLOAT) kind */
+const char *oint_ctype(TyKind t);   /* "sp_oint" / "sp_ofloat" */
+const char *oint_nil(TyKind t);     /* "sp_oint_nil()" / "sp_ofloat_nil()" */
+const char *oint_of(TyKind t);      /* "sp_oint_of" / "sp_ofloat_of" */
+const char *oint_val(TyKind t);     /* "sp_oint_val" / "sp_ofloat_val" (NoMethodError for nil) */
+const char *oint_arg(TyKind t);     /* "sp_oint_arg" / "sp_ofloat_arg" (TypeError for nil) */
+const char *oint_box(TyKind t);     /* "sp_box_oint" / "sp_box_ofloat" */
+const char *oint_unbox(TyKind t);   /* "sp_unbox_oint" / "sp_unbox_ofloat" */
+/* is t an Integer or a Float kind */
+int oint_kind(TyKind t);
+/* a local's / parameter's slot is an sp_oint / sp_ofloat */
+int slot_is_oint(const LocalVar *lv);
+/* the C type of a local's slot: the oint type, or emit_ctype's */
+void emit_slot_ctype(Compiler *c, const LocalVar *lv, Buf *b);
+/* instance ivar iv of class cid has a bit in iv__nilbits; its bit index;
+   the number of uint64_t words the class's iv__nilbits has (0: none) */
+int ivar_has_nilbit(Compiler *c, int cid, int iv);
+int ivar_nilbit_index(Compiler *c, int cid, int iv);
+int class_nilbit_words(Compiler *c, int cid);
+/* the C text of the bit: `((o)->iv__nilbits[w] & (1ULL << k))`-style
+   test, and the set / clear statements, for the receiver text `obj`
+   ("self->", "_t3->", "o." ...: the prefix up to the field) */
+void ivar_nilbit_test(Compiler *c, int cid, int iv, const char *obj, char *out, size_t cap);
+void ivar_nilbit_set(Compiler *c, int cid, int iv, const char *obj, char *out, size_t cap);
+void ivar_nilbit_clear(Compiler *c, int cid, int iv, const char *obj, char *out, size_t cap);
+/* the ivar slot a read / write node names: 1 the object's field (cid, iv),
+   2 the class-level or top-level static civ_C_x, 0 none; whether a read's
+   slot is an oint (a field with a nil bit, an oint static) */
+int ivar_node_slot(Compiler *c, int node, int *cid, int *iv);
+int ivar_read_slot_is_oint(Compiler *c, int node);
+/* a global's / class-level ivar's / cvar's static is an sp_oint */
+int gvar_is_oint(Compiler *c, const LocalVar *g);
+int civ_is_oint(Compiler *c, int cid, int iv);
+int cvar_is_oint(Compiler *c, int cid, int idx);
+/* The node's natural C expression is an sp_oint / sp_ofloat (an Integer or
+   Float node only): a nullable read no guard narrowed, a call answering an
+   oint, a nil literal, a conditional with a nullable arm. */
+int node_is_oint(Compiler *c, int node);
+/* node_is_oint, or a leaf read of a slot that is an oint (a nil guard may
+   have narrowed the read): emit_oint_expr yields the bare oint for it, and
+   its box reads the nil */
+int node_has_oint_form(Compiler *c, int node);
+/* node as an sp_oint / sp_ofloat: the bare producer, a plain value wrapped
+   in sp_oint_of, nil as sp_oint_nil(); a slot read as its slot's own oint */
+void emit_oint_expr(Compiler *c, int node, Buf *b);
+/* set by emit_oint_expr for the one node it is about to emit: emit_expr
+   consumes it (leaves the oint producer bare) before any child is emitted */
+extern int g_want_oint;
+/* the leaf slot read emit_expr is rendering is wanted as its own oint
+   (codegen_expr.c) */
+extern int g_oint_read;
+/* A slot of kind t known to hold nil, read where a value of that kind is
+   wanted: the kind's nil for the kinds that have one (NULL, a boxed nil),
+   and for an Integer or Float, whose plain scalar has no nil, the TypeError
+   a nil raises where an Integer is wanted (sp_oint_arg(sp_oint_nil())). */
+void emit_slot_nil_read(Compiler *c, TyKind t, Buf *b);
+/* node as a plain scalar through its oint form: `sp_oint_val(<oint>, op)`
+   when the node may be nil (cmp_operand_may_be_nil), else emit_expr */
+void emit_scalar_operand_op(Compiler *c, int node, const char *op, Buf *b);
 #endif
