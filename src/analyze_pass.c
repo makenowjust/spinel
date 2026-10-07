@@ -9699,6 +9699,11 @@ static TyKind bs_join_val(Compiler *c, TyKind a, int v, char *flags) {
   if (v >= 0 && nt_kind(c->nt, v) == NK_NilNode) { *flags |= BS_NIL; return a; }
   TyKind t = bs_value(c, v);
   if ((t == TY_INT || t == TY_FLOAT) && nullable_int_value(c, v)) *flags |= BS_NIL;
+  /* under promote an Integer member or ivar is boxed, and its nil reaches
+     the parameter as the box's (Struct#each yielding a member left nil) */
+  else if (t == TY_POLY && g_promote_mode && v >= 0 && nt_kind(c->nt, v) == NK_InstanceVariableReadNode &&
+           nullable_int_value(c, v))
+    *flags |= BS_NIL;
   return bs_join(a, t);
 }
 
