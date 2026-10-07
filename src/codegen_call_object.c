@@ -2326,6 +2326,8 @@ static void emit_reflect_ivar_set(Compiler *c, int id, int recv, int value, int 
   emit_frozen_obj_guard(c, cid, obj, b);
   if (nb) {
     char objp[40]; snprintf(objp, sizeof objp, "%s->", obj);
+    /* the helper answers the value and keeps the bit; the field takes it */
+    buf_printf(b, "%s->iv_%s = ", obj, iv_c(sym + 1));
     emit_ivar_text_nilbit(c, cid, iv, objp, val, b);
     buf_printf(b, "; %s->_sp_set_%s = TRUE; ", obj, iv_c(sym + 1));
   }
@@ -2402,6 +2404,7 @@ int emit_object_ivar_call(Compiler *c, int id, const char *name, int recv, TyKin
           emit_frozen_obj_guard(c, cid, selft, b);
           if (oint_kind(mt) && ivar_has_nilbit(c, cid, mi)) {
             char objp[40]; snprintf(objp, sizeof objp, "_t%d->", tf9);
+            buf_printf(b, "%siv_%s = ", objp, iv_c(c->classes[cid].ivars[mi] + 1));
             emit_ivar_value_nilbit(c, cid, mi, objp, argv[1], b);
             buf_puts(b, "; })");
             return 1;
@@ -2420,6 +2423,7 @@ int emit_object_ivar_call(Compiler *c, int id, const char *name, int recv, TyKin
           buf_printf(b, "({ sp_%s *_t%d = ", c->classes[cid].c_name, tfo); emit_expr(c, recv, b);
           buf_printf(b, "; char objp_unused_%d = 0; (void)objp_unused_%d; ", tfo, tfo);
           char objp[40]; snprintf(objp, sizeof objp, "_t%d->", tfo);
+          buf_printf(b, "%siv_%s = ", objp, iv_c(c->classes[cid].ivars[mi] + 1));
           emit_ivar_value_nilbit(c, cid, mi, objp, argv[1], b);
           buf_puts(b, "; })");
           return 1;
@@ -2465,6 +2469,19 @@ int emit_object_ivar_call(Compiler *c, int id, const char *name, int recv, TyKin
         emit_expr(c, recv, b);
         buf_printf(b, ")%siv_%s; _t%d ? sp_str_concat(sp_String_cstr(_t%d), (&(\"\\xff\")[1])) : NULL; })",
                    acc, iv_c(sym + 1), tvG, tvG);
+      }
+      /* a number field with a nil bit reads with it: the oint where the
+         call's consumer takes one, boxed nil, or unwrapped */
+      else if (oint_kind(mt) && ivar_has_nilbit(c, cid, comp_ivar_index(&c->classes[cid], sym))) {
+        int iv9 = comp_ivar_index(&c->classes[cid], sym), tg = ++g_tmp;
+        char objp[48]; snprintf(objp, sizeof objp, "_t%d%s", tg, acc);
+        char bit[400]; ivar_nilbit_test(c, cid, iv9, objp, bit, sizeof bit);
+        Repr rg = repr_of(c, id);
+        buf_printf(b, "({ sp_%s %s_t%d = %s(", c->classes[cid].c_name, is_val ? "" : "*", tg, is_val ? "" : "");
+        emit_expr(c, recv, b);
+        buf_printf(b, "); %s _o%d = { %siv_%s, (%s) != 0 }; ", oint_ctype(mt), tg, objp, iv_c(sym + 1), bit);
+        if (rg.kind == RK_BOXED) buf_printf(b, "%s(_o%d); })", oint_box(mt), tg);
+        else { oint_open(c, id, mt, b); buf_printf(b, "_o%d", tg); oint_close(c, id, b); buf_puts(b, "; })"); }
       }
       else {
         buf_puts(b, "("); emit_expr(c, recv, b);

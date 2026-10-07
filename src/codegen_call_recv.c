@@ -13162,6 +13162,7 @@ static int emit_poly_ivar_call(Compiler *c, int id, Buf *b, const NodeTable *nt,
           /* the value with its nil into the field and its bit */
           char objp[96]; snprintf(objp, sizeof objp, "%s->", obj);
           char otext[80]; snprintf(otext, sizeof otext, "%s(%s)", oint_unbox(t), val);
+          buf_printf(b, "%siv_%s = ", objp, iv_c(sym + 1));
           emit_ivar_text_nilbit(c, k, iv, objp, otext, b);
           buf_puts(b, ";");
         }
@@ -13236,7 +13237,13 @@ static int emit_poly_ivar_call(Compiler *c, int id, Buf *b, const NodeTable *nt,
         char fld[320];
         snprintf(fld, sizeof fld, "((sp_%s *)_t%d.v.p)->iv_%s", c->classes[k].c_name, tv, iv_c(sym + 1));
         buf_printf(b, " case %d: _ivg%d = ", k, tv);
-        emit_boxed_text(c, t, fld, b);
+        /* a field with a nil bit boxes as nil where the bit is set */
+        if (oint_kind(t) && ivar_has_nilbit(c, k, iv)) {
+          char objp[200]; snprintf(objp, sizeof objp, "((sp_%s *)_t%d.v.p)->", c->classes[k].c_name, tv);
+          char bit[400]; ivar_nilbit_test(c, k, iv, objp, bit, sizeof bit);
+          buf_printf(b, "(%s ? sp_box_nil() : %s(%s))", bit, t == TY_FLOAT ? "sp_box_float" : "sp_box_int", fld);
+        }
+        else emit_boxed_text(c, t, fld, b);
         buf_puts(b, "; break;");
       }
       buf_printf(b, " case SP_BUILTIN_OBJECT: _ivg%d = sp_Object_ivar_get((sp_Object *)_t%d.v.p, sp_sym_intern(\"%s\")); break;",
