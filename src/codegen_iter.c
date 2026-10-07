@@ -6239,7 +6239,10 @@ static int iter_ewi_zip_poly_arms(Compiler *c, int id, Buf *b, int indent, const
         emit_boxed_text(c, et, s1, &bx);
         buf_printf(b, "sp_PolyArray_push(_t%d, %s); ", tpz, bx.p ? bx.p : ""); free(bx.p);
         memset(&bx, 0, sizeof bx);
-        emit_boxed_text(c, et2, s2, &bx);
+        /* a number argument shorter than the receiver pads with nil */
+        if (!arg_poly && oint_kind(et2) && ob.p)
+          buf_printf(&bx, "%s(sp_%sArray_oget(%s, _t%d))", oint_box(et2), k2, ob.p, t);
+        else emit_boxed_text(c, et2, s2, &bx);
         buf_printf(b, "sp_PolyArray_push(_t%d, %s); ", tpz, bx.p ? bx.p : ""); free(bx.p);
         buf_printf(b, "sp_box_poly_array(_t%d); });\n", tpz);
       }
@@ -6256,7 +6259,13 @@ static int iter_ewi_zip_poly_arms(Compiler *c, int id, Buf *b, int indent, const
         if (arg_poly) snprintf(src2, sizeof src2, "sp_poly_arr_get(%s, _t%d)", ob.p, t);
         else snprintf(src2, sizeof src2, "sp_%sArray_get(%s, _t%d)", k2, ob.p, t);
         emit_indent(b, indent + 1); buf_printf(b, "lv_%s = ", p1n);
-        emit_zip_block_param(c, zlv1->type, et2, src2, b);
+        /* a number argument shorter than the receiver pads with nil: read
+           with its nil into a boxed or nil-holding param */
+        if (!arg_poly && oint_kind(et2) && (zlv1->type == TY_POLY || slot_is_oint(zlv1))) {
+          if (zlv1->type == TY_POLY) buf_printf(b, "%s(sp_%sArray_oget(%s, _t%d))", oint_box(et2), k2, ob.p, t);
+          else buf_printf(b, "sp_%sArray_oget(%s, _t%d)", k2, ob.p, t);
+        }
+        else emit_zip_block_param(c, zlv1->type, et2, src2, b);
         buf_puts(b, ";\n");
       }
       emit_loop_body(c, body, b, indent + 1);
