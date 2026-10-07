@@ -11784,23 +11784,26 @@ static int emit_new_call_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, 
           else if (fvt != TY_POLY) emit_boxed_text(c, fvt, vb.p ? vb.p : "sp_box_nil()", g_pre);
           else buf_puts(g_pre, vb.p ? vb.p : "sp_box_nil()");
         }
+        /* an Integer or Float fill value that can be nil is held as its oint:
+           a nil fills the new array with nils (sp_IntArray_new_nil) */
+        else if (is_numeric_literal_tag(k) && *nil_store_sfx(c, k, argv[1])) {
+          buf_printf(g_pre, "%s _t%d = ", oint_ctype(ty_array_elem(at)), tv);
+          emit_oint_expr(c, argv[1], ty_array_elem(at), g_pre);
+        }
         else {
           emit_ctype(c, ty_array_elem(at), g_pre);
           buf_printf(g_pre, " _t%d = ", tv); buf_puts(g_pre, vb.p ? vb.p : "");
         }
         buf_puts(g_pre, ";\n");
         emit_indent(g_pre, g_indent);
-        if (is_numeric_literal_tag(k)) {
+        if (is_numeric_literal_tag(k) && *nil_store_sfx(c, k, argv[1])) {
+          buf_printf(g_pre, "sp_%sArray *_t%d = _t%d.nil ? sp_%sArray_new_nil(_t%d) : sp_%sArray_new_fill(_t%d, _t%d.v);\n",
+                     k, tr, tv, k, tn, k, tn, tv);
+          emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", tr);
+        }
+        else if (is_numeric_literal_tag(k)) {
           buf_printf(g_pre, "sp_%sArray *_t%d = sp_%sArray_new_fill(_t%d, _t%d);\n", k, tr, k, tn, tv);
           emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", tr);
-          /* a fill value that can be nil sets the new array's may_nil */
-          if (*nil_store_sfx(c, k, argv[1])) {
-            char nt[48];
-            if (sp_streq(k, "Int")) snprintf(nt, sizeof nt, "_t%d == SP_INT_NIL", tv);
-            else snprintf(nt, sizeof nt, "sp_float_is_nil(_t%d)", tv);
-            emit_indent(g_pre, g_indent);
-            buf_printf(g_pre, "if (SP_UNLIKELY(%s) && _t%d > 0) sp_%sArray_note_nil(_t%d);\n", nt, tn, k, tr);
-          }
         }
         else {
           buf_printf(g_pre, "sp_%sArray *_t%d = sp_%sArray_new();\n", k, tr, k);

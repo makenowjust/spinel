@@ -2234,6 +2234,13 @@ static int emit_ivar_cvar_gvar_expr(Compiler *c, int id, Buf *b, const NodeTable
       buf_puts(b, ")");
       return 1;
     }
+    /* an Integer or Float class variable some write leaves nil in: its oint */
+    if (cvar_is_oint(c, cid, idx)) {
+      emit_oint_expr(c, v, ct, b);
+      emit_cvar_set_flag_after(c, cid, nm, b);
+      buf_printf(b, ", %s)", sref);
+      return 1;
+    }
     if (emit_empty_container_for_slot(c, v, ct, b)) { /* emitted at the slot's type */ }
     else if (ct == TY_POLY) emit_boxed(c, v, b);
     else if (emit_array_into_poly_slot(c, ct, v, b)) { }
@@ -2274,7 +2281,7 @@ static int emit_ivar_cvar_gvar_expr(Compiler *c, int id, Buf *b, const NodeTable
     }
     else if (emit_array_op_assign_value(c, gref, lv->type, op, v, b)) { }
     else if (emit_poly_op_assign_value(c, gref, lv->type, op, v, b)) { }
-    else if (emit_scalar_op_assign_value(c, gref, lv->type, op, v, lv->nullable_int, b)) { }
+    else if (emit_scalar_op_assign_value(c, gref, lv->type, op, v, gvar_is_oint(c, lv), b)) { }
     else {
       buf_printf(b, "(gv_%s %s= ", rn, op ? op : "+");
       emit_coerce(c, v, lv->type, CO_HOLD, "the operand of an `op=`", b); buf_puts(b, ")");
@@ -2331,8 +2338,7 @@ static int emit_ivar_cvar_gvar_expr(Compiler *c, int id, Buf *b, const NodeTable
     }
     else if (emit_array_op_assign_value(c, ref, ct, op, v, b)) { }
     else if (emit_poly_op_assign_value(c, ref, ct, op, v, b)) { }
-    else if (emit_scalar_op_assign_value(c, ref, ct, op, v,
-                                         idx >= 0 && c->classes[cid].cvar_nullable_int[idx], b)) { }
+    else if (emit_scalar_op_assign_value(c, ref, ct, op, v, cvar_is_oint(c, cid, idx), b)) { }
     else {
       buf_printf(b, "(%s %s= ", ref, op ? op : "+");
       emit_coerce(c, v, ct, CO_HOLD, "the operand of an `op=`", b); buf_puts(b, ")");
@@ -3208,8 +3214,13 @@ else {
         if (comp_ntype(c, els[j]) == TY_UNKNOWN) emit_unresolved_coerced(c, els[j], ty_array_elem(at), &el);
         else emit_coerce(c, els[j], ty_array_elem(at), CO_HOLD, "an Array literal's element", &el);
         emit_indent(g_pre, g_indent);
-        /* an element that can be nil sets the literal's may_nil */
-        buf_printf(g_pre, "sp_%sArray_push%s(_t%d, ", k, nil_store_sfx(c, k, els[j]), t);
+        /* an element that can be nil stores with it */
+        const char *esfx = nil_store_sfx(c, k, els[j]);
+        if (esfx[0] && (sp_streq(k, "Int") || sp_streq(k, "Float"))) {
+          free(el.p); memset(&el, 0, sizeof el);
+          emit_elem_store_value(c, k, els[j], &el);
+        }
+        buf_printf(g_pre, "sp_%sArray_push%s(_t%d, ", k, esfx, t);
         buf_puts(g_pre, el.p ? el.p : "");
         buf_puts(g_pre, ");\n");
         free(el.p);
@@ -3612,13 +3623,18 @@ static int emit_and_or_begin_expr(Compiler *c, int id, Buf *b, const NodeTable *
       if (vt == TY_VOID || vt == TY_UNKNOWN || vt == TY_NIL) vt = TY_POLY;
       int t2 = ++g_tmp;
       Buf lb; memset(&lb, 0, sizeof lb);
+      /* an Integer / Float left that can be nil is held as its oint; the
+         expression's value is the left's (its oint where the chain can be
+         nil, else its value) */
+      int lo2 = oint_kind(vt) && node_has_oint_form(c, left);
+      int ro2 = cond_res_oint(c, id, vt);
       if (vt == TY_POLY && lt != TY_POLY) emit_boxed(c, left, &lb);
+      else if (lo2) emit_oint_expr(c, left, vt, &lb);
       else emit_expr(c, left, &lb);
       Buf tc2; memset(&tc2, 0, sizeof tc2);
       if (vt == TY_POLY)       buf_printf(&tc2, "sp_poly_truthy(_t%d)", t2);
       else if (vt == TY_BOOL)  buf_printf(&tc2, "_t%d", t2);
-      else if (vt == TY_INT)   buf_printf(&tc2, "(_t%d != SP_INT_NIL)", t2);
-      else if (vt == TY_FLOAT) buf_printf(&tc2, "(!sp_float_is_nil(_t%d))", t2);
+      else if (oint_kind(vt))  buf_printf(&tc2, lo2 ? "(!_t%d.nil)" : "(1)", t2);
       else if (vt == TY_SYMBOL) buf_printf(&tc2, "(_t%d != (sp_sym)-1)", t2);
       else if (vt == TY_CLASS) buf_printf(&tc2, "(!sp_class_nil_p(_t%d))", t2);
       else if (vt == TY_STRING || ty_is_array(vt) || ty_is_hash(vt) || ty_is_object(vt) ||
@@ -3627,11 +3643,13 @@ static int emit_and_or_begin_expr(Compiler *c, int id, Buf *b, const NodeTable *
         buf_printf(&tc2, "(_t%d != 0)", t2);
       else buf_puts(&tc2, "1");
       buf_puts(b, "({ ");
-      emit_ctype(c, vt, b);
+      emit_res_ctype(c, vt, lo2, b);
       buf_printf(b, " _t%d = %s; if (%s%s) {\n", t2, lb.p ? lb.p : "0",
                  is_and ? "" : "!", tc2.p ? tc2.p : "1");
       emit_stmt(c, right, b, g_indent + 1);
-      buf_printf(b, "}\n _t%d; })", t2);
+      if (lo2 && !ro2) buf_printf(b, "}\n _t%d.v; })", t2);
+      else if (!lo2 && ro2) buf_printf(b, "}\n %s(_t%d); })", oint_of(vt), t2);
+      else buf_printf(b, "}\n _t%d; })", t2);
       free(lb.p); free(tc2.p);
       return 1;
     }

@@ -1837,7 +1837,9 @@ void emit_block_locals_reset(Compiler *c, int blk, Buf *b, int indent) {
                        c->classes[ty_object_class(lv->type)].c_name);
           }
           else {
-            const char *nv = nil_value(lv->type);
+            /* a block-local starts every iteration nil: an oint slot's nil,
+               a plain scalar's zero */
+            const char *nv = slot_is_oint(lv) ? oint_nil(lv->type) : nil_value(lv->type);
             if (!nv) nv = lv->type == TY_RANGE ? "(sp_Range){0}" : default_value_from_compiler(c, lv->type);
             buf_printf(b, "lv_%s = %s;\n", rename_local(tmpn), nv);
           }
@@ -2780,6 +2782,12 @@ const char *ffi_cb_arg_ctype(const char *spec) {
    sentinel when a `||=` writes the local or a read can run before any write
    (#3388). */
 const char *local_init_value(Compiler *c, LocalVar *lv) {
+  /* an Integer or Float slot that holds its nil starts nil where a read can
+     run before any write, its zero otherwise */
+  if (slot_is_oint(lv)) {
+    int unset = (lv->or_written || lv->maybe_unset) && !lv->is_param && !lv->is_block_param;
+    return unset ? oint_nil(lv->type) : lv->type == TY_FLOAT ? "sp_ofloat_of(0.0)" : "sp_oint_of(0)";
+  }
   if ((lv->or_written || lv->maybe_unset) && !lv->is_param && !lv->is_block_param) {
     const char *nv = nil_value(lv->type);
     if (nv) return nv;
@@ -3229,7 +3237,17 @@ const char *nil_store_sfx(Compiler *c, const char *k, int node) {
   TyKind t = r.as_ty;
   if (t == TY_NIL || r.kind == RK_BOXED || t == TY_UNKNOWN) return "_nilable";
   if (t != TY_INT && t != TY_FLOAT) return "";
-  return enum_builtin_node(c, node) ? "_nilable" : "";
+  /* a value with an oint form stores with its nil (the _nilable store takes
+     an sp_oint: emit_elem_store_value) */
+  return node_has_oint_form(c, node) ? "_nilable" : "";
+}
+/* The value node `node` stored into an Integer / Float array (kind k) as
+   the store nil_store_sfx picked takes it: an sp_oint for the `_nilable`
+   store, the plain element otherwise. */
+void emit_elem_store_value(Compiler *c, const char *k, int node, Buf *b) {
+  TyKind et = sp_streq(k, "Float") ? TY_FLOAT : TY_INT;
+  if (nil_store_sfx(c, k, node)[0]) emit_oint_expr(c, node, et, b);
+  else emit_coerce(c, node, et, CO_HOLD, "an Array element", b);
 }
 /* The C text asking whether the Integer or Float array `arr` (C text; `node`
    its Ruby expression, of kind `t`) may hold nil: "1" where analyze marked
@@ -5007,12 +5025,17 @@ int node_is_oint(Compiler *c, int node) {
     return nullable_int_value(c, node);
   case NK_CallNode: {
     if (nullable_int_value(c, node)) return 1;
+    /* `r&.m`: nil when r is -- except on the safe-navigation emitter's
+       re-entry for the same node (g_sn_skip), which emits the plain call on
+       the guarded receiver and wraps it itself */
     const char *sop = nt_str(nt, node, "call_operator");
-    if (sop && sp_streq(sop, "&.")) return 1;
+    if (sop && sp_streq(sop, "&.") && g_sn_skip != node) return 1;
     const char *nm = nt_str(nt, node, "name");
     if (!nm) return 0;
     int blk = nt_ref(nt, node, "block");
     int r = nt_ref(nt, node, "receiver");
+    /* a boxed receiver's size is sp_poly_size: nil for an Enumerator's */
+    if (sp_streq(nm, "size") && r >= 0 && comp_ntype(c, r) == TY_POLY && blk < 0) return 1;
     /* a proc's result comes back boxed and is unboxed with its nil */
     if (is_call_or_yield(nm) && r >= 0 && comp_ntype(c, r) == TY_PROC) return 1;
     /* the runtime functions that answer an sp_oint (RUNTIME-API.md) */

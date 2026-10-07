@@ -2215,10 +2215,16 @@ int emit_nilfree_operand(Compiler *c, int v, const char *op, int left, const cha
    look at the operands only then (SP_FLOAT_NIL_CK_NAN); otherwise each side
    that can be nil is tested. The caller has emitted the indent. Answers 1
    when it emitted the write. */
+const char *g_opa_niltest = NULL, *g_opa_clear = NULL;
 int emit_scalar_op_assign(Compiler *c, const char *lval, TyKind t, const char *op,
                           int v, int capture, int lhs_nil, Buf *b) {
   const NodeTable *nt = c->nt;
   if (!op) return 0;
+  /* a field with a nil bit: the plain field, tested for its bit (the
+     operator's receiver is nil: NoMethodError) and the bit cleared after */
+  const char *bnil = g_opa_niltest, *bclr = g_opa_clear;
+  g_opa_niltest = g_opa_clear = NULL;
+  if (bnil) lhs_nil = 0;
   TyKind vt = comp_ntype(c, v);
   const char *fn = t == TY_INT ? int_arith_fn(op)
                  : t == TY_BIGINT ? bigint_arith_fn(op) : NULL;
@@ -2251,10 +2257,12 @@ int emit_scalar_op_assign(Compiler *c, const char *lval, TyKind t, const char *o
   }
   const char *captured = src;
   if (onil) { snprintf(srcbuf, sizeof srcbuf, "%s(%s, \"%s\")", oint_val(t), src, op); src = srcbuf; }
+  else if (bnil) { snprintf(srcbuf, sizeof srcbuf, "({ if (SP_UNLIKELY(%s)) sp_nil_recv(\"%s\"); %s; })", bnil, op, src); src = srcbuf; }
   if (is_shift && nt_kind(nt, v) == NK_IntegerNode) {
     long long vlit = nt_int(nt, v, "value", 0);
     if (sp_streq(op, "<<") || vlit < 0 || vlit >= 64) {
       buf_printf(b, "%s = %ssp_int_%s(%s, %lldLL)%s;", lval, wo, sp_streq(op, "<<") ? "shl" : "shr", src, vlit, wc);
+      if (bclr) buf_printf(b, " %s;", bclr);
       op_assign_slot_end(captured, lval, b);
       return 1;
     }
@@ -2299,8 +2307,22 @@ int emit_scalar_op_assign(Compiler *c, const char *lval, TyKind t, const char *o
   else if (ffn) buf_printf(b, "%s = %s%s(%s, %s)%s;", lval, wo, ffn, src, rhs, wc);
   else if (src == lval) buf_printf(b, "%s %s= %s;", lval, op, rhs);
   else buf_printf(b, "%s = %s%s %s (%s)%s;", lval, wo, src, op, rhs, wc);
+  if (bclr) buf_printf(b, " %s;", bclr);
   op_assign_slot_end(captured, lval, b);
   free(rb.p);
+  return 1;
+}
+/* Arm emit_scalar_op_assign for ivar iv of class cid through receiver
+   prefix `obj` when the field has a nil bit; answers whether it did (the
+   call's lhs_nil is then 0), else whether the slot is an oint static. */
+int opa_arm_ivar(Compiler *c, int cid, int iv, const char *obj, char *nt, size_t ncap, char *cl, size_t ccap) {
+  static char dummy;
+  (void)dummy;
+  if (cid < 0 || iv < 0) return 0;
+  if (!ivar_has_nilbit(c, cid, iv)) return 0;
+  ivar_nilbit_test(c, cid, iv, obj, nt, ncap);
+  ivar_nilbit_clear(c, cid, iv, obj, cl, ccap);
+  g_opa_niltest = nt; g_opa_clear = cl;
   return 1;
 }
 
@@ -9884,6 +9906,7 @@ static int emit_multi_write_scalar(Compiler *c, int id, Buf *b, int indent, cons
         emit_indent(b, indent);
         buf_printf(b, "sp_%sArray_push%s(_t%d, ", rk0, nil_store_sfx(c, rk0, value), tr0);
         if (rat0 == TY_POLY_ARRAY) emit_boxed(c, value, b);
+        else if (sp_streq(rk0, "Int") || sp_streq(rk0, "Float")) emit_elem_store_value(c, rk0, value, b);
         else emit_expr(c, value, b);
         buf_puts(b, ");\n");
       }
@@ -11550,6 +11573,8 @@ static int emit_ivar_cvar_write_stmt(Compiler *c, int id, Buf *b, int indent, co
       if (nt_kind(nt, v) == NK_NilNode) buf_puts(b, "NULL");
       else emit_strbuf_value(c, &slot, v, b);
     }
+    /* an Integer or Float class variable some write leaves nil in: its oint */
+    else if (cvar_is_oint(c, sc, h.idx)) emit_oint_expr(c, v, ct, b);
     else if (emit_empty_container_for_slot(c, v, ct, b)) { /* emitted at the slot's type */ }
     else if (ct == TY_POLY) emit_boxed(c, v, b);
     else if (emit_array_into_poly_slot(c, ct, v, b)) { }
@@ -11584,8 +11609,7 @@ static int emit_ivar_cvar_write_stmt(Compiler *c, int id, Buf *b, int indent, co
     }
     else if (emit_array_op_assign(c, ref, ct, op, v, b)) { }
     else if (ct == TY_POLY && emit_poly_op_assign(c, ref, op, v, 1, b)) { }
-    else if (emit_scalar_op_assign(c, ref, ct, op, v, 1,
-                                   idx >= 0 && c->classes[sc].cvar_nullable_int[idx], b)) { }
+    else if (emit_scalar_op_assign(c, ref, ct, op, v, 1, cvar_is_oint(c, sc, idx), b)) { }
     else {
       buf_printf(b, "%s %s= ", ref, op ? op : "+");
       emit_coerce(c, v, ct, CO_HOLD, "the operand of an `op=`", b); buf_puts(b, ";\n");
@@ -11848,7 +11872,11 @@ static int emit_ivar_cvar_write_stmt(Compiler *c, int id, Buf *b, int indent, co
       /* An int ivar op-assign takes the overflow-checked helpers like the
          binary form (raw `@x *= y` wrapped where `@x * y` raised), and reads
          the ivar before an effectful rhs, which may reassign it. */
-      if (emit_scalar_op_assign(c, ref, vt, op, ival, 1, vnil, b)) return 1;
+      { int ocid, oiv, ok = ivar_node_slot(c, id, &ocid, &oiv);
+        char ont[200], ocl[200], opf[128]; snprintf(opf, sizeof opf, "%s%s", g_self, g_self_deref);
+        int armed = ok == 1 && opa_arm_ivar(c, ocid, oiv, opf, ont, sizeof ont, ocl, sizeof ocl);
+        int soint = ok == 2 && civ_is_oint(c, ocid, oiv);
+        if (emit_scalar_op_assign(c, ref, vt, op, ival, 1, armed ? 0 : soint, b)) return 1; }
       buf_printf(b, "%s %s= ", ref, op ? op : "+");
       /* a poly RHS feeding an int/float ivar op-assign needs coercing to the
          scalar before the C operator (e.g. `@bg_pattern |= chr_mem[i] * 256`). */
@@ -11960,8 +11988,10 @@ static int emit_attr_global_const_write_stmt(Compiler *c, int id, Buf *b, int in
       }
       else {
         char lval[400]; snprintf(lval, sizeof lval, "_t%d%siv_%s", trecv, acc, iv_c(rn));
-        /* the backing ivar's nil, as `@x op= v` takes it */
-        if (emit_scalar_op_assign(c, lval, ivt, op, val, 1, c->classes[rdcls].ivar_nullable_int[ivx], b)) return 1;
+        /* the backing ivar's nil bit, as `@x op= v` takes it */
+        { char ont[200], ocl[200], opf[64]; snprintf(opf, sizeof opf, "_t%d%s", trecv, acc);
+          opa_arm_ivar(c, rdcls, ivx, opf, ont, sizeof ont, ocl, sizeof ocl);
+          if (emit_scalar_op_assign(c, lval, ivt, op, val, 1, 0, b)) return 1; }
         buf_printf(b, "_t%d%siv_%s = _t%d%siv_%s %s ", trecv, acc, iv_c(rn), trecv, acc, iv_c(rn), op ? op : "+");
         if (rhst == TY_POLY && (ivt == TY_INT || ivt == TY_BOOL)) {
           buf_puts(b, op_assign_int_conv(ivt, op)); emit_expr(c, val, b); buf_puts(b, ")");
@@ -12115,7 +12145,9 @@ static int emit_attr_global_const_write_stmt(Compiler *c, int id, Buf *b, int in
         }
         else {
           char lval[320]; snprintf(lval, sizeof lval, "_o->iv_%s", iv_c(rn));
-          if (emit_scalar_op_assign(c, lval, ivt, op, val, 0, c->classes[pdcls].ivar_nullable_int[ivx], b)) {
+          char ont[200], ocl[200];
+          opa_arm_ivar(c, pdcls, ivx, "_o->", ont, sizeof ont, ocl, sizeof ocl);
+          if (emit_scalar_op_assign(c, lval, ivt, op, val, 0, 0, b)) {
             emit_indent(b, indent + 1); buf_puts(b, "break; }\n");
             continue;
           }
@@ -12413,7 +12445,7 @@ static int emit_attr_global_const_write_stmt(Compiler *c, int id, Buf *b, int in
     }
     else if (emit_array_op_assign(c, gref, lv->type, op, v, b)) { }
     else if (lv->type == TY_POLY && emit_poly_op_assign(c, gref, op, v, 1, b)) { }
-    else if (emit_scalar_op_assign(c, gref, lv->type, op, v, 1, lv->nullable_int, b)) { }
+    else if (emit_scalar_op_assign(c, gref, lv->type, op, v, 1, gvar_is_oint(c, lv), b)) { }
     else {
       buf_printf(b, "gv_%s %s= ", rn, op ? op : "+");
       emit_coerce(c, v, lv->type, CO_HOLD, "the operand of an `op=`", b); buf_puts(b, ";\n");

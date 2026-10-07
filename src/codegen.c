@@ -6822,7 +6822,7 @@ void emit_inlined_local_decl(Compiler *c, LocalVar *lv, const char *rn, Buf *b, 
     emit_indent(b, din);
     if (inlined_local_needs_volatile(c, lv)) {
       Buf ct; memset(&ct, 0, sizeof ct);
-      emit_ctype(c, lv->type, &ct);
+      emit_slot_ctype(c, lv, &ct);
       const char *t = ct.p ? ct.p : "";
       size_t tl = strlen(t);
       while (tl > 0 && t[tl - 1] == ' ') tl--;
@@ -6831,7 +6831,7 @@ void emit_inlined_local_decl(Compiler *c, LocalVar *lv, const char *rn, Buf *b, 
       else buf_printf(b, "volatile %s", t);
       free(ct.p);
     }
-    else emit_ctype(c, lv->type, b);
+    else emit_slot_ctype(c, lv, b);
     buf_printf(b, " lv_%s = %s;\n", rn, local_init_value(c, lv));
     if (lv->type == TY_POLY) { emit_indent(b, din); buf_printf(b, "SP_GC_ROOT_RBVAL(lv_%s);\n", rn); }
     else if (needs_root(lv->type) && !comp_ty_value_obj(c, lv->type)) {

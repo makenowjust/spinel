@@ -2045,6 +2045,12 @@ void emit_scalar_operand_op(Compiler *c, int node, const char *op, Buf *b);
 /* Ruby truthiness of an Integer / Float node as a C condition: `!o.nil`
    for one with an oint form, else always true (the node evaluated) */
 void emit_oint_truthy(Compiler *c, int node, TyKind t, Buf *b);
+/* the value of a typed Array store as nil_store_sfx's store takes it */
+void emit_elem_store_value(Compiler *c, const char *k, int node, Buf *b);
+/* an op-assign on an Integer / Float field with a nil bit: the field's
+   nil test (NoMethodError for nil at the operator) and the bit's clear
+   after the store (codegen_stmt.c emit_scalar_op_assign reads them) */
+extern const char *g_opa_niltest, *g_opa_clear;
 /* a method's Integer / Float return that can be nil is an sp_oint /
    sp_ofloat (codegen.c): the C return type, the dead value where control
    never arrives, and a C call of it boxed */
