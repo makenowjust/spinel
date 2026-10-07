@@ -10280,8 +10280,16 @@ static void emit_struct_member_value(Compiler *c, ClassInfo *cls, int a, int vno
   /* a nil member value into a scalar slot is the slot's sentinel
      (the member joined nil with an Integer or a Float) */
   else if ((cls->ivar_types[a] == TY_INT || cls->ivar_types[a] == TY_FLOAT) &&
-           (nt_kind(nt, vnode) == NK_NilNode || comp_ntype(c, vnode) == TY_NIL))
-    emit_expr_slot(c, vnode, cls->ivar_types[a], mv);
+           (nt_kind(nt, vnode) == NK_NilNode || comp_ntype(c, vnode) == TY_NIL)) {
+    /* a member with a nil bit takes 0, the bit set after the construction
+       (emit_struct_new_call); one without has the slot's own nil */
+    if (ivar_has_nilbit(c, (int)(cls - c->classes), a)) {
+      if (nt_kind(nt, vnode) != NK_NilNode) { buf_puts(mv, "((void)("); emit_expr(c, vnode, mv); buf_puts(mv, "), "); }
+      buf_puts(mv, cls->ivar_types[a] == TY_FLOAT ? "0.0" : "0");
+      if (nt_kind(nt, vnode) != NK_NilNode) buf_puts(mv, ")");
+    }
+    else emit_expr_slot(c, vnode, cls->ivar_types[a], mv);
+  }
   else emit_unresolved_coerced(c, vnode, cls->ivar_types[a], mv);
 }
 
@@ -10768,13 +10776,19 @@ int emit_struct_new_call(Compiler *c, int id, int ci, int argc, const int *argv,
     }
     else if (m < argc) v = argv[m];
     else { if (!cls->is_data) unset[un++] = m; continue; }
-    if (v < 0 || !node_has_oint_form(c, v) || subtree_has_side_effect(c, v)) continue;
+    if (v < 0) continue;
+    /* a nil (literal or typed) member: 0 in the constructor, the bit set */
+    if (nt_kind(nt, v) == NK_NilNode || comp_ntype(c, v) == TY_NIL) { unset[un++] = m; continue; }
+    int boxed = repr_of(c, v).kind == RK_BOXED;
+    if ((!node_has_oint_form(c, v) && !boxed) || subtree_has_side_effect(c, v)) continue;
     int t = ++g_tmp;
     emit_indent(g_pre, g_indent);
     buf_printf(g_pre, "%s _t%d = ", oint_ctype(cls->ivar_types[m]), t);
     emit_oint_expr(c, v, cls->ivar_types[m], g_pre);
     buf_puts(g_pre, ";\n");
-    int sl = view_bind(v, "_t%d.v", t);
+    /* a boxed argument is read back boxed by the member's unbox: its value */
+    int sl = boxed ? view_bind(v, "%s(_t%d.v)", cls->ivar_types[m] == TY_FLOAT ? "sp_box_float" : "sp_box_int", t)
+                   : view_bind(v, "_t%d.v", t);
     if (bind0 < 0) bind0 = sl;
     otmp[on] = t; omem[on] = m; on++;
   }
