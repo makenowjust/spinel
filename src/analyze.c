@@ -28193,8 +28193,9 @@ static void widen_nullable_keyed_hash_literals(Compiler *c) {
     for (int j = 0; j < n; j++) {
       if (nt_kind(nt, els[j]) != NK_AssocNode) continue;
       int k = nt_ref(nt, els[j], "key"), v = nt_ref(nt, els[j], "value");
-      if ((kt == TY_INT || kt == TY_FLOAT) && nullable_int_value(c, k)) kn = 1;
-      if ((vt == TY_INT || vt == TY_FLOAT) && nullable_int_value(c, v)) vn = 1;
+      /* (a boxed key or value -- a promote-widened local -- can be nil too) */
+      if ((kt == TY_INT || kt == TY_FLOAT) && (nullable_int_value(c, k) || (k >= 0 && c->ntype[k] == TY_POLY))) kn = 1;
+      if ((vt == TY_INT || vt == TY_FLOAT) && (nullable_int_value(c, v) || (v >= 0 && c->ntype[v] == TY_POLY))) vn = 1;
     }
     if (!kn && !vn) continue;
     TyKind nk = kn ? TY_POLY : kt, nv = vn ? TY_POLY : vt;
@@ -28233,8 +28234,8 @@ static void widen_nullable_keyed_hash_literals(Compiler *c) {
     const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &an) : NULL;
     if (!av || an != 2) continue;
     TyKind kt = ty_hash_key(ht), vt = ty_hash_val(ht);
-    int kn = (kt == TY_INT || kt == TY_FLOAT) && nullable_int_value(c, av[0]);
-    int vn = (vt == TY_INT || vt == TY_FLOAT) && nullable_int_value(c, av[1]);
+    int kn = (kt == TY_INT || kt == TY_FLOAT) && (nullable_int_value(c, av[0]) || c->ntype[av[0]] == TY_POLY);
+    int vn = (vt == TY_INT || vt == TY_FLOAT) && (nullable_int_value(c, av[1]) || c->ntype[av[1]] == TY_POLY);
     if (!kn && !vn) continue;
     TyKind nk = kn ? TY_POLY : kt, nv = vn ? TY_POLY : vt;
     TyKind want = nk == TY_SYMBOL ? TY_SYM_POLY_HASH : ty_hash_of(nk, nv);
