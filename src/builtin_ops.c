@@ -756,7 +756,7 @@ static const BuiltinOp bop_rows[] = {
   { TY_STR_RANGE, "%",            1,   1, BF_NONE,     TY_ENUMERATOR,  BOPE_TEMPLATE, "({ sp_StrRange _t$T = $r; sp_StrArray *_t$t = sp_srange_to_a(_t$T); SP_GC_ROOT(_t$t); sp_int _t$u = $i0; if (_t$u <= 0) sp_raise_cls(\"ArgumentError\", \"step can't be 0\"); sp_StrArray *_t$v = sp_StrArray_new(); SP_GC_ROOT(_t$v); for (sp_int _t$w = 0; _t$w < sp_StrArray_length(_t$t); _t$w += _t$u) sp_StrArray_push(_t$v, sp_StrArray_get(_t$t, _t$w)); sp_enum_with_src(sp_Enumerator_new_from(sp_box_str_array(_t$v)), sp_box_srange(_t$T), sp_str_concat(sp_str_concat(SPL(\"%(\"), sp_int_to_s(_t$u)), SPL(\")\"))); })" },
   { TY_STR_RANGE, "class",        0, 127, BF_ANY,      TY_CLASS,       BOPE_NONE },
   { TY_STR_RANGE, "hash",         0, 127, BF_ANY,      TY_INT,         BOPE_NONE },
-  { TY_STR_RANGE, "size",         0,   0, BF_ANY,      TY_NIL,         BOPE_TEMPLATE, "((void)($r), sp_oint_arg(sp_oint_nil()))" },
+  { TY_STR_RANGE, "size",         0,   0, BF_ANY,      TY_NIL,         BOPE_TEMPLATE, "((void)($r), $<sp_oint_nil()$>)" },  /* nil: an sp_oint where the consumer takes one */
   { TY_STR_RANGE, "to_a",         0,   0, BF_ANY,      TY_STR_ARRAY,   BOPE_NONE },
   { TY_STR_RANGE, "entries",      0,   0, BF_ANY,      TY_STR_ARRAY,   BOPE_NONE },
   { TY_STR_RANGE, "freeze",       0, 127, BF_ANY,      TY_STR_RANGE,   BOPE_NONE },

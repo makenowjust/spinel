@@ -31,6 +31,29 @@ static void emit_attr_writer_converted(Compiler *c, int arg, TyKind ivt, int tmp
   return;
 }
 
+/* An Integer or Float field with a nil bit (a writer called with nil, by
+   name or through send): the store keeps the bit in step, and the
+   assignment's value is the field read back with its bit: boxed, the oint,
+   or the field for a plain consumer (a discarded value must not raise
+   on the nil it stored). Answers 0 for any other field. */
+static int emit_attr_writer_nilbit(Compiler *c, int id, int cid, int iv, int tmp,
+                                   const char *name, int arg, Buf *b) {
+  if (iv < 0) return 0;
+  TyKind t = c->classes[cid].ivar_types[iv];
+  if (!oint_kind(t) || !ivar_has_nilbit(c, cid, iv)) return 0;
+  char pfx[40]; snprintf(pfx, sizeof pfx, "_t%d->", tmp);
+  buf_printf(b, "_t%d->iv_%s = ", tmp, iv_c(name));
+  emit_ivar_value_nilbit(c, cid, iv, pfx, arg, b);
+  char bt[320]; ivar_nilbit_test(c, cid, iv, pfx, bt, sizeof bt);
+  char ov[700]; snprintf(ov, sizeof ov, "((%s) ? %s : %s(_t%d->iv_%s))", bt, oint_nil(t), oint_of(t), tmp, iv_c(name));
+  buf_puts(b, "; ");
+  if (repr_of(c, id).kind == RK_BOXED) buf_printf(b, "%s(%s)", oint_box(t), ov);
+  else if (node_is_oint(c, id)) buf_puts(b, ov);
+  else buf_printf(b, "_t%d->iv_%s", tmp, iv_c(name));   /* a plain consumer (or none): the field */
+  buf_puts(b, "; })");
+  return 1;
+}
+
 /* respond_to?, method_defined? and its kin, const_set / const_get / const_defined? */
 int emit_call_reflection_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv, int argc, const int *argv, TyKind rt) {
   if (sp_streq(name, "respond_to?") && argc >= 1 && !respond_to_user_defined(c, id, recv)) {
@@ -1149,6 +1172,8 @@ int emit_call_cmethod_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
           char _aself[32]; snprintf(_aself, sizeof _aself, "_t%d", _atmp);
           buf_printf(b, "({ sp_%s *_t%d = ", c->classes[_arc].c_name, _atmp); emit_expr(c, recv, b); buf_puts(b, "; ");
           emit_frozen_obj_guard(c, _arc, _aself, b);
+          if (argc >= 1 && emit_attr_writer_nilbit(c, id, _adefc < 0 ? _arc : _adefc, _aiv, _atmp, _abase, argv[0], b))
+            return 1;
           /* a typed slot (an --rbs seed pins one) given a boxed value: the
              slot takes it unboxed, and the assignment's value is still the
              right-hand side, boxed as it came. Stored raw, an sp_RbVal went

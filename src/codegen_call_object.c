@@ -2341,6 +2341,23 @@ static void emit_reflect_ivar_set(Compiler *c, int id, int recv, int value, int 
   buf_puts(b, "; })");
 }
 
+/* After a store into a number field with a nil bit (objp: the receiver
+   text up to the field): the call's value is the field read back with its
+   bit, boxed or as the oint, or the field for a plain consumer (a discarded
+   value must not raise on the nil it stored); closes the
+   statement expression. */
+static void emit_nilbit_store_answer(Compiler *c, int id, int cid, int iv, const char *objp, Buf *b) {
+  TyKind t = c->classes[cid].ivar_types[iv];
+  char bt[320]; ivar_nilbit_test(c, cid, iv, objp, bt, sizeof bt);
+  char ov[800]; snprintf(ov, sizeof ov, "((%s) ? %s : %s(%siv_%s))", bt, oint_nil(t), oint_of(t), objp,
+                         iv_c(c->classes[cid].ivars[iv] + 1));
+  buf_puts(b, "; ");
+  if (repr_of(c, id).kind == RK_BOXED) buf_printf(b, "%s(%s)", oint_box(t), ov);
+  else if (node_is_oint(c, id)) buf_puts(b, ov);
+  else buf_printf(b, "%siv_%s", objp, iv_c(c->classes[cid].ivars[iv] + 1));   /* a plain consumer (or none) */
+  buf_puts(b, "; })");
+}
+
 /* Literal ivar access depends on the class layout and member boundary,
    not just the receiver kind and argument kinds of a builtin row. */
 int emit_object_ivar_call(Compiler *c, int id, const char *name, int recv, TyKind rt,
@@ -2406,7 +2423,7 @@ int emit_object_ivar_call(Compiler *c, int id, const char *name, int recv, TyKin
             char objp[40]; snprintf(objp, sizeof objp, "_t%d->", tf9);
             buf_printf(b, "%siv_%s = ", objp, iv_c(c->classes[cid].ivars[mi] + 1));
             emit_ivar_value_nilbit(c, cid, mi, objp, argv[1], b);
-            buf_puts(b, "; })");
+            emit_nilbit_store_answer(c, id, cid, mi, objp, b);
             return 1;
           }
           buf_printf(b, "_t%d->iv_%s = ", tf9, iv_c(sym + 1));
@@ -2425,7 +2442,7 @@ int emit_object_ivar_call(Compiler *c, int id, const char *name, int recv, TyKin
           char objp[40]; snprintf(objp, sizeof objp, "_t%d->", tfo);
           buf_printf(b, "%siv_%s = ", objp, iv_c(c->classes[cid].ivars[mi] + 1));
           emit_ivar_value_nilbit(c, cid, mi, objp, argv[1], b);
-          buf_puts(b, "; })");
+          emit_nilbit_store_answer(c, id, cid, mi, objp, b);
           return 1;
         }
         buf_puts(b, "(("); emit_expr(c, recv, b);
