@@ -79,8 +79,8 @@ static inline sp_int sp_range_count(sp_Range r){
    path only then. */
 static inline sp_IntArray *sp_range_to_ia(sp_Range r){
   /* an endless range cannot materialize (CRuby raises instead of hanging) */
-  if(r.last==INTPTR_MAX)sp_raise_cls("RangeError","cannot convert endless range to an array");
-  if(r.first==INTPTR_MIN)sp_raise_cls("TypeError","can't iterate from NilClass");
+  if(r.last==SP_RANGE_NO_END)sp_raise_cls("RangeError","cannot convert endless range to an array");
+  if(r.first==SP_RANGE_NO_BEGIN)sp_raise_cls("TypeError","can't iterate from NilClass");
   sp_int s=sp_range_step(r);
   if(s==1)return sp_IntArray_from_range(r.first,r.last-r.excl);
   return sp_IntArray_from_range_step(r.first,r.last,s,r.excl);
@@ -91,24 +91,23 @@ static inline sp_int sp_range_last_elem(sp_Range r){
   sp_int n=sp_range_count(r);
   return n<=0?r.first:r.first+(n-1)*sp_range_step(r);
 }
-/* min/max of an EMPTY (backwards, or exclusive single-point) range is nil
-   (SP_INT_NIL, the nullable-int sentinel) -- CRuby returns nil there. A
-   descending step range (5.downto(1)) still enumerates, so only a
-   positive-step empty span is nil (#2412). */
-static inline sp_int sp_range_min_v(sp_Range r){
+/* min/max of an EMPTY (backwards, or exclusive single-point) range is nil --
+   CRuby returns nil there. A descending step range (5.downto(1)) still
+   enumerates, so only a positive-step empty span is nil (#2412). */
+static inline sp_oint sp_range_min_v(sp_Range r){
   /* a beginless range has no minimum; an endless one's is its begin (#3668) */
-  if(r.first==INTPTR_MIN)sp_raise_cls("RangeError","cannot get the minimum of beginless range");
-  if(r.last==INTPTR_MAX)return r.first;
-  if(sp_range_count(r)<=0)return SP_INT_NIL; sp_int a=r.first,b=sp_range_last_elem(r); return a<b?a:b; }
+  if(r.first==SP_RANGE_NO_BEGIN)sp_raise_cls("RangeError","cannot get the minimum of beginless range");
+  if(r.last==SP_RANGE_NO_END)return sp_oint_of(r.first);
+  if(sp_range_count(r)<=0)return sp_oint_nil(); sp_int a=r.first,b=sp_range_last_elem(r); return sp_oint_of(a<b?a:b); }
 void sp_range_fend_max_raise(sp_Range r);
-static inline sp_int sp_range_max_v(sp_Range r){
+static inline sp_oint sp_range_max_v(sp_Range r){
   /* a beginless range's maximum is its end; an endless one has none (#3668) */
   /* a Float end (an infinite one too) is the maximum, which this Integer
      reader cannot answer */
-  if(r.fe){if(r.first!=INTPTR_MIN&&(sp_float)r.first>r.fend)return SP_INT_NIL;sp_range_fend_max_raise(r);}
-  if(r.last==INTPTR_MAX)sp_raise_cls("RangeError","cannot get the maximum of endless range");
-  if(r.first==INTPTR_MIN)return r.excl?r.last-1:r.last;
-  if(sp_range_count(r)<=0)return SP_INT_NIL; sp_int a=r.first,b=sp_range_last_elem(r); return a>b?a:b; }
+  if(r.fe){if(r.first!=SP_RANGE_NO_BEGIN&&(sp_float)r.first>r.fend)return sp_oint_nil();sp_range_fend_max_raise(r);}
+  if(r.last==SP_RANGE_NO_END)sp_raise_cls("RangeError","cannot get the maximum of endless range");
+  if(r.first==SP_RANGE_NO_BEGIN)return sp_oint_of(r.excl?r.last-1:r.last);
+  if(sp_range_count(r)<=0)return sp_oint_nil(); sp_int a=r.first,b=sp_range_last_elem(r); return sp_oint_of(a>b?a:b); }
 /* == compares the ends as numbers ((1..2.0) == (1..2)), eql? by class too */
 static inline sp_bool sp_range_eq(sp_Range a,sp_Range b){
   if(!a.fe&&!b.fe)return a.first==b.first&&a.last==b.last&&a.excl==b.excl;

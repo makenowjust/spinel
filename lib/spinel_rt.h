@@ -196,85 +196,17 @@ SP_NORETURN SP_COLD void sp_raise_cls(const char *cls, const char *msg);
    returns at runtime (sp_raise_cls longjmps). */
 sp_RbVal sp_raise_nomethod(const char *msg);
 
-/* An int slot holds SP_INT_NIL when a container read missed, and that value is
-   nil, not an Integer: arithmetic on it raises the way CRuby's nil does
-   (NoMethodError for nil on the left, the coercion TypeError on the right)
-   instead of computing on INTPTR_MIN. */
-SP_NORETURN SP_COLD void sp_raise_nil_int_op(sp_int a, sp_int b, const char *op);
-#define SP_INT_NIL_CK(a, b, op) \
-  if (SP_UNLIKELY((a) == SP_INT_NIL || (b) == SP_INT_NIL)) sp_raise_nil_int_op((a), (b), op)
-/* A value that is a real Integer headed for a slot that can also hold nil
-   (a local or ivar assigned nil somewhere, a boxed slot): -2^63 is the nil
-   sentinel's word, so storing it would read back as nil. RangeError instead,
-   in every overflow mode; the slot cannot hold it. Emitted only where the
-   value cannot itself be nil and is not a literal. */
-SP_NORETURN SP_COLD void sp_raise_int_min_slot(void);
-static inline sp_int sp_int_slot_ck(sp_int v) {
-  if (SP_UNLIKELY(v == SP_INT_NIL)) sp_raise_int_min_slot();
-  return v;
-}
-/* The same sentinel reaching a STRICT Integer argument slot -- an index, a
-   count, a width. A compile-time nil is refused at the emitter (`s[nil]` is
-   the TypeError), but the nil that arrives through an `Integer?` slot is an
-   sp_int the arm folded as a number: `s[s.index('z')]` walked off the front
-   and answered nil, and the bounds-checking arms printed INT64_MIN at the
-   user. `of_wording` picks CRuby's rb_convert_type phrasing for the slots
-   that use it (Random.srand, Dir.mkdir's mode). Emitted only where the #3505
-   marking says the argument can carry the sentinel, so a literal index or a
-   loop counter stays the bare value it was (#4896). */
-/* SP_COLD on these nil raisers: without it the compiler treats the check's
-   raise path as warm, and a check in a hot function (optcarrot's CPU#fetch
-   and PPU#render_pixel) cost 40% of the frame rate */
-SP_NORETURN SP_COLD void sp_raise_nil_to_int(int of_wording);
-#define SP_INT_NIL_ARG_CK(a) \
-  if (SP_UNLIKELY((a) == SP_INT_NIL)) sp_raise_nil_to_int(0)
-#define SP_INT_NIL_ARG_CK_OF(a) \
-  if (SP_UNLIKELY((a) == SP_INT_NIL)) sp_raise_nil_to_int(1)
-/* The same sentinel test ahead of a comparison (see sp_raise_nil_cmp): the
-   left nil is NoMethodError, the right the Comparable ArgumentError. Emitted
-   only for an operand that can carry the sentinel; a literal or an
-   arithmetic result never does. */
+/* A nullable Integer or Float is an sp_oint / sp_ofloat (sp_types.h); the
+   unwraps that raise as CRuby's nil would -- sp_oint_val (the receiver),
+   sp_oint_opnd (the right operand), sp_oint_arg (a strict Integer argument),
+   sp_oint_cmp_opnd (the right side of a comparison) -- live in sp_alloc.h
+   beside the boxers. A plain sp_int is never nil, so the arithmetic helpers
+   below test nothing but overflow. The raisers themselves (lib/sp_cold.c):
+   SP_COLD, since a check in a hot function (optcarrot's CPU#fetch and
+   PPU#render_pixel) with a warm raise path cost 40% of the frame rate. */
+SP_NORETURN SP_COLD void sp_raise_nil_opnd(const char *cls);
 SP_NORETURN SP_COLD void sp_raise_nil_cmp(int left_nil, const char *op, const char *cls);
-#define SP_INT_NIL_CMP_CK(a, b, op) \
-  if (SP_UNLIKELY((a) == SP_INT_NIL || (b) == SP_INT_NIL)) sp_raise_nil_cmp((a) == SP_INT_NIL, op, "Integer")
-#define SP_FLOAT_NIL_CMP_CK(a, b, op) \
-  if (SP_UNLIKELY(sp_float_is_nil(a) || sp_float_is_nil(b))) sp_raise_nil_cmp(sp_float_is_nil(a), op, "Float")
-/* The Float twin of SP_INT_NIL_CK: a nullable Float slot's nil is a NaN
-   payload the hardware carries through every arithmetic operator, so
-   `nil + 1.0` computed a NaN that read back as nil instead of raising.
-   Emitted only for an operand the #3505 marking says can be the sentinel. */
 SP_NORETURN SP_COLD void sp_raise_nil_float_op(int left_nil, const char *op);
-#define SP_FLOAT_NIL_CK(a, b, op) \
-  if (SP_UNLIKELY(sp_float_is_nil(a) || sp_float_is_nil(b))) sp_raise_nil_float_op(sp_float_is_nil(a), op)
-/* The same check on the result `r = a op b` of + - * /: a nil operand, a
-   NaN, always makes r a NaN, so the operands are only looked at when r is
-   one. NaN arithmetic that involves no nil finds neither operand nil there
-   and goes on. In a loop that is one compare of r with itself, where the
-   operand test moved each operand out of its register. Not for % or **:
-   pow(nil, 0) is 1. */
-#define SP_FLOAT_NIL_CK_NAN(r, a, b, op) \
-  if (SP_UNLIKELY((r) != (r))) { SP_FLOAT_NIL_CK(a, b, op); }
-/* ... when only the right operand can be nil, which leaves the left one
-   free to be overwritten in place */
-#define SP_FLOAT_NIL_CK_NAN_R(r, b, op) \
-  if (SP_UNLIKELY((r) != (r)) && sp_float_is_nil(b)) sp_raise_nil_float_op(0, op)
-/* The right operand of an op-assign read off a Float array outside the
-   range where it is known to be no nil (hc_array_nilfree): the element,
-   whose nil raises as the operator's right operand does. */
-static sp_float sp_FloatArray_get_operand(sp_FloatArray *a, sp_int i, const char *op) SP_UNUSED;
-static SP_NOINLINE SP_COLD sp_float sp_FloatArray_get_operand(sp_FloatArray *a, sp_int i, const char *op) {
-  sp_float v = sp_FloatArray_get(a, i);
-  if (sp_float_is_nil(v)) sp_raise_nil_float_op(0, op);
-  return v;
-}
-/* ... and the LEFT operand of a binary `+ - * /`: a nil there has no
-   operator (NoMethodError), as SP_FLOAT_NIL_CK reports it. */
-static sp_float sp_FloatArray_get_recv(sp_FloatArray *a, sp_int i, const char *op) SP_UNUSED;
-static SP_NOINLINE SP_COLD sp_float sp_FloatArray_get_recv(sp_FloatArray *a, sp_int i, const char *op) {
-  sp_float v = sp_FloatArray_get(a, i);
-  if (sp_float_is_nil(v)) sp_raise_nil_float_op(1, op);
-  return v;
-}
 
 /* A divisor that is a power of two the C compiler can see (a literal the
    emitter wrote) makes Ruby's floored % a mask: for b = 2**k, `a % b` is
@@ -285,20 +217,22 @@ static SP_NOINLINE SP_COLD sp_float sp_FloatArray_get_recv(sp_FloatArray *a, sp_
    aliasing, not work), so / keeps the general path. */
 #define SP_POW2_CONST(b) (SP_CONSTANT_P(b) && (b) > 0 && ((b) & ((b) - 1)) == 0)
 static inline sp_int sp_idiv(sp_int a, sp_int b) {
-  SP_INT_NIL_CK(a, b, "/");
   if (b == 0) sp_raise_cls("ZeroDivisionError", "divided by 0");
   sp_int q = a / b; sp_int r = a % b;
   if ((r != 0) && ((r ^ b) < 0)) q--;
   return q;
 }
-/* Integer#abs: nil-checked (and free of the -INTPTR_MIN overflow the inline
-   ternary had on the sentinel). */
+/* Integer#abs. (-2**63).abs is 2**63: a Bignum in Ruby, an overflow here in
+   raise and promote mode, and -2**63 again in wrap mode. */
 static inline sp_int sp_int_abs(sp_int a) {
-  SP_INT_NIL_CK(a, (sp_int)0, "abs");
+#ifdef SP_INT_OVERFLOW_MODE_WRAP
+  return a < 0 ? (sp_int)(0 - (uintptr_t)a) : a;
+#else
+  if (SP_UNLIKELY(a == INTPTR_MIN)) sp_raise_cls("RangeError", "integer overflow in abs");
   return a < 0 ? -a : a;
+#endif
 }
 static inline sp_int sp_imod(sp_int a, sp_int b) {
-  SP_INT_NIL_CK(a, b, "%");
   if (SP_POW2_CONST(b)) return a & (b - 1);
   if (b == 0) sp_raise_cls("ZeroDivisionError", "divided by 0");
   sp_int r = a % b;
@@ -387,15 +321,12 @@ static inline sp_int sp_iremainder(sp_int a, sp_int b) {
 #  define sp_int_neg(a)    (-(a))
 #else
 #  define sp_int_add(a, b) ({ sp_int _sp_a = (a), _sp_b = (b), _sp_r; \
-    SP_INT_NIL_CK(_sp_a, _sp_b, "+"); \
     if (sp_int_add_overflow_p(_sp_a, _sp_b, &_sp_r)) sp_raise_cls("RangeError", "integer overflow in +"); \
     _sp_r; })
 #  define sp_int_sub(a, b) ({ sp_int _sp_a = (a), _sp_b = (b), _sp_r; \
-    SP_INT_NIL_CK(_sp_a, _sp_b, "-"); \
     if (sp_int_sub_overflow_p(_sp_a, _sp_b, &_sp_r)) sp_raise_cls("RangeError", "integer overflow in -"); \
     _sp_r; })
 #  define sp_int_mul(a, b) ({ sp_int _sp_a = (a), _sp_b = (b), _sp_r; \
-    SP_INT_NIL_CK(_sp_a, _sp_b, "*"); \
     if (sp_int_mul_overflow_p(_sp_a, _sp_b, &_sp_r)) sp_raise_cls("RangeError", "integer overflow in *"); \
     _sp_r; })
 #  define sp_int_neg(a)    ({ sp_int _sp_a = (a), _sp_r; \
@@ -1264,7 +1195,7 @@ const char *sp_File_readline_sep(sp_File *f, const char *sep, sp_int limit, sp_b
 /* IO#getc: one (UTF-8) character, nil (NULL) at EOF */
 const char *sp_File_getc(sp_File *f);
 const char *sp_File_readchar(sp_File *f);
-sp_int sp_File_getbyte(sp_File *f);
+sp_oint sp_File_getbyte(sp_File *f);   /* IO#getbyte: nil at EOF */
 /* IO#ungetc: push back the (first byte of the) argument */
 sp_RbVal sp_File_ungetc(sp_File *f, sp_RbVal v);
 /* IO#readpartial / #sysread: up to n bytes, EOFError at EOF (#2812) */
@@ -1672,16 +1603,14 @@ static inline sp_int sp_int_shl(sp_int a, sp_int n) {
 #ifdef SP_INT_OVERFLOW_MODE_WRAP
   return n >= w ? 0 : (sp_int)((uintptr_t)a << n);
 #else
-  /* Ruby promotes to Bignum here; under raise mode that is an overflow, and a
-     result of SP_INT_NIL (INTPTR_MIN) is unrepresentable even when the shift
-     itself fits (it aliases the tagged nil sentinel). Shift in unsigned space:
-     a signed shift into the sign bit is C UB. */
+  /* Ruby promotes to Bignum here; under raise mode that is an overflow. Shift
+     in unsigned space: a signed shift into the sign bit is C UB. */
   if (n >= w) {
     if (a != 0) sp_raise_cls("RangeError", "integer overflow in <<");
     return 0;
   }
   sp_int r = (sp_int)((uintptr_t)a << n);
-  if ((r >> n) != a || r == SP_INT_NIL) sp_raise_cls("RangeError", "integer overflow in <<");
+  if ((r >> n) != a) sp_raise_cls("RangeError", "integer overflow in <<");
   return r;
 #endif
 }
@@ -3287,18 +3216,15 @@ static sp_bool sp_frange_cover_poly(sp_FloatRange r, sp_RbVal v) {
   }
   return 0;
 }
-/* The same conversions, but a boxed nil lands on the type's sentinel instead
-   of the type's zero. A method whose declared return is `Integer?`/`Float?`
-   narrows a boxed body into the unboxed slot here, and the plain conversions
-   answer 0 / 0.0 for nil -- an ordinary value in that slot, so the caller
-   cannot tell it from a real zero. Both sentinels are what every consumer of a
-   nullable int/float already tests for (#3458). */
-static sp_int sp_poly_to_i_or_nil(sp_RbVal v) { return v.tag == SP_TAG_NIL ? SP_INT_NIL : sp_poly_to_i(v); }
-static sp_float sp_poly_to_f_or_nil(sp_RbVal v) { return v.tag == SP_TAG_NIL ? sp_float_nil() : sp_poly_to_f(v); }
+/* The same conversions into a nullable slot: a boxed nil is the slot's nil,
+   where the plain conversions answer 0 / 0.0 for it -- an ordinary value the
+   caller cannot tell from a real zero. A method whose declared return is
+   `Integer?` / `Float?` narrows a boxed body through these (#3458). */
+static sp_oint sp_unbox_oint(sp_RbVal v) { return v.tag == SP_TAG_NIL ? sp_oint_nil() : v.tag == SP_TAG_INT ? sp_oint_of(v.v.i) : sp_oint_of(sp_poly_to_i(v)); }
+static sp_ofloat sp_unbox_ofloat(sp_RbVal v) { return v.tag == SP_TAG_NIL ? sp_ofloat_nil() : v.tag == SP_TAG_FLT ? sp_ofloat_of(v.v.f) : sp_ofloat_of(sp_poly_to_f(v)); }
 /* An FFI argument or callback return that C takes as an integer or a
    double: nil is no number there, and the ffi gem's NUM2INT / NUM2DBL raise
-   TypeError for it. A boxed nil, an Integer slot's SP_INT_NIL and a Float
-   slot's nil NaN all are that nil. NUM2DBL also refuses a String, which
+   TypeError for it. NUM2DBL also refuses a String, which
    sp_poly_Float would parse, and a boolean, each with its own message; any
    other value converts by its #to_f, as sp_poly_Float does. A user class's
    own #to_f is reached only where the program has Kernel#Float's
@@ -3314,7 +3240,7 @@ static SP_UNUSED sp_int sp_poly_arg_i_msg(sp_RbVal v, const char *msg) { if (SP_
 /* The right operand of an Integer or Float op-assign read out of a box:
    `x += nil` is the coercion TypeError ("nil can't be coerced into
    Integer"), and a shift count the conversion one, as CRuby raises. */
-static SP_UNUSED sp_int sp_poly_opnd_i(sp_RbVal v) { if (SP_UNLIKELY(v.tag == SP_TAG_NIL)) sp_raise_nil_int_op(0, SP_INT_NIL, ""); return sp_poly_to_i(v); }
+static SP_UNUSED sp_int sp_poly_opnd_i(sp_RbVal v) { if (SP_UNLIKELY(v.tag == SP_TAG_NIL)) sp_raise_nil_opnd("Integer"); return sp_poly_to_i(v); }
 static SP_UNUSED sp_float sp_poly_opnd_f(sp_RbVal v) { if (SP_UNLIKELY(v.tag == SP_TAG_NIL)) sp_raise_nil_float_op(0, ""); return sp_poly_to_f(v); }
 static SP_UNUSED sp_int sp_poly_arg_i_of(sp_RbVal v) { if (SP_UNLIKELY(v.tag == SP_TAG_NIL)) sp_raise_nil_to_int(1); return sp_poly_to_i(v); }
 /* A sort / min / max block's boxed answer: a nil one says the two elements
@@ -3905,10 +3831,10 @@ sp_int sp_File_truncate(sp_File *f, sp_int n);
    class is decided at run time by how the handle was opened (is_file) --
    a File out of a Hash that also holds the standard streams answers as a
    File, a pipe end or IO.for_fd out of the same Hash raises CRuby's
-   NoMethodError. `n == SP_INT_NIL` is the blockless #truncate, which CRuby
+   NoMethodError. A nil `n` is the blockless #truncate, which CRuby
    answers with the arity error for a File. */
 /* a boxed File::Stat: the handle a stat or lstat made */
-sp_int sp_stat_size(sp_File *f);
+sp_oint sp_stat_size(sp_File *f);
 sp_int sp_stat_pred(sp_File *f, sp_int kind);
 static sp_bool sp_poly_io_is_stat(sp_RbVal v) {
   sp_File *f = v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_IO ? (sp_File *)v.v.p : NULL;
@@ -3917,10 +3843,10 @@ static sp_bool sp_poly_io_is_stat(sp_RbVal v) {
 static sp_bool sp_poly_io_owns(sp_RbVal v) {
   return v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_IO && v.v.p && ((sp_File *)v.v.p)->is_file;
 }
-static sp_RbVal sp_poly_io_truncate(sp_RbVal v, sp_int n) {
+static sp_RbVal sp_poly_io_truncate(sp_RbVal v, sp_oint n) {
   if (!sp_poly_io_owns(v)) sp_raise_poly_nomethod("truncate", v);
-  if (n == SP_INT_NIL) sp_raise_cls("ArgumentError", "wrong number of arguments (given 0, expected 1)");
-  return sp_box_int(sp_File_truncate((sp_File *)v.v.p, n));
+  if (n.nil) sp_raise_cls("ArgumentError", "wrong number of arguments (given 0, expected 1)");
+  return sp_box_int(sp_File_truncate((sp_File *)v.v.p, n.v));
 }
 sp_RbVal sp_Enumerator_size_p(void *e);   /* lib/sp_cold.c; sp_Enumerator is declared further down */
 void sp_enum_index_search_each_raise(void *e);   /* lib/sp_cold.c: raise for a boxed index search's each */
@@ -3944,7 +3870,7 @@ static sp_int sp_poly_size(sp_RbVal v) {
     sp_raise_poly_nomethod("size", v);
   if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_IO) {
     /* a File::Stat rides the handle: its size is the stat's */
-    if (sp_poly_io_is_stat(v)) return sp_stat_size((sp_File *)v.v.p);
+    if (sp_poly_io_is_stat(v)) return sp_stat_size((sp_File *)v.v.p);   /* FIXME-oint: sp_poly_size */
     if (!sp_poly_io_owns(v)) sp_raise_poly_nomethod("size", v);
     return sp_File_size((sp_File *)v.v.p);
   }
@@ -4726,7 +4652,7 @@ static sp_RbVal sp_poly_prec_n(sp_RbVal v, sp_int n, int op) {
   }
   sp_raise_poly_nomethod(nm, v);
 }
-static sp_RbVal sp_poly_truncate(sp_RbVal v) { if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_IO) return sp_poly_io_truncate(v, SP_INT_NIL); if (v.tag == SP_TAG_FLT) { sp_poly_flo_domain_ck(v.v.f); return sp_box_f_to_int(trunc(v.v.f)); } if (v.tag == SP_TAG_INT || v.tag == SP_TAG_BIGINT) return v; if (sp_poly_is_rational(v)) { sp_Rational _r = sp_poly_as_rational(v); return sp_box_int(_r.num / _r.den); } if (sp_poly_is_brat(v) && v.v.p) return sp_box_bigint(sp_brat_trunc_b((sp_BigRational *)v.v.p)); sp_raise_poly_nomethod("truncate", v); }
+static sp_RbVal sp_poly_truncate(sp_RbVal v) { if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_IO) return sp_poly_io_truncate(v, sp_oint_nil()); if (v.tag == SP_TAG_FLT) { sp_poly_flo_domain_ck(v.v.f); return sp_box_f_to_int(trunc(v.v.f)); } if (v.tag == SP_TAG_INT || v.tag == SP_TAG_BIGINT) return v; if (sp_poly_is_rational(v)) { sp_Rational _r = sp_poly_as_rational(v); return sp_box_int(_r.num / _r.den); } if (sp_poly_is_brat(v) && v.v.p) return sp_box_bigint(sp_brat_trunc_b((sp_BigRational *)v.v.p)); sp_raise_poly_nomethod("truncate", v); }
 /* forward: generic array length/element (defined later in this header) and
    the array-kind predicate for cross-kind value equality. */
 static sp_int sp_poly_length(sp_RbVal v);
@@ -8660,10 +8586,19 @@ const char*sp_SymPolyHash_inspect(sp_SymPolyHash*h);
    their content, so `v.hash == v.hash` holds (#2284, #2283). */
 /* Integer#<< with a RUNTIME shift amount: a negative count shifts right
    (floor semantics via arithmetic shift), a count past the word raises
-   instead of C undefined behavior (#2423). */
+   instead of C undefined behavior (#2423). The shift runs in unsigned space
+   (a signed shift into the sign bit is C UB), so `1 << 63` is -2**63: the
+   value in wrap mode, and in raise / promote mode the overflow the check
+   below reports, as sp_int_shl does for the same count. */
 static inline sp_int sp_int_shl_ck(sp_int a, sp_int b) {
   const sp_int w = (sp_int)(sizeof(sp_int) * 8);
-  if ((uintptr_t)b < (uintptr_t)(w - 1)) return a << b;   /* the hot, predictable path */
+  if ((uintptr_t)b < (uintptr_t)w) {   /* the hot, predictable path */
+    sp_int r = (sp_int)((uintptr_t)a << b);
+#ifndef SP_INT_OVERFLOW_MODE_WRAP
+    if (SP_UNLIKELY((r >> b) != a)) sp_raise_cls("RangeError", "integer overflow in <<");
+#endif
+    return r;
+  }
   if (b < 0) return (b <= -(w - 1)) ? (a < 0 ? -1 : 0) : (a >> (-b));
   sp_raise_cls("RangeError", sizeof(sp_int) == 8 ? "shift width too big for a 64-bit Integer (use --int-overflow=promote)"
                                                  : "shift width too big for a 32-bit Integer (use --int-overflow=promote)");
@@ -14208,7 +14143,7 @@ sp_SockOpt *sp_sockopt_new(sp_int family, sp_int level, sp_int optname, sp_int v
 const char *sp_sockopt_inspect(sp_SockOpt *o);
 sp_File *sp_io_wait_events(sp_File *f, double timeout, sp_int kind);
 sp_RbVal sp_io_select(sp_PolyArray *rd, sp_PolyArray *wr, sp_PolyArray *er, double timeout);
-sp_int sp_file_size_q(const char *path);
+sp_oint sp_file_size_q(const char *path);   /* File.size?: nil when missing or empty */
 sp_bool sp_file_pipe(const char *path);
 sp_bool sp_file_identical(const char *a, const char *b);
 const char *sp_file_realpath(const char *path);
@@ -14222,16 +14157,16 @@ sp_int sp_file_write_mode(const char *path, const char *data, const char *mode);
 /* File.open with integer open(2) flags: open the fd, then wrap it in the
    stdio handle the sp_File surface expects (#2788). */
 sp_File *sp_File_open_flags(const char *path, sp_int fl);
-sp_File *sp_File_open_flags_perm(const char *path, sp_int fl, sp_int perm);
-sp_File *sp_File_open_perm(const char *path, const char *mode, sp_int perm);
+sp_File *sp_File_open_flags_perm(const char *path, sp_int fl, sp_oint perm);
+sp_File *sp_File_open_perm(const char *path, const char *mode, sp_oint perm);
 /* The same open, with a mode whose kind only the run time knows: a value read
    out of a mixed container, or a flags word a caller computed into a boxed
    slot. CRuby asks #to_int before #to_str, so an Integer-ish mode is a flag
    word and anything else a mode string; the typed arms above are picked by the
    argument's static type, and this is the arm for when there is none to pick
-   by (#4596). A nil mode is CRuby's default "r". perm may be SP_INT_NIL, which
-   both callees already read as 0666. */
-static sp_File *sp_File_open_val(const char *path, sp_RbVal mode, sp_int perm) {
+   by (#4596). A nil mode is CRuby's default "r". A nil perm is 0666, which
+   both callees read it as. */
+static sp_File *sp_File_open_val(const char *path, sp_RbVal mode, sp_oint perm) {
   if (mode.tag == SP_TAG_INT || mode.tag == SP_TAG_BIGINT)
     return sp_File_open_flags_perm(path, sp_poly_to_i(mode), perm);
   if (mode.tag == SP_TAG_NIL) return sp_File_open_perm(path, "r", perm);
@@ -14245,9 +14180,10 @@ sp_File *sp_file_stat_handle(const char *path);
 sp_File *sp_io_stat_handle(sp_File *f);   /* IO#stat: by path, or fstat(2) for a descriptor handle */
 sp_File *sp_file_lstat_handle(const char *path);
 sp_bool sp_stat_nofollow(sp_File *f);
-sp_int sp_stat_size(sp_File *f);
-sp_int sp_stat_field(sp_File *f, sp_int which);   /* uid/gid/nlink/dev/ino/blksize/blocks/rdev */
-sp_int sp_stat_pred(sp_File *f, sp_int kind);     /* pipe?/zero?/readable?/... /size? */
+sp_oint sp_stat_size(sp_File *f);                  /* File::Stat#size: nil when the stat fails */
+sp_oint sp_stat_field(sp_File *f, sp_int which);   /* uid/gid/nlink/dev/ino/blksize/blocks/rdev; nil when the stat fails */
+sp_int sp_stat_pred(sp_File *f, sp_int kind);     /* pipe?/zero?/readable?/... (kinds 0..6) */
+sp_oint sp_stat_size_q(sp_File *f);                /* File::Stat#size?: nil when the stat fails or the size is 0 (was kind 7) */
 sp_int sp_File_truncate(sp_File *f, sp_int n);   /* File#truncate: ftruncate(2) on the handle */
 sp_int sp_File_size(sp_File *f);                 /* File#size: fstat(2) of the handle */
 sp_int sp_stat_type_pred(sp_File *f, sp_int kind);  /* file?/directory?/symlink?/... honouring the handle's stat mode */
