@@ -653,6 +653,10 @@ int emit_call_instance_eval_arms(Compiler *c, int id, Buf *b, const NodeTable *n
       if (bn_ty != TY_UNKNOWN)
         body_ty = (body_ty == TY_NIL || body_ty == TY_UNKNOWN) ? bn_ty : ty_unify(body_ty, bn_ty);
       int scalar_res = is_scalar_ret(body_ty) && body_ty != TY_VOID && body_ty != TY_NIL && body_ty != TY_UNKNOWN;
+      /* a number result that can be nil (the tail's own form: a nil-bit
+         ivar write, a nullable read) is held as its oint, which the call
+         answers (node_is_oint follows the tail) */
+      int res_oint = scalar_res && oint_kind(body_ty) && ie_bn > 0 && node_is_oint(c, ie_bb[ie_bn - 1]);
       int tr = ++g_tmp, tres = ++g_tmp;
       int self_is_val = c->classes[cls_id].is_value_type;
       Buf rb; memset(&rb, 0, sizeof rb);
@@ -666,7 +670,11 @@ int emit_call_instance_eval_arms(Compiler *c, int id, Buf *b, const NodeTable *n
                  self_is_val ? "" : "*", tr,
                  rb.p ? rb.p : (self_is_val ? "{0}" : "NULL"));
       free(rb.p);
-      if (scalar_res) {
+      if (res_oint) {
+        emit_indent(g_pre, g_indent);
+        buf_printf(g_pre, "%s _t%d = %s;\n", oint_ctype(body_ty), tres, oint_nil(body_ty));
+      }
+      else if (scalar_res) {
         emit_indent(g_pre, g_indent); emit_ctype(c, body_ty, g_pre);
         buf_printf(g_pre, " _t%d;\n", tres);
       }
@@ -811,8 +819,9 @@ int emit_call_instance_eval_arms(Compiler *c, int id, Buf *b, const NodeTable *n
         /* the splice body's break binds to the do/while(0) below, never to an
            enclosing valued-break scope */
         const char *sv_bser = g_brk_ser_var; g_brk_ser_var = NULL;
-        int sv_iep = g_ie_res_poly;
+        int sv_iep = g_ie_res_poly, sv_ieo = g_ie_next_oint;
         g_ie_res_poly = (scalar_res && body_ty == TY_POLY);
+        g_ie_next_oint = res_oint;   /* a `next v` stores the slot's form */
         char bvbuf[32];
         int sv_lexc2 = g_loop_exc_base, sv_lens2 = g_loop_ensure_base;
         if (ie_bn_wrap) {
@@ -829,6 +838,7 @@ int emit_call_instance_eval_arms(Compiler *c, int id, Buf *b, const NodeTable *n
           /* The last expression feeds the (possibly poly-widened) result slot;
              box it when the slot is poly but this expression is scalar. */
           if (scalar_res && body_ty == TY_POLY) emit_boxed(c, ie_bb[ie_bn - 1], &vb);
+          else if (res_oint) emit_oint_expr(c, ie_bb[ie_bn - 1], body_ty, &vb);
           else emit_expr(c, ie_bb[ie_bn - 1], &vb);
           emit_indent(g_pre, g_indent);
           if (!scalar_res) {
@@ -845,7 +855,7 @@ int emit_call_instance_eval_arms(Compiler *c, int id, Buf *b, const NodeTable *n
           g_indent--; emit_indent(g_pre, g_indent); buf_puts(g_pre, "} while (0);\n");
         }
         g_loop_exc_base = sv_lexc2; g_loop_ensure_base = sv_lens2;
-        g_ie_res_poly = sv_iep;
+        g_ie_res_poly = sv_iep; g_ie_next_oint = sv_ieo;
         g_brk_ser_var = sv_bser;
         g_ie_discard_value = saved_discard;
       }
