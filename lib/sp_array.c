@@ -276,8 +276,7 @@ void sp_PolyArray_splice(sp_PolyArray*a,sp_int start,sp_int len,sp_RbVal src){
     }
   }
   /* snapshot the source elements as boxed values (an Integer or Float
-     array's sentinel is its nil element, so it boxes as nil, here and in the
-     overwrite above). src's class id decides array-vs-single-element (Ruby
+     array's nil element boxes as nil, here and in the overwrite above). src's class id decides array-vs-single-element (Ruby
      splices an Array RHS, inserts anything else). A user object with to_ary
      is coerced at COMPILE time when its static type is known; a to_ary
      object reaching here as a runtime poly value still inserts as one

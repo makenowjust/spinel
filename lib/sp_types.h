@@ -139,11 +139,13 @@ typedef sp_int sp_sym;
    All three Range kinds default to frozen; dup sets their unfrozen flag.
    Store it beside a byte-sized flag (fe 0..2, omitted 0..63, excl 0..1)
    in the existing trailing word, keeping the by-value layouts the same size. */
-typedef struct{sp_int first;sp_int last;sp_int excl;sp_int step;sp_float fend;unsigned char fe;unsigned char unfrozen;}sp_Range;
-/* An Integer Range's open sides are spare patterns of its bounds, not a nil:
-   a beginless range stores SP_RANGE_NO_BEGIN as `first`, an endless one
-   SP_RANGE_NO_END as `last`. (A begin of exactly -2**63 is thus read as
-   beginless; the readers below name the marker rather than the number.) */
+/* An Integer Range's open sides are the flags `nobeg` / `noend` (a beginless
+   `..5`, an endless `1..`), not a pattern of the bound: a begin of exactly
+   -2**63 is a begin. An open side still STORES the extreme bound
+   (SP_RANGE_NO_BEGIN / SP_RANGE_NO_END) so a walk that clamps against the
+   bounds reads the same number it always did; only the flag says whether
+   the side is there. */
+typedef struct{sp_int first;sp_int last;sp_int excl;sp_int step;sp_float fend;unsigned char fe;unsigned char unfrozen;unsigned char nobeg;unsigned char noend;}sp_Range;
 #define SP_RANGE_NO_BEGIN ((sp_int)INTPTR_MIN)
 #define SP_RANGE_NO_END   ((sp_int)INTPTR_MAX)
 /* A Float range (1.0..3.0): endpoints kept as sp_float so cover?/include?/begin/

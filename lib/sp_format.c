@@ -81,7 +81,7 @@ const char *sp_rational_to_s(sp_Rational r) {
 }
 
 /* A boxed Range renders as the typed one does: an open side is left out
-   ("..3", "1.."), where the sentinel printed as -9223372036854775808. */
+   ("..3", "1.."). */
 const char *sp_Range_inspect(sp_Range *r) {
   return sp_range_inspect(*r);
 }

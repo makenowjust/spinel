@@ -3465,10 +3465,10 @@ sp_bool sp_range_frozen(sp_RbVal v) {
    exclusive range stops one short of `last`, so the upper bound is
    `last - excl` (excl is 0 or 1). */
 sp_bool sp_range_include(sp_Range *r, sp_int x){SP_GC_ROOT(r);
-  /* beginless/endless sentinels (INTPTR_MIN/MAX) clamp one side open */
-  if (r->first == INTPTR_MIN || r->last == INTPTR_MAX) {
-    if (r->first != INTPTR_MIN && x < r->first) return 0;
-    if (r->last != INTPTR_MAX && (r->excl ? x >= r->last : x > r->last)) return 0;
+  /* a beginless/endless side (nobeg/noend) clamps one side open */
+  if (r->nobeg || r->noend) {
+    if (r->nobeg == 0 && x < r->first) return 0;
+    if (r->noend == 0 && (r->excl ? x >= r->last : x > r->last)) return 0;
     return 1;
   }
   /* a Float end: an Integer is in it when the walk reaches it */
@@ -3482,9 +3482,9 @@ sp_bool sp_range_include(sp_Range *r, sp_int x){SP_GC_ROOT(r);
 sp_bool sp_range_cover_f(sp_Range *r, sp_float x){
   if (x != x) return 0;   /* NaN is in no range */
   /* an Integer bound against x exactly (#7505): a double past 2^53 rounds */
-  if (r->first!=INTPTR_MIN && sp_int_flt_cmp(r->first, x) > 0) return 0;
+  if (r->nobeg == 0 && sp_int_flt_cmp(r->first, x) > 0) return 0;
   if (r->fe) return r->fe==2?x<r->fend:x<=r->fend;
-  if (r->last==INTPTR_MAX) return 1;
+  if (r->noend) return 1;
   int c = sp_int_flt_cmp(r->last, x);
   return r->excl ? c > 0 : c >= 0;}
 sp_Range sp_range_new_fend(sp_int f, sp_float e, sp_int x) {
@@ -3512,16 +3512,16 @@ void sp_range_fend_max_raise(sp_Range r) {
 /* Range#inspect: as #to_s, except that a range with NO bound at either end
    names them -- CRuby prints "nil..nil", not ".." (#3670). */
 const char *sp_range_inspect(sp_Range r) {
-  if (r.first == INTPTR_MIN && r.last == INTPTR_MAX)
+  if (r.nobeg && r.noend)
     return r.excl ? (&("\xff" "nil...nil")[1]) : (&("\xff" "nil..nil")[1]);
   return sp_range_str(r);
 }
 const char *sp_range_str(sp_Range r) {
   if (r.fe) return sp_sprintf("%lld%s%s", (long long)r.first, r.fe == 2 ? "..." : "..", sp_float_to_s(r.fend));
   const char *dots = r.excl ? "..." : "..";
-  if (r.first == INTPTR_MIN && r.last == INTPTR_MAX) return dots;
-  if (r.first == INTPTR_MIN) return sp_sprintf("%s%lld", dots, (long long)r.last);
-  if (r.last == INTPTR_MAX)  return sp_sprintf("%lld%s", (long long)r.first, dots);
+  if (r.nobeg && r.noend) return dots;
+  if (r.nobeg) return sp_sprintf("%s%lld", dots, (long long)r.last);
+  if (r.noend)  return sp_sprintf("%lld%s", (long long)r.first, dots);
   return sp_sprintf("%lld%s%lld", (long long)r.first, dots, (long long)r.last);
 }
 
