@@ -28593,6 +28593,39 @@ static void mark_nullable_int_locals(Compiler *c) {
         if (any_nil || past_n || (pk > 0 && !full_rows)) { plv->nullable_int = 1; changed = 1; }
       }
     }
+    /* `[[1, 2], [3]].each { |a, b| }`: a literal table whose row is shorter
+       than the block's parameters (or is no literal row) leaves the
+       parameters past it nil */
+    NT_FOREACH_KIND(nt, NK_CallNode, id) {
+      const char *rn2 = nt_str(nt, id, "name");
+      int recv = nt_ref(nt, id, "receiver");
+      int blk = nt_ref(nt, id, "block");
+      if (!rn2 || recv < 0 || blk < 0 || nt_kind(nt, blk) != NK_BlockNode || nt_kind(nt, recv) != NK_ArrayNode) continue;
+      if (!sp_streq(rn2, "each") && !sp_streq(rn2, "each_entry") && !sp_streq(rn2, "map") &&
+          !sp_streq(rn2, "collect") && !sp_streq(rn2, "flat_map") && !sp_streq(rn2, "select") &&
+          !sp_streq(rn2, "filter") && !sp_streq(rn2, "reject") && !sp_streq(rn2, "each_with_object") &&
+          !sp_streq(rn2, "filter_map") && !sp_streq(rn2, "sum") && !sp_streq(rn2, "count")) continue;
+      int bp = nt_ref(nt, blk, "parameters");
+      int params = bp >= 0 ? nt_ref(nt, bp, "parameters") : -1;
+      int pn = 0; const int *reqs = params >= 0 ? nt_arr(nt, params, "requireds", &pn) : NULL;
+      if (!reqs || pn < 2) continue;
+      int en = 0; const int *els = nt_arr(nt, recv, "elements", &en);
+      int minlen = 1 << 30;
+      for (int e = 0; els && e < en; e++) {
+        if (nt_kind(nt, els[e]) != NK_ArrayNode) { minlen = 0; break; }
+        int rl = 0; const int *rel = nt_arr(nt, els[e], "elements", &rl);
+        for (int q = 0; rel && q < rl; q++) if (nt_kind(nt, rel[q]) == NK_SplatNode) rl = 0;
+        if (rl < minlen) minlen = rl;
+      }
+      if (minlen >= pn) continue;
+      Scope *bsc = comp_scope_of(c, blk);
+      for (int pk = minlen; pk < pn; pk++) {
+        const char *pnm = nt_kind(nt, reqs[pk]) == NK_RequiredParameterNode ? nt_str(nt, reqs[pk], "name") : NULL;
+        LocalVar *plv = pnm && bsc ? scope_local(bsc, pnm) : NULL;
+        if (!plv || (plv->type != TY_INT && plv->type != TY_FLOAT) || plv->nullable_int) continue;
+        plv->nullable_int = 1; changed = 1;
+      }
+    }
     /* An IVAR written from such a value hands the sentinel to every reader,
        including the attr_reader a caller goes through (`W.new(r.p_).v`). The
        slot keeps its scalar C type, so only the boxing has to know (#3505). */
