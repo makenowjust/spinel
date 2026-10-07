@@ -4872,8 +4872,15 @@ int emit_array_filter_loop(Compiler *c, int recv, int block, TyKind rt, const ch
     /* a poly parameter is the hoisted local, rooted where it is declared; a
        typed one shadows it at the element type, and a String is rooted */
     emit_indent(b, li + 1);
-    if (et != TY_POLY) { emit_ctype(c, et, b); buf_puts(b, " "); }
-    buf_printf(b, "lv_%s = _t%d;", bp, te);
+    /* a parameter slot that holds its nil reads the element with it */
+    Scope *fbs = comp_scope_of(c, block);
+    LocalVar *fpl = fbs && bp0 ? scope_local(fbs, bp0) : NULL;
+    if (oint_kind(et) && fpl && slot_is_oint(fpl) && kk && !sp_streq(kk, "Poly"))
+      buf_printf(b, "%s lv_%s = sp_%sArray_oget(_t%d, _t%d);", oint_ctype(et), bp, kk, t, ti);
+    else {
+      if (et != TY_POLY) { emit_ctype(c, et, b); buf_puts(b, " "); }
+      buf_printf(b, "lv_%s = _t%d;", bp, te);
+    }
     if (et == TY_STRING) buf_printf(b, " SP_GC_ROOT_STR(lv_%s);", bp);
     buf_puts(b, "\n");
   }
