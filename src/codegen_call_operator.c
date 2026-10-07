@@ -1167,9 +1167,15 @@ int emit_call_operator_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
         oint_open(c, id, rt, b); emit_oint_expr(c, recv, rt, b); oint_close(c, id, b);
       }
       /* a nullable Integer or Float slot's nil has no -@ */
-      else if (name[0] == '-' && (rt == TY_FLOAT || rt == TY_INT) && cmp_operand_may_be_nil(c, recv)) {
+      /* an Integer's -@ is the mode's checked negation: -(-2**63) leaves
+         the word (RangeError in raise mode) */
+      else if (name[0] == '-' && rt == TY_INT && cmp_operand_may_be_nil(c, recv)) {
+        buf_puts(b, "sp_int_neg("); emit_scalar_operand_op(c, recv, name, b); buf_puts(b, ")");
+      }
+      else if (name[0] == '-' && rt == TY_FLOAT && cmp_operand_may_be_nil(c, recv)) {
         buf_printf(b, "(%c", name[0]); emit_scalar_operand_op(c, recv, name, b); buf_puts(b, ")");
       }
+      else if (name[0] == '-' && rt == TY_INT) buf_printf(b, "sp_int_neg(%s)", ut);
       else buf_printf(b, "(%c%s%s)", name[0], ut[0] == name[0] ? " " : "", ut);
       free(ub.p); }
     return 1;
