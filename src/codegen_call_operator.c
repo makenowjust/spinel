@@ -99,7 +99,7 @@ static int emit_nil_aware_num_eq(Compiler *c, int id, const char *name, int recv
       char hr[48]; hc_read_len(hd, hr, sizeof hr);
       const char *eq = ne ? "!=" : "==";
       buf_printf(b, "({ sp_int _t%d = ", tl); (void)emit_int_index_raw(c, eav[0], b);
-      buf_printf(b, "; (unsigned long long)_t%d < (unsigned long long)%s ? (%s[_t%d] %s ", tl, hr, hd, tl, eq);
+      buf_printf(b, "; SP_LIKELY((unsigned long long)_t%d < (unsigned long long)%s) ? (%s[_t%d] %s ", tl, hr, hd, tl, eq);
       emit_expr(c, argv[0], b);
       buf_printf(b, ") : ({ %s _t%d = sp_%sArray_oget(", oint_ctype(rt), tr, rt == TY_INT ? "Int" : "Float");
       emit_expr(c, er, b);

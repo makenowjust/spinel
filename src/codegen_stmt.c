@@ -2955,7 +2955,7 @@ int emit_nilfree_operand(Compiler *c, int v, const char *op, int left, const cha
   int tk = ++g_tmp;
   buf_printf(b, "({ sp_int _t%d = ", tk);
   emit_int_expr(c, vav[0], b);
-  buf_printf(b, "; (unsigned long long)_t%d < (unsigned long long)%s ? %s[_t%d] : ", tk, hn, hd, tk);
+  buf_printf(b, "; SP_LIKELY((unsigned long long)_t%d < (unsigned long long)%s) ? %s[_t%d] : ", tk, hn, hd, tk);
   if (nilr) { buf_puts(b, "({ "); emit_nil_cold_test(c, v, vr, b); buf_puts(b, " "); }
   /* out of the nil-free range the element is read with its nil: the
      operator's receiver raises NoMethodError for it, its operand the
