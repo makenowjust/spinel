@@ -5810,6 +5810,8 @@ int node_is_oint(Compiler *c, int node) {
       if (bn > 0 && (node_has_oint_form(c, bs[bn - 1]) || nt_kind(nt, bs[bn - 1]) == NK_NilNode)) return 1;
       return bb >= 0 && block_next_may_be_nil(c, bb, 0);
     }
+    /* `x.tap { ... }` answers its receiver, in the receiver's form */
+    if (sp_streq(nm, "tap") && blk >= 0 && nt_kind(nt, blk) == NK_BlockNode && r >= 0 && oint_kind(rt)) return node_is_oint(c, r);
     /* unary `+` hands an Integer / Float its operand: the operand's form */
     if (sp_streq(nm, "+@") && an2 == 0 && r >= 0 && oint_kind(rt)) return node_is_oint(c, r);
     /* a proc's result comes back boxed and is unboxed with its nil */

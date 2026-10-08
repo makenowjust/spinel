@@ -29757,6 +29757,38 @@ static int wnh_local_escapes(Compiler *c, Scope *sc, const char *name) {
   }
   return 0;
 }
+/* The block parameters of a key/value iteration over a local the widening
+   retyped (`g.each { |k, v| }`) were bound from the typed kind: a key or
+   value that can be nil is now boxed, so is the parameter */
+static void wnh_widen_block_params(Compiler *c, Scope *sc, const char *ln, int kn, int vn) {
+  const NodeTable *nt = c->nt;
+  NT_FOREACH_KIND(nt, NK_CallNode, call) {
+    int r = nt_ref(nt, call, "receiver"), blk = nt_ref(nt, call, "block");
+    if (r < 0 || blk < 0 || nt_kind(nt, r) != NK_LocalVariableReadNode || nt_kind(nt, blk) != NK_BlockNode) continue;
+    const char *rn = nt_str(nt, r, "name"), *nm = nt_str(nt, call, "name");
+    if (!rn || !nm || !sp_streq(rn, ln) || comp_scope_of(c, r) != sc) continue;
+    int pk = -1, pv = -1;
+    if (sp_streq(nm, "each_key")) pk = 0;
+    else if (sp_streq(nm, "each_value")) pv = 0;
+    else if (sp_streq(nm, "each") || sp_streq(nm, "each_pair") || sp_streq(nm, "select") || sp_streq(nm, "filter") ||
+             sp_streq(nm, "reject") || sp_streq(nm, "map") || sp_streq(nm, "collect") || sp_streq(nm, "any?") ||
+             sp_streq(nm, "all?") || sp_streq(nm, "none?") || sp_streq(nm, "count") || sp_streq(nm, "delete_if") ||
+             sp_streq(nm, "keep_if") || sp_streq(nm, "select!") || sp_streq(nm, "reject!") || sp_streq(nm, "filter!")) {
+      if (!block_param_name(c, blk, 1)) continue;   /* a solo parameter is the boxed pair */
+      pk = 0; pv = 1;
+    }
+    else continue;
+    Scope *bs = comp_scope_of(c, blk);
+    for (int w = 0; w < 2; w++) {
+      int idx = w == 0 ? pk : pv;
+      if (idx < 0 || !(w == 0 ? kn : vn)) continue;
+      const char *pn = block_param_name(c, blk, idx);
+      LocalVar *plv = pn && bs ? scope_local(bs, pn) : NULL;
+      if (plv && (plv->type == TY_INT || plv->type == TY_FLOAT)) plv->type = TY_POLY;
+    }
+    if (bs && bs->body >= 0) wnh_note(bs->body);
+  }
+}
 static void widen_nullable_keyed_hash_literals(Compiler *c) {
   const NodeTable *nt = c->nt;
   NT_FOREACH_KIND(nt, NK_HashNode, id) {
@@ -29789,6 +29821,7 @@ static void widen_nullable_keyed_hash_literals(Compiler *c) {
       if (wnh_local_escapes(c, sc, wn)) { c->ntype[id] = ht; break; }   /* left typed: the store refuses */
       lv->type = want;
       c->ntype[w] = want;
+      wnh_widen_block_params(c, sc, wn, kn, vn);
       NT_FOREACH_KIND(nt, NK_LocalVariableReadNode, r) {
         const char *rn = nt_str(nt, r, "name");
         if (rn && sp_streq(rn, wn) && comp_scope_of(c, r) == sc) c->ntype[r] = want;
@@ -29836,6 +29869,7 @@ static void widen_nullable_keyed_hash_literals(Compiler *c) {
     }
     if (!ok) continue;
     lv->type = want;
+    wnh_widen_block_params(c, sc, ln, kn, vn);
     NT_FOREACH_KIND(nt, NK_LocalVariableWriteNode, w) {
       const char *wn = nt_str(nt, w, "name");
       if (!wn || !sp_streq(wn, ln) || comp_scope_of(c, w) != sc) continue;
