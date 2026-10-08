@@ -5877,6 +5877,8 @@ int node_is_oint(Compiler *c, int node) {
     /* `<=>` answers nil for an incomparable operand: the analysis's answer
        where both sides are of one comparable kind (numbers, Strings,
        Symbols); any other pairing can answer nil at run time */
+    /* a native class's method declared to answer an Integer or a Float */
+    if (native_call_ret_plain_num(c, node)) return 0;
     if (sp_streq(nm, "<=>") && an2 == 1) {
       int a1 = nt_ref(nt, node, "arguments"), a1n = 0;
       const int *a1a = a1 >= 0 ? nt_arr(nt, a1, "arguments", &a1n) : NULL;

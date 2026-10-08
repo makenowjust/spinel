@@ -28688,6 +28688,25 @@ static int nn_str_literal(const NodeTable *nt, int n) {
   return k == NK_StringNode || k == NK_InterpolatedStringNode;
 }
 
+/* Is call v a native class's method (a package's native_method) declared
+   to answer a plain Integer or Float? */
+int native_call_ret_plain_num(Compiler *c, int v) {
+  const NodeTable *nt = c->nt;
+  if (v < 0 || nt_kind(nt, v) != NK_CallNode) return 0;
+  int r = nt_ref(nt, v, "receiver");
+  const char *nm = nt_str(nt, v, "name");
+  if (r < 0 || !nm) return 0;
+  TyKind rt = comp_ntype(c, r);
+  if (!ty_is_object(rt)) return 0;
+  int cid = ty_object_class(rt);
+  if (cid < 0 || cid >= c->nclasses || !c->classes[cid].is_native_class) return 0;
+  int a = nt_ref(nt, v, "arguments"), an = 0;
+  if (a >= 0) nt_arr(nt, a, "arguments", &an);
+  int nmi = comp_native_method_find(c, cid, nm, an, 0);
+  if (nmi < 0 || !c->native_methods[nmi].ret) return 0;
+  return sp_streq(c->native_methods[nmi].ret, "int") || sp_streq(c->native_methods[nmi].ret, "float");
+}
+
 int nullable_int_value(Compiler *c, int v) {
   const NodeTable *nt = c->nt;
   if (v < 0) return 0;
@@ -28855,6 +28874,9 @@ int nullable_int_value(Compiler *c, int v) {
     if (nn_index_inbounds(c, v)) return 0;
     /* a call that answers nothing (`$stdout.puts(x)`) is nil */
     { TyKind cvt = infer_type(c, v); if (cvt == TY_NIL || cvt == TY_VOID) return 1; }
+    /* a native class's method declared to answer an Integer or a Float
+       (IO::Buffer#<=>) answers one */
+    if (native_call_ret_plain_num(c, v)) return 0;
     /* `<=>` over two numbers (or two Strings, two Symbols) always answers:
        only a pairing of other kinds can be nil */
     if (sp_streq(nt_str(nt, v, "name"), "<=>")) {
@@ -28864,7 +28886,8 @@ int nullable_int_value(Compiler *c, int v) {
         TyKind lt = infer_type(c, cr), at = infer_type(c, cav[0]);
         /* a Float side can be NaN, which compares to nothing; a String
            side other than a literal can be the nil a String slot holds */
-        int num_l = lt == TY_INT || lt == TY_FLOAT, num_r = at == TY_INT || at == TY_FLOAT;
+        int num_l = lt == TY_INT || lt == TY_FLOAT || lt == TY_BIGINT || lt == TY_RATIONAL;
+        int num_r = at == TY_INT || at == TY_FLOAT || at == TY_BIGINT || at == TY_RATIONAL;
         int flo = lt == TY_FLOAT || at == TY_FLOAT;
         int str_lit = nn_str_literal(nt, cr) && nn_str_literal(nt, cav[0]);
         /* ... and a nil number on either side answers nil */
