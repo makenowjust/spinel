@@ -6572,9 +6572,7 @@ static int emit_poly_builtin_default_at(Compiler *c, int id, int recv, const cha
   }
   int va = view_push_arm(id, g_prbd_skip, 1);
   int vw = view_push(c, id, bt);
-  /* a boxed slot takes an Integer / Float answer that can be nil (a boxed
-     Enumerator's size) boxed with its nil */
-  int box_o = ret == TY_POLY && oint_kind(bt) && node_is_oint(c, id);
+  int box_o = 0;
   /* Under the silent probe the dynamic-send arms use: a builtin emitter
      that refuses these arguments (Array#join given a user object, a
      separator no String can be) drops the arm, not the build -- the call
@@ -6593,6 +6591,11 @@ static int emit_poly_builtin_default_at(Compiler *c, int id, int recv, const cha
      asks must not record its unpinned (poly) answer over the pin, or the
      emitter answers boxed and the arm boxes it again */
   int sv_pin = an_pin_node(id);
+  /* a boxed slot takes an Integer / Float answer that can be nil (a boxed
+     Enumerator's size) boxed with its nil -- asked under the pin: unpinned,
+     the question records the node's poly type over the view, and the
+     emission below answers boxed (boxed again by the arm) */
+  box_o = ret == TY_POLY && oint_kind(bt) && node_is_oint(c, id);
   if (setjmp(g_unsup_recover) == 0) {
     /* `to_i(base)` on a kind other than String (whose pre-arm answers it):
        every builtin to_i takes no radix, as the boxed fold answers */
