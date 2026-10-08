@@ -29193,6 +29193,12 @@ int nullable_int_value(Compiler *c, int v) {
   /* `x = v` answers v: `s0 = s1 = nil` hands s0 the inner write's nil */
   if (nt_kind(nt, v) == NK_LocalVariableWriteNode)
     return nullable_int_value(c, nt_ref(nt, v, "value"));
+  /* ... and so do `@@x = v`, `@x = v`, `$x = v` (`def self.b = (@@x = nil)`) */
+  if (nt_kind(nt, v) == NK_ClassVariableWriteNode || nt_kind(nt, v) == NK_InstanceVariableWriteNode ||
+      nt_kind(nt, v) == NK_GlobalVariableWriteNode) {
+    int wv = nt_ref(nt, v, "value");
+    return wv >= 0 && (nt_kind(nt, wv) == NK_NilNode || nullable_int_value(c, wv));
+  }
   return 0;
 }
 
