@@ -2570,7 +2570,17 @@ const char *emit_cmethod_self_cls_arg(Compiler *c, int mi, int recv_cls, Buf *b)
 
 /* The mangled C name: sp_<name> for free functions, sp_<Class>_<name>
    for instance methods. */
+/* the scope whose nil-free version is being emitted: its own name takes
+   the `__nf` suffix (emit_method) */
+static Scope *g_nf_sig = NULL;
 void emit_method_cname(Compiler *c, Scope *s, Buf *b) {
+  if (s == g_nf_sig) {
+    g_nf_sig = NULL;
+    emit_method_cname(c, s, b);
+    g_nf_sig = s;
+    buf_puts(b, "__nf");
+    return;
+  }
   if (s->c_name)
     buf_printf(b, "sp_%s", s->c_name);
   else if (s->class_id >= 0 && s->is_cmethod)
@@ -5135,6 +5145,138 @@ static void gc_wb_insert_seg(Compiler *c, Buf *b, size_t fn_off) {
   }
 }
 
+/* ---- nil-free method versions ----
+
+   A method that reads many of self's Integer / Float fields that carry a
+   nil bit, and can never set one of them, is emitted twice: a version whose
+   self bit tests are 0 (g_nf_self), and the method itself, which runs that
+   version when self's bit words are all clear on entry (SP_LIKELY) and its
+   own body otherwise. Nothing is assumed: the entry test is the fact the
+   version reads under. "Can never set one" is checked over the method and
+   everything it can call: no store of a value that can be nil into a field
+   of self's class family, no call whose target is unknown (a boxed
+   receiver with a name the program defines, send, a proc or Method call,
+   instance_variable_set). */
+typedef struct { int root; signed char *st; } NfCtx;   /* st: 0 unseen, 1 visiting, 2 safe, 3 unsafe */
+static int nf_scope_safe(Compiler *c, int mi, NfCtx *x);
+static int nf_value_may_nil(Compiler *c, int v) {
+  if (v < 0 || nt_kind(c->nt, v) == NK_NilNode) return 1;
+  TyKind t = comp_ntype(c, v);
+  if (t == TY_NIL || t == TY_POLY || t == TY_UNKNOWN || repr_of(c, v).kind == RK_BOXED) return 1;
+  return oint_kind(t) && (node_may_be_nil(c, v) || nullable_int_value(c, v));
+}
+static int nf_call_safe(Compiler *c, int n, NfCtx *x) {
+  const NodeTable *nt = c->nt;
+  const char *nm = nt_str(nt, n, "name");
+  if (!nm) return 0;
+  static const char *const DYN[] = { "send", "__send__", "public_send", "instance_variable_set", "method",
+                                     "define_method", "instance_eval", "instance_exec", "eval", "class_eval",
+                                     "module_eval", "call", "()", "yield", "to_proc", "instance_variable_get", NULL };
+  if (str_in(nm, DYN)) return 0;
+  int r = nt_ref(nt, n, "receiver");
+  int mi = -1;
+  if (r < 0) mi = comp_self_call_mi(c, n, nm);
+  else if (nt_kind(nt, r) == NK_ConstantReadNode || nt_kind(nt, r) == NK_ConstantPathNode) {
+    int rc = comp_class_index(c, nt_str(nt, r, "name"));
+    mi = rc >= 0 ? comp_cmethod_in_chain(c, rc, nm, NULL) : -1;
+  }
+  else {
+    TyKind rt = comp_ntype(c, r);
+    if (rt == TY_PROC || rt == TY_METHOD) return 0;
+    if (rt == TY_POLY || rt == TY_UNKNOWN) {
+      /* a boxed receiver reaches any method of the name the program has */
+      for (int k = 0; k < c->nclasses; k++)
+        if (comp_method_in_class(c, k, nm) >= 0 || comp_writer_in_chain(c, k, nm, NULL)) return 0;
+      return 1;
+    }
+    if (ty_is_object(rt)) {
+      int k = ty_object_class(rt);
+      if (comp_writer_in_chain(c, k, nm, NULL) && class_root(c, k) == x->root) {
+        int a = nt_ref(nt, n, "arguments"), an = 0;
+        const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &an) : NULL;
+        if (an >= 1 && nf_value_may_nil(c, av[an - 1])) return 0;
+      }
+      /* a subclass's override can run as well */
+      for (int q = 0; q < c->nclasses; q++) {
+        if (!is_descendant(c, q, k)) continue;
+        int qm = comp_method_in_class(c, q, nm);
+        if (qm >= 0 && !nf_scope_safe(c, qm, x)) return 0;
+      }
+      mi = comp_method_in_chain(c, k, nm, NULL);
+    }
+    else mi = comp_builtin_kind_reopen_mi(c, rt, nm);
+  }
+  return mi < 0 || nf_scope_safe(c, mi, x);
+}
+static int nf_scope_safe(Compiler *c, int mi, NfCtx *x) {
+  if (mi < 0 || mi >= c->nscopes) return 1;
+  if (x->st[mi] == 1 || x->st[mi] == 2) return 1;
+  if (x->st[mi] == 3) return 0;
+  x->st[mi] = 1;
+  const NodeTable *nt = c->nt;
+  Scope *s = &c->scopes[mi];
+  int ok = 1;
+  int sroot = s->class_id >= 0 ? class_root(c, s->class_id) : -1;
+  for (int n = 0; n < nt->count && ok; n++) {
+    if (comp_scope_of(c, n) != s) continue;
+    NodeKind k = nt_kind(nt, n);
+    switch (k) {
+      case NK_InstanceVariableWriteNode: case NK_InstanceVariableOrWriteNode: case NK_InstanceVariableAndWriteNode: {
+        if (sroot != x->root) break;
+        int cid, iv;
+        if (ivar_node_slot(c, n, &cid, &iv) != 1 || !ivar_has_nilbit(c, cid, iv)) break;
+        if (nf_value_may_nil(c, nt_ref(nt, n, "value"))) ok = 0;
+        break;
+      }
+      case NK_InstanceVariableTargetNode: {
+        int cid, iv;
+        if (sroot == x->root && ivar_node_slot(c, n, &cid, &iv) == 1 && ivar_has_nilbit(c, cid, iv)) ok = 0;
+        break;
+      }
+      case NK_YieldNode: case NK_SuperNode: case NK_ForwardingSuperNode: ok = 0; break;
+      case NK_CallNode: if (!nf_call_safe(c, n, x)) ok = 0; break;
+      default: break;
+    }
+  }
+  x->st[mi] = ok ? 2 : 3;
+  return ok;
+}
+/* Is method s versioned? *words: the bitmask of self's nil-bit words its
+   reads test */
+static int nf_method_eligible(Compiler *c, Scope *s, unsigned long long *words) {
+  *words = 0;
+  if (getenv("SPINEL_NO_NF_VERSIONS")) return 0;
+  if (s->class_id < 0 || s->is_cmethod || s->yields || s->is_proc_form || s->cs_synth ||
+      (s->blk_param && s->blk_param[0]) || s->def_node < 0) return 0;
+  ClassInfo *ci = &c->classes[s->class_id];
+  if (ci->is_value_type || ci->is_singleton_of || ci->is_struct || ci->is_data || is_builtin_reopen(ci->name) ||
+      io_family_class(c, s->class_id)) return 0;
+  int mi = (int)(s - c->scopes);
+  if (s->nparams > 0 && scope_has_begin(c, mi)) return 0;
+  for (int k = 0; k < s->nparams; k++) {
+    LocalVar *p = scope_local(s, s->pnames[k]);
+    if (!p || p->byref_out) return 0;
+  }
+  const NodeTable *nt = c->nt;
+  int reads = 0;
+  for (int n = 0; n < nt->count; n++) {
+    if (nt_kind(nt, n) != NK_InstanceVariableReadNode || comp_scope_of(c, n) != s) continue;
+    int cid, iv;
+    if (ivar_node_slot(c, n, &cid, &iv) != 1 || !ivar_has_nilbit(c, cid, iv)) continue;
+    int w = ivar_nilbit_index(c, cid, iv) / 64;
+    if (w >= 64) return 0;
+    *words |= 1ULL << w;
+    reads++;
+  }
+  if (reads < 4) return 0;
+  NfCtx x; x.root = class_root(c, s->class_id);
+  x.st = calloc((size_t)c->nscopes + 1, 1);
+  if (!x.st) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+  int ok = nf_scope_safe(c, mi, &x);
+  free(x.st);
+  return ok;
+}
+static int g_nf_emitting = 0;
 void emit_method(Compiler *c, Scope *s, Buf *b) {
   /* an IO handle has no slots for a program's instance variables */
   if (s->class_id >= 0 && !s->is_cmethod && io_family_class(c, s->class_id) &&
@@ -5171,6 +5313,13 @@ void emit_method(Compiler *c, Scope *s, Buf *b) {
     return;
   }
   inherit_transplant_locals(c, s);
+  unsigned long long nf_words = 0;
+  int nf = !g_nf_emitting && nf_method_eligible(c, s, &nf_words);
+  if (nf) {
+    g_nf_emitting = 1; g_nf_self = 1; g_nf_sig = s;
+    emit_method(c, s, b);
+    g_nf_emitting = 0; g_nf_self = 0; g_nf_sig = NULL;
+  }
   /* Map the whole function (signature + SP_GC_SAVE prologue + local decls,
      before the first body stmt) to the `def` line, so a breakpoint on the method
      lands on the .rb source rather than the generated C -- which is deleted after
@@ -5179,6 +5328,21 @@ void emit_method(Compiler *c, Scope *s, Buf *b) {
   emit_line_directive(c, s->def_node, b);
   emit_method_signature(c, s, b);
   buf_puts(b, " {\n");
+  /* the nil-free version, when self's bit words are clear */
+  if (nf) {
+    buf_puts(b, "  if (SP_LIKELY((");
+    int first = 1;
+    for (int w = 0; w < 64; w++) if (nf_words >> w & 1) { buf_printf(b, "%sself->iv__nilbits[%d]", first ? "" : " | ", w); first = 0; }
+    buf_puts(b, ") == 0)) ");
+    Buf call; memset(&call, 0, sizeof call);
+    g_nf_sig = s; emit_method_cname(c, s, &call); g_nf_sig = NULL;
+    buf_puts(&call, "(self");
+    for (int k = 0; k < s->nparams; k++) buf_printf(&call, ", lv_%s", s->pnames[k]);
+    buf_puts(&call, ")");
+    if (method_is_void(s)) buf_printf(b, "{ %s; return; }\n", call.p);
+    else buf_printf(b, "return %s;\n", call.p);
+    free(call.p);
+  }
   /* The singleton override does not exist until the statement that created it
      has run (#4084). The object carries its parent's cls_id until then, so a
      call arriving early takes the parent's method -- emitted before SP_GC_SAVE

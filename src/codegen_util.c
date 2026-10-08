@@ -5532,7 +5532,7 @@ void emit_slot_ctype(Compiler *c, const LocalVar *lv, Buf *b) {
    own index, which a subclass shares with its parent (inherit_members keeps
    the prefix), so the words sit at the same offset in every struct of a
    hierarchy and hold the largest ivar count in it. */
-static int class_root(Compiler *c, int cid);
+int class_root(Compiler *c, int cid);
 static int ivar_has_nilbit_own(Compiler *c, int cid, int iv);
 /* A field is one slot down its class family (a subclass lays the parent's
    fields first): a nil bit any class of the family keeps for it, every
@@ -5591,7 +5591,7 @@ static int ivar_has_nilbit_own(Compiler *c, int cid, int iv) {
   return !ivar_assigned_in_initialize(c, cid, ci->ivars[iv]);
 }
 int ivar_nilbit_index(Compiler *c, int cid, int iv) { (void)c; (void)cid; return iv; }
-static int class_root(Compiler *c, int cid) {
+int class_root(Compiler *c, int cid) {
   int hop = 0;
   while (cid >= 0 && c->classes[cid].parent >= 0 && hop++ < 64) cid = c->classes[cid].parent;
   return cid;
@@ -5618,8 +5618,15 @@ int class_nilbit_words(Compiler *c, int cid) {
     if (class_root(c, k) == root) memo[k] = words;
   return words;
 }
+/* set while a method's nil-free body is emitted (emit_method's versioning):
+   self's nil bits are all clear there, so a test of one is 0 */
+int g_nf_self = 0;
 void ivar_nilbit_test(Compiler *c, int cid, int iv, const char *obj, char *out, size_t cap) {
   int k = ivar_nilbit_index(c, cid, iv);
+  if (g_nf_self && obj && (sp_streq(obj, "self->") || (g_self && strncmp(obj, g_self, strlen(g_self)) == 0 && strcmp(obj + strlen(g_self), "->") == 0))) {
+    snprintf(out, cap, "0");
+    return;
+  }
   snprintf(out, cap, "(%siv__nilbits[%d] & (1ULL << %d))", obj, k / 64, k % 64);
 }
 void ivar_nilbit_set(Compiler *c, int cid, int iv, const char *obj, char *out, size_t cap) {
@@ -5628,6 +5635,11 @@ void ivar_nilbit_set(Compiler *c, int cid, int iv, const char *obj, char *out, s
 }
 void ivar_nilbit_clear(Compiler *c, int cid, int iv, const char *obj, char *out, size_t cap) {
   int k = ivar_nilbit_index(c, cid, iv);
+  /* the nil-free body: self's bits are clear and nothing it runs sets one */
+  if (g_nf_self && obj && (sp_streq(obj, "self->") || (g_self && strncmp(obj, g_self, strlen(g_self)) == 0 && strcmp(obj + strlen(g_self), "->") == 0))) {
+    snprintf(out, cap, "(void)0");
+    return;
+  }
   snprintf(out, cap, "%siv__nilbits[%d] &= ~(1ULL << %d)", obj, k / 64, k % 64);
 }
 
