@@ -255,9 +255,9 @@ static inline sp_ofloat sp_FloatArray_delete_at_o(sp_FloatArray*a,sp_int i){if(!
 static inline sp_int sp_FloatArray_length(sp_FloatArray*a){return a->len;}
 static inline sp_bool sp_FloatArray_empty(sp_FloatArray*a){return a->len==0;}
 /* see sp_IntArray_get / _elem_nil / _oget */
-static inline sp_float sp_FloatArray_get(sp_FloatArray*a,sp_int i){if(!a)return 0.0;if(i<0)i+=a->len;if(i<0||i>=a->len)return 0.0;return a->data[i];}
+static inline sp_float sp_FloatArray_get(sp_FloatArray*a,sp_int i){if(!a)return 0.0;if((unsigned long long)i<(unsigned long long)a->len)return a->data[i];if(i<0)i+=a->len;if(i<0||i>=a->len)return 0.0;return a->data[i];}
 static inline sp_bool sp_FloatArray_elem_nil(sp_FloatArray*a,sp_int i){return SP_UNLIKELY(a->nilbits!=NULL)&&sp_nilbit_get(a->nilbits,i);}
-static inline sp_ofloat sp_FloatArray_oget(sp_FloatArray*a,sp_int i){if(!a)return sp_ofloat_nil();if(i<0)i+=a->len;if(i<0||i>=a->len)return sp_ofloat_nil();sp_float v=a->data[i];if(SP_UNLIKELY(a->nilbits)&&sp_nilbit_get(a->nilbits,i))return sp_ofloat_nil();return sp_ofloat_of(v);}
+static inline sp_ofloat sp_FloatArray_oget(sp_FloatArray*a,sp_int i){if(!a)return sp_ofloat_nil();if(!((unsigned long long)i<(unsigned long long)a->len)){if(i<0)i+=a->len;if(i<0||i>=a->len)return sp_ofloat_nil();}sp_float v=a->data[i];if(SP_UNLIKELY(a->nilbits)&&sp_nilbit_get(a->nilbits,i))return sp_ofloat_nil();return sp_ofloat_of(v);}
 /* The fused reads (`a[i] + 1`, `f(a[i])`): the plain element, CRuby's
    error raised at the read for an index past the end or a nil element.
    The in-range read of an array that never held a nil is one unsigned
@@ -294,7 +294,12 @@ static inline sp_ofloat sp_FloatArray_last_opt(sp_FloatArray*a){return (!a||a->l
 static SP_NOINLINE SP_COLD void sp_FloatArray_fill_to(sp_FloatArray*a,sp_int i){if(i>a->len){if(!a->nilbits)SP_NILBITS_NEW_A(a);SP_NILBITS_SET_RANGE_A(a, a->len, i);}while(i>=a->len){a->data[a->len]=0.0;a->len++;}}
 static SP_NOINLINE SP_COLD void sp_FloatArray_clr_nil(sp_FloatArray*a,sp_int i){sp_nilbit_clr(a->nilbits,i);}
 /* Issue #769: no-op for negative index after adjustment. */
-static inline void sp_FloatArray_set(sp_FloatArray*a,sp_int i,sp_float v){if(!a)return;if(a->frozen){sp_raise_frozen_array_at(a, SP_BUILTIN_FLT_ARRAY);return;}sp_int orig=i;if(i<0)i+=a->len;if(i<0)sp_raise_cls("IndexError",sp_sprintf("index %lld too small for array; minimum: %lld",(long long)orig,(long long)-a->len));while(i>=a->cap)sp_FloatArray_set_cap(a,a->cap*2+1);if(i>=a->len)sp_FloatArray_fill_to(a,i);a->data[i]=v;if(SP_UNLIKELY(a->nilbits))sp_FloatArray_clr_nil(a,i);}  /* the gap is nil, not 0.0 (#3836) */
+/* The store: the in-range write of a thawed array inline, everything else
+   (nil, frozen, a negative index, growth and the gap of nils) out of line,
+   as sp_IntArray_set; the whole setter inline was a call per store once its
+   nil-bit clear made it too big to inline (bm_matmul under promote) */
+static SP_NOINLINE SP_COLD void sp_FloatArray_set_cold(sp_FloatArray*a,sp_int i,sp_float v){if(!a)return;if(a->frozen){sp_raise_frozen_array_at(a, SP_BUILTIN_FLT_ARRAY);return;}sp_int orig=i;if(i<0)i+=a->len;if(i<0)sp_raise_cls("IndexError",sp_sprintf("index %lld too small for array; minimum: %lld",(long long)orig,(long long)-a->len));while(i>=a->cap)sp_FloatArray_set_cap(a,a->cap*2+1);if(i>=a->len)sp_FloatArray_fill_to(a,i);a->data[i]=v;if(SP_UNLIKELY(a->nilbits))sp_FloatArray_clr_nil(a,i);}  /* the gap is nil, not 0.0 (#3836) */
+static inline void sp_FloatArray_set(sp_FloatArray*a,sp_int i,sp_float v){if(SP_LIKELY(a&&!a->frozen&&(unsigned long long)i<(unsigned long long)a->len)){a->data[i]=v;if(SP_UNLIKELY(a->nilbits))sp_FloatArray_clr_nil(a,i);return;}sp_FloatArray_set_cold(a,i,v);}
 static SP_NOINLINE SP_COLD void sp_FloatArray_set_nil(sp_FloatArray*a,sp_int i){if(!a)return;if(a->frozen){sp_raise_frozen_array_at(a, SP_BUILTIN_FLT_ARRAY);return;}sp_int orig=i;if(i<0)i+=a->len;if(i<0)sp_raise_cls("IndexError",sp_sprintf("index %lld too small for array; minimum: %lld",(long long)orig,(long long)-a->len));while(i>=a->cap)sp_FloatArray_set_cap(a,a->cap*2+1);if(i>=a->len)sp_FloatArray_fill_to(a,i);a->data[i]=0.0;if(!a->nilbits)SP_NILBITS_NEW_A(a);SP_NILBIT_SET_A(a, i);}
 static inline void sp_FloatArray_oset(sp_FloatArray*a,sp_int i,sp_ofloat o){if(SP_UNLIKELY(o.nil))sp_FloatArray_set_nil(a,i);else sp_FloatArray_set(a,i,o.v);}
 static SP_NOINLINE SP_COLD void sp_FloatArray_push_nil(sp_FloatArray*a){sp_FloatArray_push(a,0.0);if(a->frozen)return;if(!a->nilbits)SP_NILBITS_NEW_A(a);SP_NILBIT_SET_A(a, a->len-1);}
