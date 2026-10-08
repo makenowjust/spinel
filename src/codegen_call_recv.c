@@ -1877,6 +1877,28 @@ static int emit_kind_array_call(Compiler *c, int id, Buf *b, const NodeTable *nt
     /* an oint unwrapped at once by its consumer (g_ck_node): the checked read */
     int uck = uo && g_ck_node == id;
     const char *uop = g_ck_op;
+    /* an index that can be nil folds its flag into the bounds compare (a nil
+       index is all ones, never in range): the in-range read of an array with
+       no bitmap is the element, and the rest -- a nil index's TypeError
+       included -- take the read as before */
+    if ((rt == TY_INT_ARRAY || rt == TY_FLOAT_ARRAY) && comp_ntype(c, argv[0]) == TY_INT &&
+        nt_kind(nt, argv[0]) != NK_SplatNode && repr_of(c, argv[0]).kind != RK_BOXED && node_is_oint(c, argv[0])) {
+      int ta = ++g_tmp, ti = ++g_tmp;
+      char el[96];
+      if (rt == TY_INT_ARRAY) snprintf(el, sizeof el, "_t%d->data[_t%d->start + _t%d.v]", ta, ta, ti);
+      else snprintf(el, sizeof el, "_t%d->data[_t%d.v]", ta, ti);
+      buf_printf(b, "({ sp_%sArray *_t%d = ", k, ta); emit_expr(c, recv, b);
+      buf_printf(b, "; sp_oint _t%d = ", ti); emit_oint_expr(c, argv[0], TY_INT, b);
+      buf_printf(b, "; (_t%d && (unsigned long long)(_t%d.v | -(sp_int)_t%d.nil) < (unsigned long long)_t%d->len && !_t%d->nilbits) ? ",
+                 ta, ti, ti, ta, ta);
+      if (uo && !uck) buf_printf(b, "%s(%s)", oint_of(rt == TY_INT_ARRAY ? TY_INT : TY_FLOAT), el);
+      else buf_puts(b, el);
+      buf_printf(b, " : sp_%sArray_%s(_t%d, sp_oint_arg(_t%d)", k, uck ? (uop ? "get_ck" : "get_arg") : uo ? "oget" : "get", ta, ti);
+      if (uck && uop) buf_printf(b, ", \"%s\"", uop);
+      buf_puts(b, "); })");
+      if (uck) g_ck_done = 1;
+      { *out = 1; return 1; }
+    }
     buf_printf(b, "sp_%sArray_%s(", k, uck ? (uop ? "get_ck" : "get_arg") : uo ? "oget" : "get");
     if (uck) g_ck_done = 1;
     emit_expr(c, recv, b); buf_puts(b, ", ");

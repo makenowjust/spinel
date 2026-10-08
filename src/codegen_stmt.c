@@ -16426,6 +16426,30 @@ static int emit_array_mutate_stmt_body(Compiler *c, int id, Buf *b, int indent) 
       buf_printf(b, ", _t%d, _t%d)%s; }\n", tk, tv, hc_mark());
       return 1;
     }
+    /* an index that can be nil, a plain value with no effects: the nil
+       flag folds into the bounds compare (a nil index is all ones, never in
+       range), so the in-range store of an array with no bitmap is a compare
+       and a write, and the rest -- a nil index's TypeError included -- take
+       the set */
+    if ((rt == TY_INT_ARRAY || rt == TY_FLOAT_ARRAY) && vt == et && !*nsfx && comp_ntype(c, argv[0]) == TY_INT &&
+        node_is_oint(c, argv[0]) && repr_of(c, argv[0]).kind != RK_BOXED &&
+        /* the receiver held in a temp stays rooted by its local while the
+           value runs, unless the value assigns it */
+        (!subtree_has_side_effect(c, argv[1]) ||
+         (nt_kind(nt, recv) == NK_LocalVariableReadNode && nt_str(nt, recv, "name") &&
+          !subtree_writes_local(c, argv[1], nt_str(nt, recv, "name"))))) {
+      int ta = ++g_tmp, ti = ++g_tmp, tv = ++g_tmp;
+      buf_printf(b, "{ sp_%sArray *_t%d = ", k, ta); emit_expr(c, recv, b);
+      buf_printf(b, "; sp_oint _t%d = ", ti); emit_oint_expr(c, argv[0], TY_INT, b);
+      buf_printf(b, "; %s _t%d = ", c_type_name(et), tv); emit_expr(c, argv[1], b);
+      char off[48] = "";   /* an Integer array's window starts at ->start */
+      if (rt == TY_INT_ARRAY) snprintf(off, sizeof off, "_t%d->start + ", ta);
+      buf_printf(b, "; if (SP_LIKELY(_t%d && (unsigned long long)(_t%d.v | -(sp_int)_t%d.nil) < (unsigned long long)_t%d->len"
+                    " && !_t%d->frozen && !_t%d->nilbits)) _t%d->data[%s_t%d.v] = _t%d;",
+                 ta, ti, ti, ta, ta, ta, ta, off, ti, tv);
+      buf_printf(b, " else sp_%sArray_set(_t%d, sp_oint_arg(_t%d), _t%d)%s; }\n", k, ta, ti, tv, hc_mark());
+      return 1;
+    }
     buf_printf(b, "sp_%sArray_set%s(", k, nsfx);
     emit_expr(c, recv, b); buf_puts(b, ", ");
     emit_int_expr(c, argv[0], b); buf_puts(b, ", ");
