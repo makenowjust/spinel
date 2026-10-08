@@ -292,7 +292,8 @@ int emit_call_kernel_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, cons
         return 1;
       }
       /* with a base only a String converts, so a number is nil here */
-      if (at0 == TY_INT && ac == 1) { oint_open(c, id, TY_INT, b); buf_puts(b, "sp_oint_of("); emit_expr(c, av[0], b); buf_puts(b, ")"); oint_close(c, id, b); return 1; }
+      /* (an Integer that can be nil hands its nil on: Integer(nil, exception: false) is nil) */
+      if (at0 == TY_INT && ac == 1) { oint_open(c, id, TY_INT, b); emit_oint_expr(c, av[0], TY_INT, b); oint_close(c, id, b); return 1; }
       /* a user object, a boxed value that may hold one, or a Float (NaN and
          Infinity are nil, CRuby's FloatDomainError swallowed) converts
          through the runtime's Kernel#Integer path, nil for every failure */
