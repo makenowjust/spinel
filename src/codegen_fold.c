@@ -374,6 +374,10 @@ static char *emit_hash_block_eval(Compiler *c, int block, Repr hr, const char *h
     else {
       if (repr_hash_is(hr, TY_POLY, TY_POLY))
         buf_printf(g_pre, "lv_%s = _t%d->vals[_t%d->order[_t%d]];\n", p1, trecv, trecv, ti);
+      /* a value param whose slot holds its nil (another site binds it a
+         nil) takes the value lifted */
+      else if (p1_lv && slot_is_oint(p1_lv) && oint_kind(vt))
+        buf_printf(g_pre, "lv_%s = %s(sp_%sHash_get(_t%d, _t%d->order[_t%d]));\n", p1, oint_of(vt), hn, trecv, trecv, ti);
       else
         buf_printf(g_pre, "lv_%s = sp_%sHash_get(_t%d, _t%d->order[_t%d]);\n", p1, hn, trecv, trecv, ti);
     }
