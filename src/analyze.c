@@ -28292,6 +28292,15 @@ int nullable_int_value(Compiler *c, int v) {
     int rcv0 = nt_ref(nt, v, "receiver");
     /* an element read out of an array some element of which is the sentinel */
     if (rcv0 >= 0 && elem_returning_call(cn) && nullable_int_elem_expr(c, rcv0, 0)) return 1;
+    /* Array#fetch answers its default argument, or its block's value, for
+       an index out of range: either can be nil */
+    if (rcv0 >= 0 && cn && sp_streq(cn, "fetch") && ty_is_array(infer_type(c, rcv0))) {
+      int fa = nt_ref(nt, v, "arguments"), fn = 0;
+      const int *fav = fa >= 0 ? nt_arr(nt, fa, "arguments", &fn) : NULL;
+      if (fn == 2 && (nt_kind(nt, fav[1]) == NK_NilNode || nullable_int_value(c, fav[1]))) return 1;
+      int ft = call_block_tail(c, v);
+      if (fn == 1 && ft >= 0 && (nt_kind(nt, ft) == NK_NilNode || nullable_int_value(c, ft))) return 1;
+    }
     /* a fold's value is its block's, and `find`/`detect` hand back an element */
     if (cn && (is_reduce_alias(cn))) {
       int ft = call_block_tail(c, v);
