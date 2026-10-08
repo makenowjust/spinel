@@ -63,7 +63,7 @@ static void interp_flatten(const NodeTable *nt, int id, int **out, int *n, int *
    The plan is shared with the append form (`s << "..#{x}.."`), which
    writes the same parts into the receiver instead of a fresh string. */
 enum { WK_LIT, WK_INT, WK_BOOL, WK_NIL, WK_DYN };
-typedef struct { int kind; int tmp; int lit_off; int lit_esc_len; long lit_len; } WPart;
+typedef struct { int kind; int tmp; int lit_off; int lit_esc_len; long lit_len; int plain; } WPart;
 typedef struct {
   WPart *wp; int nwp; int ndyn_or_scalar;
   Buf lits;      /* escaped literal texts, concatenated */
@@ -108,7 +108,7 @@ static void interp_plan(Compiler *c, int id, InterpPlan *pl) {
         else if (ch >= 0x20 && ch < 0x7f) buf_printf(&lits, "%c", ch);
         else buf_printf(&lits, "\\%03o", ch);
       }
-      wp[nwp].kind = WK_LIT; wp[nwp].tmp = -1;
+      wp[nwp].kind = WK_LIT; wp[nwp].tmp = -1; wp[nwp].plain = 0;
       wp[nwp].lit_off = off; wp[nwp].lit_esc_len = lits.len - off;
       wp[nwp].lit_len = blen;
       nwp++;
@@ -391,6 +391,7 @@ static void interp_plan(Compiler *c, int id, InterpPlan *pl) {
       }
       free(conv.p);
       wp[nwp].kind = wkind; wp[nwp].tmp = tv2;
+      wp[nwp].plain = wkind == WK_INT && int_value_plain(c, expr);   /* never the nil sentinel (#7612) */
       wp[nwp].lit_off = 0; wp[nwp].lit_esc_len = 0; wp[nwp].lit_len = 0;
       nwp++;
       ndyn_or_scalar++;
@@ -473,7 +474,7 @@ void emit_interp(Compiler *c, int id, Buf *b) {
                      wp[k].lit_len, wpid, wp[k].lit_len);
         break;
       case WK_INT:
-        buf_printf(b, "_t%d = sp_w_int(_t%d, _t%d); ", wpid, wpid, wp[k].tmp);
+        buf_printf(b, "_t%d = %s(_t%d, _t%d); ", wpid, wp[k].plain ? "sp_w_int_plain" : "sp_w_int", wpid, wp[k].tmp);
         break;
       case WK_BOOL:
         buf_printf(b, "_t%d = sp_w_bool(_t%d, _t%d); ", wpid, wpid, wp[k].tmp);

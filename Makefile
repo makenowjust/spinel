@@ -52,7 +52,7 @@ RBS_SRC      = $(wildcard $(RBS_DIR)/src/*.c) $(wildcard $(RBS_DIR)/src/util/*.c
 RBS_OBJ      = $(patsubst $(RBS_DIR)/src/%.c,build/rbs/%.o,$(RBS_SRC))
 RBS_LIB      = build/librbs.a
 
-.PHONY: all hooks share-strings-test gate-tool-test regexp wasm-rt wasm-test rbs_extract rbs-test rbs-seed-test rbs-seed-extractor cident plan-check-test timing-test signal-default-test source-marker-test repr-check-test nil-check-test traits-check-test poly-cold-test bop-arity-check-test arity-spec-check re-lit-test reject-test cli-opts-test link-names-test defer-refusals-test check-stores-test backtrace-test gc-minor-test thread-puts-test ext-test ext-cruby-test wrap-test alloc-report-test rubyspec rubyspec-gate spin-check \ repr-diff c-costs alloc-diff \
+.PHONY: int-min-test all hooks share-strings-test gate-tool-test regexp wasm-rt wasm-test rbs_extract rbs-test rbs-seed-test rbs-seed-extractor cident plan-check-test timing-test signal-default-test source-marker-test repr-check-test nil-check-test traits-check-test poly-cold-test bop-arity-check-test arity-spec-check re-lit-test reject-test cli-opts-test link-names-test defer-refusals-test check-stores-test backtrace-test gc-minor-test thread-puts-test ext-test ext-cruby-test alloc-report-test rubyspec rubyspec-gate spin-check \ repr-diff c-costs alloc-diff \
         test test-run clean-test-results regen-rbs-expected \
         regen-expected regen-expected-err bench optcarrot gate gate-full check gate-legs gate-test gate-bench gc-phases-test gc-stress-test gc-str-major-test threaded-render-test gc-locality-test test-corpus test-corpus-summary \
         gate-optcarrot scale-test clean install uninstall deps tools
@@ -1008,7 +1008,7 @@ re-lit-test: $(SPINEL)
 # the rounds stopped decided what was emitted.
 share-strings-test: $(SPINEL)
 	@tmp=$$(mktemp -d "$${TMPDIR:-/tmp}/spinel-share.XXXXXX"); ok=1; \
-	for t in test/share/*.rb test/share_strings_*.rb test/widened_param_reaches_its_callee.rb $$(cat test/share/reject.list); do \
+	for t in test/share/*.rb test/share_strings_*.rb test/nullable_string_identity.rb test/widened_param_reaches_its_callee.rb $$(cat test/share/reject.list); do \
 	  e="$$t.expected"; case "$$t" in test/reject/*) e="test/share/reject/$${t##*/}.expected";; esac; \
 	  if $(SPINEL) --share-strings "$$t" -o "$$tmp/b" >"$$tmp/out" 2>&1; then \
 	    ! grep -q 'did not converge' "$$tmp/out" || { echo "share-strings-test: FAIL $$t (the inference fixpoint ran to its round cap)"; ok=0; }; \
@@ -1046,7 +1046,7 @@ test: $(SPINEL_TIMEOUT)
 # The actual run. rbs-test golden-checks the RBS extractor (cheap, C-only).
 # rbs-seed-test checks the seeds actually reach the analyzer (incl. nested
 # classes, #1417).
-test-run: timing-test signal-default-test source-marker-test rbs-test rbs-seed-test re-lit-test reject-test cli-opts-test link-names-test defer-refusals-test check-stores-test backtrace-test gc-minor-test gc-phases-test gc-stress-test gc-threshold-test gc-obj-budget-test gc-str-major-test threaded-render-test gc-locality-test byref-capture-test thread-puts-test ext-test ext-cruby-test test-corpus-summary
+test-run: int-min-test timing-test signal-default-test source-marker-test rbs-test rbs-seed-test re-lit-test reject-test cli-opts-test link-names-test defer-refusals-test check-stores-test backtrace-test gc-minor-test gc-phases-test gc-stress-test gc-threshold-test gc-obj-budget-test gc-str-major-test threaded-render-test gc-locality-test byref-capture-test thread-puts-test ext-test ext-cruby-test test-corpus-summary
 
 # The test/*.rb corpus (and the bundled packages') on its own, without the
 # C-side legs: what a 32-bit target runs (`make test-corpus CC='cc -m32'`),
@@ -2231,6 +2231,7 @@ GC_MINOR_TESTS := test/reopened_builtin_kwrest_keys.rb \
                   test/random_reopen_block_parameter.rb \
                   test/kind_query_computed_nil.rb \
                   test/nil_string_slot_reads.rb test/nil_scalar_slot_widen.rb \
+                  test/nullable_string_identity.rb \
                   test/string_nil_conditional_assignment.rb \
                   test/yield_proc_arg_in_blocked_method.rb \
                   test/kind_query_nested_nil.rb \
@@ -2403,6 +2404,19 @@ build/gc-minor-results/never_young_store.chk: FORCE | $(SPINEL) $(SP_RT_LIB) $(S
 # builds release) can only assert that #backtrace answers an array. This builds
 # the fixture the way a debugging user does and checks the chain is really
 # there, innermost frame first, with the raising method named.
+# int-min-test: a local that no nil can reach holds -2**63 as that number in
+# every overflow mode, not as the nil sentinel (#7612). Run in wrap too, the mode
+# a bitboard program uses.
+int-min-test: $(SPINEL) $(SP_RT_LIB)
+	@tmp=$$(mktemp -d /tmp/spinel-intmin.XXXXXX); ok=1; \
+	for m in raise wrap; do \
+	  $(SPINEL) --int-overflow=$$m test/int_min_plain_locals.rb -o "$$tmp/im" >"$$tmp/im.err" 2>&1 || \
+	    { echo "int-min-test: FAIL (compile, $$m)"; sed -n 1,3p "$$tmp/im.err"; ok=0; continue; }; \
+	  "$$tmp/im" 2>&1 | cmp -s - test/int_min_plain_locals.rb.expected || \
+	    { echo "int-min-test: FAIL ($$m: -2**63 read as nil)"; ok=0; }; \
+	done; rm -rf "$$tmp"; \
+	if [ $$ok -eq 1 ]; then echo "int-min-test: pass"; else exit 1; fi
+
 backtrace-test: $(SPINEL) $(SP_RT_LIB)
 	@tmp=$$(mktemp -d /tmp/spinel-bt.XXXXXX); ok=1; \
 	$(SPINEL) --debug --no-inline-hot test/backtrace/rescued_chain.rb -o "$$tmp/bt" >/dev/null 2>&1 || \
@@ -3630,6 +3644,8 @@ infer-test: $(SPINEL) $(SP_RT_LIB)
 	$(SPINEL) test/infer/dead_constructor_no_arm.rb -c --no-line-map -o "$$tmp/dc.c" >/dev/null 2>&1 || { echo "infer-test: FAIL (compile dead_constructor_no_arm)"; exit 1; }; \
 	grep -q 'sp_poly_add' "$$tmp/dc.c" && { echo "infer-test: FAIL (a class constructed only in dead code widened a poly receiver's field read to poly)"; ok=0; }; \
 	grep -Eq '(sp_int_add\(|sp_o?int _t[0-9]+ = )\(\{ sp_RbVal _t[0-9]+ = lv_d; sp_o?int _t[0-9]+ = (0|sp_oint_nil\(\)); switch' "$$tmp/dc.c" || { echo "infer-test: FAIL (the field read of a boxed receiver did not stay an int switch, or its receiver is rooted for an arm that cannot run)"; ok=0; }; \
+	$(SPINEL) test/infer/folded_arm_reads_not_nil.rb -c --no-line-map -o "$$tmp/fan.c" >/dev/null 2>&1 || { echo "infer-test: FAIL (compile folded_arm_reads_not_nil)"; exit 1; }; \
+	! grep -q 'sp_nomethod_msg(' "$$tmp/fan.c" || { echo "infer-test: FAIL (a read in an arm a fold blanked made a local that cannot be nil test for nil)"; grep -o 'sp_nomethod_msg("[^"]*"' "$$tmp/fan.c" | sort -u; ok=0; }; \
 	rounds=$$(SP_FIXPOINT_LOG=1 $(SPINEL) test/infer/fixpoint_converges.rb -c --no-line-map -o "$$tmp/fp.c" 2>&1 | sed -n 's/^\[fp\] rounds=\([0-9]*\).*/\1/p' | tail -1); \
 	case "$$rounds" in ''|*[!0-9]*) echo "infer-test: FAIL (no fixpoint round count -- SP_FIXPOINT_LOG gone?)"; ok=0;; \
 	  *) [ "$$rounds" -lt 128 ] || { echo "infer-test: FAIL (the inference fixpoint ran to its $$rounds-round cap: it stopped mid-oscillation, and where it stops decides which typing is emitted)"; ok=0; };; \
