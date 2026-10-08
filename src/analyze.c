@@ -28914,6 +28914,12 @@ int nullable_int_value(Compiler *c, int v) {
      (`nil && 2`, `false || nil`), not only where one is a number that can be */
   if (nt_kind(nt, v) == NK_OrNode || nt_kind(nt, v) == NK_AndNode) {
     int l = nt_ref(nt, v, "left"), r = nt_ref(nt, v, "right");
+    /* `a || b` answers a only when a is no nil: nil only through b
+       (`@ram[i] || 0` never is) */
+    if (nt_kind(nt, v) == NK_OrNode && r >= 0) {
+      TyKind rt2 = infer_type(c, r);
+      return nt_kind(nt, r) == NK_NilNode || rt2 == TY_NIL || rt2 == TY_VOID || nullable_int_value(c, r);
+    }
     for (int s = 0; s < 2; s++) {
       int o = s ? r : l;
       if (o < 0) continue;
