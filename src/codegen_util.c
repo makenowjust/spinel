@@ -5890,7 +5890,11 @@ int node_is_oint(Compiler *c, int node) {
     /* a method the program defines, resolved as the call emitter resolves
        it: its C function answers an oint iff method_ret_is_oint */
     int mi = -1;
-    if (r < 0) mi = comp_self_call_mi(c, node, nm);
+    /* the builtin a reopened IO class overrides, emitted as that builtin
+       (emit_io_builtin_call): the builtin's own rules below */
+    int io_bi = g_io_skip_reopen && g_io_skip_node == node;
+    if (io_bi) ;
+    else if (r < 0) mi = comp_self_call_mi(c, node, nm);
     else if (ty_is_object(rt)) {
       int cid = ty_object_class(rt);
       int mdef = -1, rdef = -1;
@@ -5910,7 +5914,7 @@ int node_is_oint(Compiler *c, int node) {
     }
     /* a builtin value's method the program reopened its class with
        (`class Symbol; def mark = ...`) */
-    if (mi < 0 && r >= 0 && rt != TY_POLY && rt != TY_UNKNOWN && !ty_is_object(rt))
+    if (mi < 0 && !io_bi && r >= 0 && rt != TY_POLY && rt != TY_UNKNOWN && !ty_is_object(rt))
       mi = comp_builtin_kind_reopen_mi(c, rt, nm);
     /* a method whose return widened past the call's (a yielding method
        answering its block, typed per call site): the call's own analysis */
