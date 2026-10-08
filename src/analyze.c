@@ -30402,6 +30402,66 @@ static void wnh_widen_block_params(Compiler *c, Scope *sc, const char *ln, int k
     if (bs && bs->body >= 0) wnh_note(bs->body);
   }
 }
+/* The method a call resolves to statically, or -1 (a boxed receiver: -2) */
+static int wnh_call_target(Compiler *c, int call) {
+  const NodeTable *nt = c->nt;
+  const char *cn = nt_str(nt, call, "name");
+  int r = nt_ref(nt, call, "receiver");
+  if (!cn) return -1;
+  if (r < 0) return comp_self_call_mi(c, call, cn);
+  if (nt_kind(nt, r) == NK_ConstantReadNode || nt_kind(nt, r) == NK_ConstantPathNode) {
+    int rc = comp_class_index(c, nt_str(nt, r, "name"));
+    return rc >= 0 ? comp_cmethod_in_chain(c, rc, cn, NULL) : -1;
+  }
+  TyKind rt = infer_type(c, r);
+  if (rt == TY_POLY || rt == TY_UNKNOWN) return -2;
+  return ty_is_object(rt) ? comp_method_in_chain(c, ty_object_class(rt), cn, NULL) : -1;
+}
+/* Can method mi's return widen with the literal it answers? Every call of
+   it must resolve to it, and its value be read only where the reader
+   re-derives the kind: a builtin's receiver or argument (`f(v) == h`,
+   `p f(v)`), or dropped. One that lands in a slot (a variable, a return, a
+   program method's argument, a literal's element) keeps the typed kind and
+   its store refuses, as before. */
+static int wnh_ret_widenable(Compiler *c, int mi) {
+  const NodeTable *nt = c->nt;
+  const char *nm = c->scopes[mi].name;
+  if (!nm) return 0;
+  NT_FOREACH_KIND(nt, NK_CallNode, call) {
+    const char *cn = nt_str(nt, call, "name");
+    if (!cn || !sp_streq(cn, nm)) continue;
+    int t = wnh_call_target(c, call);
+    if (t == -2) return 0;
+    if (t != mi) continue;
+    if (comp_value_dropped(c, call)) continue;
+    int rp = comp_recv_parent(c, call);
+    if (rp >= 0) { if (wnh_call_target(c, rp) >= 0) return 0; continue; }
+    /* an argument of a builtin call */
+    int found = 0, owner = -1;
+    for (int pc = 0; pc < nt->count && !found; pc++) {
+      if (nt_kind(nt, pc) != NK_CallNode) continue;
+      int a = nt_ref(nt, pc, "arguments"), an = 0;
+      const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &an) : NULL;
+      for (int i = 0; i < an && !found; i++) if (an_unparen(nt, av[i]) == call) { found = 1; owner = pc; }
+    }
+    if (found && wnh_call_target(c, owner) >= 0) return 0;
+    if (!found) return 0;
+  }
+  return 1;
+}
+/* Widen method mi's return to hash kind `want`, and each call of it, when
+   wnh_ret_widenable allows; 1 when done */
+static int wnh_widen_ret(Compiler *c, int mi, TyKind want) {
+  const NodeTable *nt = c->nt;
+  if (!wnh_ret_widenable(c, mi)) return 0;
+  c->scopes[mi].ret = want;
+  NT_FOREACH_KIND(nt, NK_CallNode, call) {
+    if (wnh_call_target(c, call) != mi) continue;
+    c->ntype[call] = want;
+    Scope *cs = comp_scope_of(c, call); if (cs && cs->body >= 0) wnh_note(cs->body);
+  }
+  return 1;
+}
 static void widen_nullable_keyed_hash_literals(Compiler *c) {
   const NodeTable *nt = c->nt;
   NT_FOREACH_KIND(nt, NK_HashNode, id) {
@@ -30424,6 +30484,15 @@ static void widen_nullable_keyed_hash_literals(Compiler *c) {
     if (want == ht) continue;
     c->ntype[id] = want;
     { Scope *ls = comp_scope_of(c, id); if (ls && ls->body >= 0) wnh_note(ls->body); }
+    /* the literal a method answers (`def f(v) = { "k" => v }`): the
+       method's return widens with it, and each call of it, where its value
+       is read only by builtins that re-derive the kind; else it stays typed */
+    { Scope *ms = comp_scope_of(c, id);
+      int mi = ms ? (int)(ms - c->scopes) : -1;
+      if (ms && ms->def_node >= 0 && ms->ret == ht && an_unparen(nt, scope_body_last(c, mi)) == id) {
+        if (!wnh_widen_ret(c, mi, want)) { c->ntype[id] = ht; continue; }
+      }
+    }
     /* the local it is written to, and that local's reads */
     NT_FOREACH_KIND(nt, NK_LocalVariableWriteNode, w) {
       if (nt_ref(nt, w, "value") != id) continue;
@@ -30440,6 +30509,19 @@ static void widen_nullable_keyed_hash_literals(Compiler *c) {
         if (rn && sp_streq(rn, wn) && comp_scope_of(c, r) == sc) c->ntype[r] = want;
       }
     }
+  }
+  /* A method answering a Hash literal of a boxed kind its declared return
+     is not (a parameter boxed by --int-overflow=promote after the types
+     settled): the return follows the literal, as above */
+  for (int mi = 1; mi < c->nscopes; mi++) {
+    Scope *ms = &c->scopes[mi];
+    if (ms->def_node < 0 || !ty_is_hash(ms->ret)) continue;
+    int last = an_unparen(nt, scope_body_last(c, mi));
+    if (last < 0 || nt_kind(nt, last) != NK_HashNode || comp_scope_of(c, last) != ms) continue;
+    TyKind lt = c->ntype[last];
+    if (!ty_is_hash(lt) || lt == ms->ret || ty_hash_val(lt) != TY_POLY || ty_hash_val(ms->ret) == TY_POLY) continue;
+    if (ty_hash_key(lt) != ty_hash_key(ms->ret) && ty_hash_key(lt) != TY_POLY) continue;
+    if (wnh_widen_ret(c, mi, lt) && ms->body >= 0) wnh_note(ms->body);
   }
   /* ... and a local Hash a `[]=` / `store` stores such a key or value into
      (`h = Hash.new; h["k"] = a[1]`): the local, its reads, and its writes
