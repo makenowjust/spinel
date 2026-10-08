@@ -3587,6 +3587,13 @@ const char *nil_store_sfx(Compiler *c, const char *k, int node) {
    store, the plain element otherwise. */
 void emit_elem_store_value(Compiler *c, const char *k, int node, Buf *b) {
   TyKind et = sp_streq(k, "Float") ? TY_FLOAT : TY_INT;
+  /* a boxed value is checked against the element's kind: nil is the kind's
+     nil, anything else foreign is refused (sp_poly_elem_i / _f, #4481) */
+  Repr sr = node >= 0 ? repr_of(c, node) : (Repr){0};
+  if (node >= 0 && (sr.kind == RK_BOXED || sr.as_ty == TY_POLY)) {
+    buf_puts(b, et == TY_FLOAT ? "sp_poly_elem_f(" : "sp_poly_elem_i("); emit_boxed(c, node, b); buf_puts(b, ")");
+    return;
+  }
   if (nil_store_sfx(c, k, node)[0]) emit_oint_expr(c, node, et, b);
   else emit_coerce(c, node, et, CO_HOLD, "an Array element", b);
 }
@@ -5865,6 +5872,15 @@ int node_is_oint(Compiler *c, int node) {
       int bn = 0; const int *bs = bb >= 0 ? nt_arr(nt, bb, "body", &bn) : NULL;
       if (bn > 0 && (node_has_oint_form(c, bs[bn - 1]) || nt_kind(nt, bs[bn - 1]) == NK_NilNode)) return 1;
       return bb >= 0 && block_next_may_be_nil(c, bb, 0);
+    }
+    /* `a[i] = v` on an Integer / Float array answers v as it was stored:
+       with its nil (a nil, a boxed value, an oint) -- emit_array_call's
+       store */
+    if (sp_streq(nm, "[]=") && r >= 0 && (rt == TY_INT_ARRAY || rt == TY_FLOAT_ARRAY) && an2 >= 2) {
+      int sa = nt_ref(nt, node, "arguments"), san = 0;
+      const int *sav = nt_arr(nt, sa, "arguments", &san);
+      int lv = sav[san - 1];
+      return nt_kind(nt, lv) == NK_NilNode || repr_of(c, lv).kind == RK_BOXED || node_has_oint_form(c, lv);
     }
     /* `x.tap { ... }` answers its receiver, in the receiver's form */
     if (sp_streq(nm, "tap") && blk >= 0 && nt_kind(nt, blk) == NK_BlockNode && r >= 0 && oint_kind(rt)) return node_is_oint(c, r);

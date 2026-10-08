@@ -29024,6 +29024,15 @@ int nullable_int_value(Compiler *c, int v) {
     return 0;
   }
   if (nt_kind(nt, v) == NK_CallNode) {
+    /* `a[i] = v` answers v: a nil, or a boxed value that can be one */
+    { const char *sn = nt_str(nt, v, "name");
+      int sa = nt_ref(nt, v, "arguments"), san = 0;
+      const int *sav = sa >= 0 ? nt_arr(nt, sa, "arguments", &san) : NULL;
+      if (sn && sp_streq(sn, "[]=") && san >= 2 && nt_ref(nt, v, "receiver") >= 0) {
+        int sv2 = sav[san - 1];
+        TyKind st2 = infer_type(c, sv2);
+        return nt_kind(nt, sv2) == NK_NilNode || st2 == TY_POLY || st2 == TY_NIL || nullable_int_value(c, sv2);
+      } }
     if (nn_index_inbounds(c, v)) return 0;
     /* a call that answers nothing (`$stdout.puts(x)`) is nil */
     { TyKind cvt = infer_type(c, v); if (cvt == TY_NIL || cvt == TY_VOID) return 1; }
