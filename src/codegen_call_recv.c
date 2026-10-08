@@ -8158,6 +8158,7 @@ static int emit_scalar_recv_arms(Compiler *c, int id, Buf *b, const NodeTable *n
      the hold without the nil test) */
   int g_noguard = 0;
   if (rt == TY_STRING && name && recv >= 0 && operand_may_allocate(c, recv) &&
+      repr_of(c, recv).as_ty != TY_STRBUF &&   /* a handle is no fresh copy, and no const char * */
       !((!nil_answers_name(name)) && recv_may_be_sentinel(c, recv))) {
     for (int ai = 0; ai < argc && !g_noguard; ai++) g_noguard = operand_may_allocate(c, argv[ai]);
     const char *sop_n = nt_str(nt, id, "call_operator");
