@@ -11706,7 +11706,9 @@ static inline sp_int sp_poly_index_int(sp_RbVal a, sp_int i) {
       sp_int slots[1]; slots[0] = i;
       return sp_poly_to_i(sp_poly_callable_call(a, 1, slots));
     }
-    if (a.cls_id == SP_BUILTIN_INT_ARRAY) return sp_oint_val(sp_IntArray_oget((sp_IntArray *)a.v.p, i), "to_i");   /* FIXME-review: nil element read as an Integer */
+    /* a nil element or a miss reads as 0, as sp_poly_to_i reads the nil the
+       other kinds answer below */
+    if (a.cls_id == SP_BUILTIN_INT_ARRAY) { sp_oint o = sp_IntArray_oget((sp_IntArray *)a.v.p, i); return o.nil ? 0 : o.v; }
   }
   return sp_poly_to_i(sp_poly_arr_get_hash(a, i));
 }
