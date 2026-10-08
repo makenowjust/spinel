@@ -28,7 +28,7 @@ static void emit_file_join_args(Compiler *c, const int *argv, int argc, int boxe
   int first = emit_rooted_arg_list(c, argv, argc,
                                  boxed ? "sp_RbVal" : "const char *",
                                  boxed ? "SP_GC_ROOT_RBVAL" : "SP_GC_ROOT_STR",
-                                 boxed ? emit_boxed : emit_path_expr, b);
+                                 boxed ? emit_boxed : emit_path_expr, NULL, b);
   buf_printf(b, "%s((%s[]){", boxed ? "sp_file_join_vals" : "sp_file_join",
              boxed ? "sp_RbVal" : "const char *");
   for (int i = 0; i < argc; i++) buf_printf(b, "%s_t%d", i ? ", " : "", first + i);
@@ -40,7 +40,7 @@ static void emit_file_join_args(Compiler *c, const int *argv, int argc, int boxe
    Hold the values in Ruby's order before reversing the slots. */
 static void emit_file_realdirpath2(Compiler *c, const int *argv, Buf *b) {
   buf_puts(b, "({ ");
-  int first = emit_rooted_arg_list(c, argv, 2, "const char *", "SP_GC_ROOT_STR", emit_path_expr, b);
+  int first = emit_rooted_arg_list(c, argv, 2, "const char *", "SP_GC_ROOT_STR", emit_path_expr, NULL, b);
   buf_printf(b, "sp_file_realdirpath(sp_file_join((const char *[]){_t%d, _t%d}, 2)); })",
              first + 1, first);
 }
@@ -589,6 +589,21 @@ int emit_call_file_dir_time_arms(Compiler *c, int id, Buf *b, const NodeTable *n
     }
     if ((is_directory_entries(name)) && argc == 1) {
       buf_printf(b, "sp_dir_%s(", name); emit_path_expr(c, argv[0], b); buf_puts(b, ")"); return 1;
+    }
+    /* Dir.entries / Dir.children(path, encoding: e), and the foreach /
+       each_child forms desugared onto them: Find.find lists a directory so.
+       The keyword was counted as a second argument, and the call fell through
+       to the run-time NoMethodError. Only a lone encoding: is taken; another
+       keyword keeps the old path. */
+    if (is_directory_entries(name) && argc == 2 && nt_kind(nt, argv[1]) == NK_KeywordHashNode) {
+      int en = 0; (void)nt_arr(nt, argv[1], "elements", &en);
+      int ev = kwh_lookup(nt, argv[1], "encoding");
+      if (en == 1 && ev >= 0) {
+        buf_puts(b, "sp_dir_entries_enc("); emit_path_expr(c, argv[0], b);
+        buf_printf(b, ", %d, ", sp_streq(name, "children") ? 1 : 0);
+        emit_boxed(c, ev, b); buf_puts(b, ")");
+        return 1;
+      }
     }
     if ((sp_streq(name, "mkdir") || sp_streq(name, "rmdir") || sp_streq(name, "chdir")) && argc >= 1) {
       if (sp_streq(name, "mkdir") && argc == 2) {
@@ -1227,6 +1242,24 @@ int emit_call_builtin_cmethod_arms(Compiler *c, int id, Buf *b, const NodeTable 
         return 1;
       }
     }
+    /* BasicSocket.do_not_reverse_lookup and its writer, on any socket class:
+       one setting they share, which each new socket takes. The writer
+       answers its argument; only its truth sets the default. */
+    if (tcn && sp_feature_required("socket") && io_family_name(tcn) && !is_io_class_name(tcn) &&
+        ((sp_streq(name, "do_not_reverse_lookup") && argc == 0) ||
+         (sp_streq(name, "do_not_reverse_lookup=") && argc == 1))) {
+      int skc = comp_class_index(c, tcn);
+      if (skc < 0 || comp_cmethod_in_chain(c, skc, name, NULL) < 0) {
+        if (argc == 0) { buf_puts(b, "sp_sock_dnrl_default"); return 1; }
+        int tv = ++g_tmp;
+        buf_printf(b, "({ sp_RbVal _t%d = ", tv);
+        emit_boxed(c, argv[0], b);
+        buf_printf(b, "; sp_sock_dnrl_default = sp_poly_truthy(_t%d); ", tv);
+        emit_unbox_or_keep(c, repr_of(c, id).as_ty, tv, b);
+        buf_puts(b, "; })");
+        return 1;
+      }
+    }
     /* Socket class methods (#2922) */
     if (tcn && sp_streq(tcn, "Socket") && sp_feature_required("socket")) {
       if (sp_streq(name, "gethostname") && argc == 0) {
@@ -1357,9 +1390,9 @@ int emit_call_builtin_cmethod_arms(Compiler *c, int id, Buf *b, const NodeTable 
           buf_printf(b, "({ const char *_t%d = ", td);
           if (a0_poly) {
             int ts = ++g_tmp;
-            buf_printf(b, "({ sp_RbVal _t%d = ", ts); emit_expr(c, argv[0], b);
-            buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); (_t%d.tag == SP_TAG_STR || sp_poly_is_strbuf(_t%d))"
-                          " ? sp_file_read(sp_poly_unbox_s(_t%d)) : ", ts, ts, ts, ts);
+            buf_puts(b, "({ "); ts = hold_operand(c, argv[0], TY_POLY, 0, ts, 1, " ", b);
+            buf_printf(b, "(_t%d.tag == SP_TAG_STR || sp_poly_is_strbuf(_t%d))"
+                          " ? sp_file_read(sp_poly_unbox_s(_t%d)) : ", ts, ts, ts);
             if (sio_cid >= 0)
               buf_printf(b, "_t%d.tag == SP_TAG_OBJ && _t%d.cls_id == %d"
                             " ? sp_StringIO_read((sp_StringIO *)_t%d.v.p) : ", ts, ts, sio_cid, ts);
@@ -1373,9 +1406,9 @@ int emit_call_builtin_cmethod_arms(Compiler *c, int id, Buf *b, const NodeTable 
           buf_printf(b, "; SP_GC_ROOT(_t%d); ", td);
           if (a1_poly) {
             int tdd = ++g_tmp;
-            buf_printf(b, "sp_RbVal _t%d = ", tdd); emit_expr(c, argv[1], b);
-            buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); (_t%d.tag == SP_TAG_STR || sp_poly_is_strbuf(_t%d))"
-                          " ? sp_file_write(sp_poly_unbox_s(_t%d), _t%d) : ", tdd, tdd, tdd, tdd, td);
+            tdd = hold_operand(c, argv[1], TY_POLY, 0, tdd, 1, " ", b);
+            buf_printf(b, "(_t%d.tag == SP_TAG_STR || sp_poly_is_strbuf(_t%d))"
+                          " ? sp_file_write(sp_poly_unbox_s(_t%d), _t%d) : ", tdd, tdd, tdd, td);
             if (sio_cid >= 0)
               buf_printf(b, "_t%d.tag == SP_TAG_OBJ && _t%d.cls_id == %d"
                             " ? sp_StringIO_write((sp_StringIO *)_t%d.v.p, _t%d) : ", tdd, tdd, sio_cid, tdd, td);

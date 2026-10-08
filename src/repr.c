@@ -155,6 +155,7 @@ static int repr_strbuf_src(const Compiler *c, int node, TyKind t) {
     const char *ln = nt_str(nt, node, "name");
     Scope *s = ln ? comp_scope_of(mc, node) : NULL;
     LocalVar *lv = s ? scope_local(s, ln) : NULL;
+    if (c->share_strings && lv && lv->type == TY_POLY && c->nilnarrow[node] == TY_STRBUF) return RS_SLOT_POLY;
     return lv && lv->type == TY_STRBUF && lv->str_shared ? RS_HANDLE : RS_NONE;
   }
   if (t != TY_STRBUF) return RS_NONE;
@@ -292,6 +293,7 @@ Repr repr_of(const Compiler *c, int node) {
   r.poly_lift = c->poly_strbuf_lift ? c->poly_strbuf_lift[node] != 0 : 0;
   r.nil_tested = c->nil_tested ? c->nil_tested[node] != 0 : 0;
   r.nil_cold = c->nil_tested ? c->nil_tested[node] == 2 : 0;
+  r.head_held = c->head_held ? c->head_held[node] != 0 : 0;
   /* a node is boxed as the type it is stored as; a nil-guard narrowing is
      read where the value is used, not where it is boxed */
   TyKind kt = r.as_ty;
@@ -303,7 +305,7 @@ Repr repr_of(const Compiler *c, int node) {
   }
   r.strbuf_src = (unsigned char)repr_strbuf_src(c, node, kt);
   r.share = (unsigned)repr_static_share(c, node);
-  if (r.strbuf_src == RS_SLOT_POLY) r.kind = RK_BOXED;
+  if (r.strbuf_src == RS_SLOT_POLY && !(c->share_strings && r.narrowed == TY_STRBUF)) r.kind = RK_BOXED;
   else if (r.strbuf_src != RS_NONE) r.kind = RK_STRBUF;
   /* a pointer that can be nil (repr_may_nil); a by-value user object the
      nil fact says may be nil too, whose layout has no nil to hold it in */
@@ -648,7 +650,9 @@ static Repr repr_of_share_holder(Compiler *c, const ShareHolder *h) {
 
 /* A container holder whose elements share: are they boxed (a box holds the
    handle), or typed Strings (`const char *` elements)? 1, 0, or -1 for a
-   holder that is no container. */
+   holder that is no container. A global, a constant and a class variable
+   count too: a String Array constant whose elements a block parameter
+   changes as the handle holds copies of them */
 static int repr_share_elems_carried(Compiler *c, const ShareHolder *h) {
   TyKind t = TY_UNKNOWN;
   if (h->kind == SHK_LOCAL) t = c->scopes[h->scope].locals[h->local].type;
@@ -656,6 +660,20 @@ static int repr_share_elems_carried(Compiler *c, const ShareHolder *h) {
     int iv = comp_ivar_index(&c->classes[h->cid], h->name);
     if (iv < 0) return -1;
     t = c->classes[h->cid].ivar_types[iv];
+  }
+  else if (h->kind == SHK_GVAR || h->kind == SHK_CONST) t = repr_of_share_holder(c, h).ty;
+  else if (h->kind == SHK_CVAR) {
+    /* every class's of the name, which the facts key as one: a typed
+       container of any of them holds copies */
+    int any = -1;
+    for (int k = 0; k < c->nclasses; k++) {
+      int i = h->name ? comp_cvar_index(&c->classes[k], h->name) : -1;
+      TyKind ct = i >= 0 ? c->classes[k].cvar_types[i] : TY_UNKNOWN;
+      if (!ty_is_array(ct) && !ty_is_hash(ct)) continue;
+      if (ct == TY_STR_ARRAY || ct == TY_STR_STR_HASH || ct == TY_INT_STR_HASH) return 0;
+      any = 1;
+    }
+    return any;
   }
   if (!ty_is_array(t) && !ty_is_hash(t)) return -1;
   return t == TY_STR_ARRAY || t == TY_STR_STR_HASH || t == TY_INT_STR_HASH ? 0 : 1;
@@ -715,11 +733,13 @@ static void repr_share_seal(Compiler *c) {
   }
   /* a container literal no holder names, whose elements the rule shares
      only once the facts settle after the fixpoint, kept a typed String
-     form: its elements would be copies */
+     form: its elements would be copies. A literal in an unreachable
+     scope is never emitted, so no call can observe its copies. */
   int bad_lit = -1;
   for (int n = 0; n < c->nt->count && bad_lit < 0; n++) {
     NodeKind k = nt_kind(c->nt, n);
     if (k != NK_ArrayNode && k != NK_HashNode) continue;
+    if (!comp_scope_of(c, n)->reachable) continue;
     TyKind t = c->ntype[n];
     int ne = 0;
     nt_arr(c->nt, n, "elements", &ne);
@@ -816,6 +836,7 @@ Repr repr_of_ivar(const Compiler *c, int cid, int iv) {
   if (repr_may_nil(r.ty, nil_fact_ivar(c, cid, ci->ivars[iv]))) r.may_nil = 1;
   if (r.ty == TY_STRBUF && ci->ivar_str_shared[iv]) r.handle = 1;
   r.share = r.handle && c->share_strings;
+  r.elems_handle = ci->ivar_elems_shared[iv] && r.ty == TY_POLY_ARRAY;
   /* the element marking sits on the family's topmost class that has the
      ivar, where every subclass reads it (nullable_elem_ivar_in) */
   int ec = cid, ek = iv;
@@ -856,6 +877,7 @@ Repr repr_of_cvar(const Compiler *c, int cid, int idx) {
   if (repr_may_nil(r.ty, 1)) r.may_nil = 1;
   if (r.ty == TY_STRBUF && ci->cvar_str_shared[idx]) r.handle = 1;
   r.share = r.handle && c->share_strings;
+  r.elems_handle = ci->cvar_elems_shared[idx] && r.ty == TY_POLY_ARRAY;
   r.dyn_cls = repr_dyn_cls(c, r.ty);
   return r;
 }

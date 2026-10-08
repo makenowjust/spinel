@@ -108,6 +108,10 @@ sp_File *sp_io_fdopen_ex(int fd, const char *mode, int owns_fd) {SP_GC_ROOT_STR(
 }
 sp_File *sp_io_fdopen(int fd, const char *mode) { return sp_io_fdopen_ex(fd, mode, 1); }
 
+/* BasicSocket.do_not_reverse_lookup: true unless the program changes it; a
+   socket takes it when it is made, and keeps its own copy after that */
+sp_bool sp_sock_dnrl_default = 1;
+
 /* Wrap a socket fd (#2922). The FILE* serves the buffered READ side (gets and
    friends need lookahead); every write bypasses stdio straight to write(2) --
    see sp_sock_write below -- so a response is on the wire immediately, like
@@ -125,7 +129,7 @@ sp_File *sp_io_fdopen_sock(int fd, const char *kind) {SP_GC_ROOT_STR(kind);
   f->path = NULL;
   f->mode = kind;
   f->lineno = 0;
-  f->is_sock = 1;
+  f->is_sock = 1; f->rev_lookup = !sp_sock_dnrl_default;
   return f;
 }
 
@@ -440,6 +444,42 @@ sp_IntArray *sp_File_winsize(sp_File *f) {
   return a;
 }
 
+/* IO#winsize= [rows, cols] or [rows, cols, xpixel, ypixel], as CRuby's
+   io/console: any other length is ArgumentError, and a handle that is not a
+   terminal raises the ioctl's Errno (ENOTTY) rather than answering quietly,
+   since a size that was not set is not something to carry on from. Answers
+   its argument, which is what an assignment yields. A pty master is the case
+   that needs it: the program sizes the terminal its child sees. */
+sp_IntArray *sp_File_set_winsize(sp_File *f, sp_IntArray *size) {
+  SP_IO_OPEN(f);
+  sp_int n = size ? size->len : 0;
+  if (n != 2 && n != 4) {
+    char msg[96];
+    snprintf(msg, sizeof msg, "wrong number of arguments (given %lld, expected 2 or 4)", (long long)n);
+    sp_raise_cls("ArgumentError", msg);
+  }
+  const sp_int *v = size->data + size->start;
+  struct winsize ws;
+  memset(&ws, 0, sizeof ws);
+  ws.ws_row = (unsigned short)v[0];
+  ws.ws_col = (unsigned short)v[1];
+  if (n == 4) {
+    ws.ws_xpixel = (unsigned short)v[2];
+    ws.ws_ypixel = (unsigned short)v[3];
+  }
+#ifdef TIOCSWINSZ
+  if (ioctl(fileno(f->fp), TIOCSWINSZ, &ws) != 0) {
+    int e = errno;
+    sp_raise_cls(sp_errno_class_name(e), strerror(e));
+  }
+#else
+  /* a platform with no terminal-size ioctl (wasm32-wasi) */
+  (void)ws;
+  sp_raise_cls("NotImplementedError", "winsize= is not implemented on this platform");
+#endif
+  return size;
+}
+
 /* The standard streams are singletons in static storage, not GC allocations.
    Reads of $stdout / $stderr compile straight to these calls and only ever
    dereference the result, so nothing scanned ever held one -- until
@@ -693,7 +733,7 @@ sp_File *sp_sock_udp_new(sp_int family) {
   sp_File *f = (sp_File *)sp_gc_alloc(sizeof(sp_File), sp_File_fin, sp_File_scan);
   f->fp = fdopen(fd, "r+");
   if (!f->fp) { close(fd); sp_raise_cls("IOError", "fdopen failed"); return NULL; }
-  f->path = NULL; f->mode = "udp"; f->lineno = 0; f->is_sock = 1;
+  f->path = NULL; f->mode = "udp"; f->lineno = 0; f->is_sock = 1; f->rev_lookup = !sp_sock_dnrl_default;
   return f;
 }
 sp_File *sp_sock_unix_server(const char *path) {SP_GC_ROOT_STR(path);
@@ -708,6 +748,23 @@ sp_File *sp_sock_unix_connect(const char *path) {SP_GC_ROOT_STR(path);
   int fd = sp_net_unix_connect(path);
   if (fd < 0) sp_file_raise_errno("connect", path ? path : "");
   return sp_io_fdopen_sock(fd, "unix");
+}
+
+/* BasicSocket#do_not_reverse_lookup and its writer: a socket's own, so a
+   File or a pipe answers NoMethodError, as CRuby does */
+static void sp_sock_dnrl_check(sp_File *f, const char *name) {
+  if (!f) sp_nil_recv(name);
+  if (!f->is_sock)
+    sp_raise_cls("NoMethodError", sp_sprintf("undefined method '%s' for an instance of %s",
+                                             name, sp_io_kind_name(f)));
+}
+sp_bool sp_sock_dnrl(sp_File *f) {
+  sp_sock_dnrl_check(f, "do_not_reverse_lookup");
+  return !f->rev_lookup;
+}
+void sp_sock_set_dnrl(sp_File *f, sp_bool on) {
+  sp_sock_dnrl_check(f, "do_not_reverse_lookup=");
+  f->rev_lookup = !on;
 }
 
 const char *sp_sock_gethostname(void) {
@@ -727,7 +784,7 @@ sp_File *sp_sock_new(sp_int domain, sp_int type, sp_int proto) {
   if (!f->fp) { close(fd); sp_raise_cls("IOError", "fdopen failed"); return NULL; }
   /* Socket.new answers Socket, not the protocol-specific subclass CRuby uses
      for TCPSocket.new -- the caller asked for the generic class. */
-  f->path = NULL; f->mode = "socket"; f->lineno = 0; f->is_sock = 1;
+  f->path = NULL; f->mode = "socket"; f->lineno = 0; f->is_sock = 1; f->rev_lookup = !sp_sock_dnrl_default;
   return f;
 }
 /* Socket.pair / Socket.socketpair -> the two connected ends. */

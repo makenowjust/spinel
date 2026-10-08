@@ -1,4 +1,5 @@
 #include "codegen_internal.h"
+#include "share.h"
 #include "call_plan.h"
 #include "repr.h"
 #include "holder.h"
@@ -723,7 +724,10 @@ int  g_nren = 0;
 int  g_block_id = -1;
 
 RenPark ren_park(int from) {
-  RenPark p = { g_nren, from, g_nren - from, NULL, NULL };
+  RenPark p = { g_nren, from, g_nren - from, NULL, NULL, -1 };
+  /* from 0: a C function body of its own, which cannot name the open
+     splices' slots either (view_splice_next) */
+  if (from == 0) p.fence = view_push_fn();
   if (p.n > 0) {
     p.f = (char (*)[96])malloc(sizeof(char[96]) * (size_t)p.n);
     p.t = (char (*)[112])malloc(sizeof(char[112]) * (size_t)p.n);
@@ -738,6 +742,7 @@ RenPark ren_park(int from) {
 }
 
 void ren_unpark(RenPark *p) {
+  if (p->fence >= 0) view_pop(NULL, p->fence);
   g_nren = p->sv;
   if (p->f && p->t) {
     memcpy(g_ren_from + p->from, p->f, sizeof(char[96]) * (size_t)p->n);
@@ -2482,11 +2487,21 @@ static int strbuf_box_ref_as(Compiler *c, int recv, const char *fmt, Buf *b) {
 /* Emit a shared-mutable string receiver for an operation that only READS its
    bytes: the live buffer, not the whole-buffer copy an ordinary value read
    makes (#3227). Answers 0 when the receiver is not such a slot, so the caller
-   falls back to emit_expr. */
+   falls back to emit_expr. A narrowed box is not a handle slot: its ordinary
+   expression reads the bytes without allocating a handle first. */
 int emit_strbuf_read_ref(Compiler *c, int recv, Buf *b) { return strbuf_box_ref_as(c, recv, "sp_String_cstr(%s)", b); }
 /* The object_id of a String held as a shared sp_String: the handle's address,
    which is what a box of it carries. 0 when `recv` is not one. */
-int strbuf_object_ref(Compiler *c, int recv, Buf *b) { return strbuf_box_ref_as(c, recv, "((sp_int)(uintptr_t)(%s))", b); }
+int strbuf_object_ref(Compiler *c, int recv, Buf *b) {
+  /* The box's payload is already its identity, with or without a handle. */
+  if (repr_share_rule(c) && recv >= 0 && repr_of(c, recv).strbuf_src == RS_SLOT_POLY) {
+    buf_puts(b, "((sp_int)(uintptr_t)(");
+    emit_local_ref(c, recv, nt_str(c->nt, recv, "name"), b);
+    buf_puts(b, ").v.p)");
+    return 1;
+  }
+  return strbuf_box_ref_as(c, recv, "((sp_int)(uintptr_t)(%s))", b);
+}
 /* `cont[k]` where the container hands its elements out BOXED (a poly array, a
    hash): the read is an sp_RbVal, so a shared-handle destination has to unbox
    it rather than wrap it (#3941). */
@@ -2619,8 +2634,30 @@ int strbuf_bang_self_local(const Compiler *c, int v) {
   int r = nt_ref(nt, v, "receiver");
   return r >= 0 && nt_kind(nt, r) == NK_LocalVariableReadNode && repr_of(c, r).kind == RK_STRBUF;
 }
+/* --share-strings: a native method answering the String its object keeps
+   (`native_share ... "answers"`), on an object whose String the rule
+   shares: its handle form's call, as the handle text */
+static int native_share_answer_ref(Compiler *c, int n, char *out, size_t cap) {
+  const NodeTable *nt = c->nt;
+  if (!repr_share_rule(c) || n < 0 || nt_kind(nt, n) != NK_CallNode || nt_ref(nt, n, "block") >= 0) return 0;
+  int r = nt_ref(nt, n, "receiver");
+  TyKind rt = r >= 0 ? comp_ntype(c, r) : TY_UNKNOWN;
+  if (!ty_is_object(rt) || !c->classes[ty_object_class(rt)].is_native_class) return 0;
+  int a = nt_ref(nt, n, "arguments"), argc = 0;
+  if (a >= 0) nt_arr(nt, a, "arguments", &argc);
+  int nm = comp_native_method_find(c, ty_object_class(rt), nt_str(nt, n, "name"), argc, 0);
+  const NativeMethod *m = nm >= 0 ? &c->native_methods[nm] : NULL;
+  if (!m || !(m->share & NSH_ANSWERS) || !m->share_csym || argc != 0 || !share_node_elems_share(c, r)) return 0;
+  Buf rb; memset(&rb, 0, sizeof rb);
+  emit_expr(c, r, &rb);
+  int fit = rb.p && strlen(rb.p) + strlen(m->share_csym) + 3 <= cap;
+  if (fit) snprintf(out, cap, "%s(%s)", m->share_csym, rb.p);
+  free(rb.p);
+  return fit;
+}
 int strbuf_slot_ref(Compiler *c, int recv, char *out, size_t cap) {
   HolderRef h;
+  if (native_share_answer_ref(c, recv, out, cap)) return 1;
   /* via emit_local_ref: a celled/captured local derefs its cell */
   if (strbuf_local_name(c, recv) && holder_of_node(c, recv, &h)) return holder_slot_text(c, &h, out, cap);
   /* a demand-marked reader call typed as the handle (external reader
@@ -3535,9 +3572,10 @@ TyKind fold_seed_ntype(Compiler *c, int node) {
    typed-array, Hash and poly-receiver call sites, which each had the hazard. */
 void emit_poly_sum_seed(Compiler *c, int recv, int seed, Buf *b) {
   int tr = ++g_tmp, ts = ++g_tmp;
-  buf_printf(b, "({ sp_RbVal _t%d = ", tr); emit_boxed(c, recv, b);
-  buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); sp_RbVal _t%d = ", tr, ts); emit_boxed(c, seed, b);
-  buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); sp_poly_sum_seed(_t%d, _t%d); })", ts, tr, ts);
+  buf_puts(b, "({ ");
+  tr = hold_operand(c, recv, TY_POLY, 1, tr, 1, " ", b);
+  ts = hold_operand(c, seed, TY_POLY, 1, ts, 1, " ", b);
+  buf_printf(b, "sp_poly_sum_seed(_t%d, _t%d); })", tr, ts);
 }
 /* A call that never hands back a value: a receiverless raise or fail, or a
    method the program defines whose every path raises, which the analyzer
@@ -3788,14 +3826,14 @@ void emit_round_kw_effects(Compiler *c, const RoundKw *kw, Buf *b) {
    been read. Emits into an already-open statement expression; answers the
    temp holding the mode, or -1 when the hash names none. */
 int emit_round_kw_binds(Compiler *c, const RoundKw *kw, Buf *b) {
-  int thalf = -1, has_splat = 0, tfirst = g_tmp + 1;
+  int thalf = -1, has_splat = 0;
+  int *kt = calloc((size_t)kw->nelem + 1, sizeof *kt);
+  if (!kt) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
   for (int e = 0; e < kw->nelem; e++) {
     int is_splat, opaque; int v = round_kw_elem(c, kw, e, &is_splat, &opaque);
-    int t = ++g_tmp;
+    int t = kt[e] = ++g_tmp;
     if (v < 0) { buf_printf(b, "sp_RbVal _t%d = sp_box_nil(); (void)_t%d; ", t, t); continue; }
-    buf_printf(b, "sp_RbVal _t%d = ", t);
-    emit_boxed(c, v, b);
-    buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); ", t);
+    t = kt[e] = hold_operand(c, v, TY_POLY, 1, t, 1, " ", b);
     if (is_splat) has_splat = 1;
     else if (!opaque && v == kw->half) thalf = t;
   }
@@ -3804,14 +3842,14 @@ int emit_round_kw_binds(Compiler *c, const RoundKw *kw, Buf *b) {
     emit_str_literal(b, kw->unknown);
     buf_puts(b, "); ");
   }
-  if (!has_splat) return thalf;
+  if (!has_splat) { free(kt); return thalf; }
   /* a `**` source is read in its place, so a `half:` on either side of it
      wins by being later, as it does in the hash the call really builds */
   int tm = ++g_tmp;
   buf_printf(b, "sp_RbVal _t%d = sp_box_nil(); SP_GC_ROOT_RBVAL(_t%d); ", tm, tm);
   for (int e = 0; e < kw->nelem; e++) {
     int is_splat, opaque; int v = round_kw_elem(c, kw, e, &is_splat, &opaque);
-    int t = tfirst + e;                 /* the temps were numbered in this order */
+    int t = kt[e];
     if (v < 0) continue;
     if (is_splat)
       buf_printf(b, "{ sp_RbVal _s%d = sp_round_half_kwsplat(_t%d);"
@@ -3820,6 +3858,7 @@ int emit_round_kw_binds(Compiler *c, const RoundKw *kw, Buf *b) {
     else if (!opaque && v == kw->half)
       buf_printf(b, "_t%d = _t%d; ", tm, t);
   }
+  free(kt);
   return tm;
 }
 
@@ -4038,6 +4077,40 @@ void emit_hash_key_o(Compiler *c, int key, TyKind kt, Buf *b) {
   emit_oint_expr(c, key, TY_INT, b);
 }
 
+/* --share-strings: String Array value v as a PolyArray holding each
+   element boxed as a handle of its own (a slot whose elements the rule
+   shares, or a fresh Array an iterator consumes: share_node_fresh_elems) */
+void emit_str_array_handles(Compiler *c, int v, Buf *b) {
+  int ta = ++g_tmp, tp = ++g_tmp, ti = ++g_tmp;
+  buf_printf(b, "({ sp_StrArray *_t%d = ", ta);
+  emit_expr(c, v, b);
+  buf_printf(b, "; SP_GC_ROOT(_t%d); sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d);"
+                " for (sp_int _t%d = 0; _t%d < sp_StrArray_length(_t%d); _t%d++)"
+                " sp_PolyArray_push(_t%d, sp_box_nullable_obj(sp_String_new_shared(sp_StrArray_get(_t%d, _t%d)),"
+                " SP_BUILTIN_STRBUF)); _t%d; })",
+             ta, tp, tp, ti, ti, ta, ti, tp, ta, ti, tp);
+}
+/* An iterator's receiver n: a fresh String Array whose elements the rule
+   shares (share_node_fresh_elems)? Then it is consumed as the PolyArray of
+   handles a local's Array would be. */
+int iter_src_as_handles(Compiler *c, int n) {
+  return c->share_strings && comp_ntype(c, n) == TY_STR_ARRAY && share_node_fresh_elems(c, n);
+}
+/* emit_boxed for an Enumerator's source, as iter_src_as_handles has it */
+void emit_boxed_iter_src(Compiler *c, int n, Buf *b) {
+  if (!iter_src_as_handles(c, n)) { emit_boxed(c, n, b); return; }
+  buf_puts(b, "sp_box_nullable_obj((void *)(");
+  emit_str_array_handles(c, n, b);
+  buf_puts(b, "), SP_BUILTIN_POLY_ARRAY)");
+}
+/* --share-strings: is block parameter lv, bound to an element of kind et, a
+   slot the scope holds as the shared handle (TY_STRBUF) over a String
+   element? Then each element is a fresh String the handle wraps, bound
+   into the slot, and no et-typed shadow declaration replaces it: the body's
+   reads were settled against the handle. */
+int elem_param_is_handle(const LocalVar *lv, TyKind et) {
+  return lv && lv->type == TY_STRBUF && et == TY_STRING;
+}
 void emit_hash_key(Compiler *c, int key, TyKind kt, Buf *b) {
   int kboxed = repr_of(c, key).kind == RK_BOXED;
   if (hash_key_misses(c, key, kt)) {
@@ -4080,6 +4153,16 @@ void emit_hash_key(Compiler *c, int key, TyKind kt, Buf *b) {
   if (kt == TY_POLY && !kboxed) {
     /* PolyPolyHash key: box the typed value into sp_RbVal */
     emit_boxed(c, key, b);
+    return;
+  }
+  /* a read marked to hand out a shared String's handle (a dynamic call's
+     argument the read also is, at another round) keys a String-keyed hash by
+     a copy of its bytes, which publishes nothing on the side channel */
+  if (kt == TY_STRING && comp_ntype(c, key) == TY_STRBUF && repr_of(c, key).handle) {
+    int t = ++g_tmp;
+    buf_printf(b, "({ sp_String *_t%d = ", t);
+    emit_expr(c, key, b);
+    buf_printf(b, "; _t%d ? sp_str_concat(sp_String_cstr(_t%d), (&(\"\\xff\")[1])) : NULL; })", t, t);
     return;
   }
   emit_expr(c, key, b);
@@ -4958,17 +5041,25 @@ void emit_recv_rooted(Compiler *c, int recv, int t, const char *rootm, Buf *b) {
 
 /* A compound literal is not a GC root. Evaluate and root each operand
    before the next one's setup or value can allocate; only the held values
-   go into the array passed to the builtin. The caller owns the scope. */
+   go into the array passed to the builtin. The caller owns the scope. With
+   `tmps`, each operand's temp goes there, and one the nil arm's head ran is
+   read from the head's temp (head_held_read), or boxed from it with no root
+   of its own (head_held_box); without, the temps are first + i. */
 int emit_rooted_arg_list(Compiler *c, const int *argv, int argc,
                          const char *ctype, const char *root,
-                         void (*emit)(Compiler *, int, Buf *), Buf *b) {
+                         void (*emit)(Compiler *, int, Buf *), int *tmps, Buf *b) {
   int first = g_tmp + 1;
   g_tmp += argc;
   for (int i = 0; i < argc; i++) {
     Buf pre = {0}, val = {0};
     emit_split_pre(c, argv[i], emit, &pre, &val);
     if (pre.len) buf_puts(b, pre.p);
-    buf_printf(b, "%s _t%d = %s; %s(_t%d); ", ctype, first + i, val.p, root, first + i);
+    int held = tmps ? head_held_read(c, argv[i], val.p) : -1;
+    if (tmps) tmps[i] = held >= 0 ? held : first + i;
+    if (held < 0 && tmps && emit == emit_boxed && head_held_box(c, argv[i]))
+      buf_printf(b, "%s _t%d = %s; ", ctype, first + i, val.p);
+    else if (held < 0)
+      buf_printf(b, "%s _t%d = %s; %s(_t%d); ", ctype, first + i, val.p, root, first + i);
     free(pre.p); free(val.p);
   }
   return first;
@@ -4979,11 +5070,14 @@ void emit_rooted_key_call(Compiler *c, const char *fn, const char *recv,
                           const int *argv, int argc, Buf *b) {
   int tr = ++g_tmp;
   buf_printf(b, "({ sp_RbVal _t%d = %s; SP_GC_ROOT_RBVAL(_t%d); ", tr, recv, tr);
-  int first = emit_rooted_arg_list(c, argv, argc, "sp_RbVal", "SP_GC_ROOT_RBVAL", emit_boxed, b);
+  int *ta = calloc((size_t)argc + 1, sizeof *ta);
+  if (!ta) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+  emit_rooted_arg_list(c, argv, argc, "sp_RbVal", "SP_GC_ROOT_RBVAL", emit_boxed, ta, b);
   buf_printf(b, "%s(_t%d, %d, (sp_RbVal[]){", fn, tr, argc);
-  for (int i = 0; i < argc; i++) buf_printf(b, "%s_t%d", i ? ", " : "", first + i);
+  for (int i = 0; i < argc; i++) buf_printf(b, "%s_t%d", i ? ", " : "", ta[i]);
   if (!argc) buf_puts(b, "sp_box_nil()");
   buf_puts(b, "}); })");
+  free(ta);
 }
 
 void emit_main_exit(Buf *b) {
@@ -5959,7 +6053,7 @@ int g_result_oint = 0;
 
 /* `@x ||= v` / `&&=` at write node `id` (ivar type t, slot text ref): the
    field's nil bit or the oint static decides the test and keeps the bit */
-void emit_ivar_orw_value(Compiler *c, int id, TyKind t, const char *ref, int v, int is_or, Buf *b) {
+void emit_ivar_orw_value(Compiler *c, int id, TyKind t, int elems_handle, const char *ref, int v, int is_or, Buf *b) {
   int cid, iv, k = oint_kind(t) ? ivar_node_slot(c, id, &cid, &iv) : 0;
   char pfx[128], nt[300];
   /* the expression's form (node_is_oint): the field beside its bit, or the
@@ -5969,27 +6063,27 @@ void emit_ivar_orw_value(Compiler *c, int id, TyKind t, const char *ref, int v, 
     snprintf(pfx, sizeof pfx, "%s%s", g_self, g_self_deref);
     ivar_nilbit_test(c, cid, iv, pfx, nt, sizeof nt);
     if (want_o) buf_puts(b, "({ (void)(");
-    emit_slot_orw_value_o(c, t, ref, v, is_or, nt, cid, iv, pfx, b);
+    emit_slot_orw_value_o(c, t, 0, ref, v, is_or, nt, cid, iv, pfx, b);
     if (want_o) buf_printf(b, "); ((%s){ %s, %s != 0 }); })", oint_ctype(t), ref, nt);
   }
   else if (k == 2 && civ_is_oint(c, cid, iv)) {
     snprintf(nt, sizeof nt, "%s.nil", ref);
     if (!want_o) buf_puts(b, "(");
-    emit_slot_orw_value_o(c, t, ref, v, is_or, nt, -1, -1, NULL, b);
+    emit_slot_orw_value_o(c, t, 0, ref, v, is_or, nt, -1, -1, NULL, b);
     if (!want_o) buf_puts(b, ").v");
   }
-  else emit_slot_orw_value(c, t, ref, v, is_or, b);
+  else emit_slot_orw_value(c, t, elems_handle, ref, v, is_or, b);
 }
 /* `obj.x ||= v` through the attribute's field (class cid, ivar iv, receiver
    prefix pfx such as "_t3->") */
-void emit_attr_orw_value(Compiler *c, int cid, int iv, const char *pfx, TyKind t, const char *ref,
-                         int v, int is_or, Buf *b) {
+void emit_attr_orw_value(Compiler *c, int cid, int iv, const char *pfx, TyKind t, int elems_handle,
+                         const char *ref, int v, int is_or, Buf *b) {
   char nt[300];
   if (oint_kind(t) && iv >= 0 && ivar_has_nilbit(c, cid, iv)) {
     ivar_nilbit_test(c, cid, iv, pfx, nt, sizeof nt);
-    emit_slot_orw_value_o(c, t, ref, v, is_or, nt, cid, iv, pfx, b);
+    emit_slot_orw_value_o(c, t, 0, ref, v, is_or, nt, cid, iv, pfx, b);
   }
-  else emit_slot_orw_value(c, t, ref, v, is_or, b);
+  else emit_slot_orw_value(c, t, elems_handle, ref, v, is_or, b);
 }
 /* The nil test of ivar iv of class cid behind `ref` ("self->iv_x", the
    field) for an or-write statement: the bit, the oint's flag, or NULL */

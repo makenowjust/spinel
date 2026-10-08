@@ -28,6 +28,7 @@ int is_opaque_reaching_call(const char *n); /* send family, call, new, lambda/pr
 int is_async_code_entry(const char *recv, const char *n); /* Thread.new/start/fork, Fiber.new, trap, Signal.trap */
 int is_name_reader(const char *n);    /* name to_s inspect: a Class's or Module's name */
 int is_tap_alias(const char *n);      /* tap then yield_self */
+int is_tap_name(const char *n);       /* tap */
 int is_quantifier(const char *n);     /* all? any? none? one? */
 int is_set_op(const char *n);         /* & intersection | union - difference */
 int is_combination_family(const char *n);  /* combination permutation repeated_combination repeated_permutation */
@@ -56,6 +57,8 @@ int is_len_alias(const char *n);      /* length size */
 int is_str_each_iter(const char *n);  /* each_char each_line each_byte each_codepoint: String's element iterators */
 int is_str_string_yield(const char *n); /* each_char each_line upto chars lines split scrub: String methods whose block takes a String */
 int is_unpack_name(const char *n); /* unpack: a String decoded into values, which a block takes one by one */
+int is_catch_name(const char *n); /* catch: a tagged non-local jump target */
+int is_throw_name(const char *n); /* throw: a tagged non-local jump */
 int is_diverging_call(const char *n); /* raise fail throw exit exit! abort: a Kernel call that never returns */
 int is_block_loop_method(const char *n); /* times each upto downto step loop each_with_index: a block run an unbounded number of times */
 
@@ -100,6 +103,8 @@ int is_indexed_each(const char *n); /* each_index each_with_index */
 int is_to_array_alias(const char *n); /* entries to_a */
 int is_match_p_name(const char *n);   /* match? */
 int is_record_class_builder(const char *recv, const char *meth); /* Struct.new, Data.define */
+int is_array_new(const char *recv, const char *meth); /* Array.new */
+int is_array_class_name(const char *n); /* Array */
 int is_string_index(const char *n); /* index rindex */
 int is_modulo_alias(const char *n); /* % modulo */
 int is_append_concat(const char *n); /* << concat */
@@ -156,6 +161,7 @@ int is_push_operator(const char *n); /* << push */
 int is_eq_or_eql(const char *n); /* == eql? */
 int is_element_access(const char *n); /* [] []= */
 int is_index_assign(const char *n); /* []= */
+int is_fill_name(const char *n);        /* fill */
 
 int is_current_method(const char *n); /* __callee__ __method__ */
 int is_hash_constructor(const char *n); /* __hash_new_default new */
@@ -195,6 +201,7 @@ int is_string_position_mutator(const char *n); /* []= clear insert setbyte slice
 int is_array_push_family(const char *n); /* << append prepend push unshift */
 
 int is_io_class_name(const char *n); /* File IO */
+int is_file_class_name(const char *n); /* File */
 int is_immediate_class_name(const char *n); /* FalseClass NilClass TrueClass */
 int is_object_base_name(const char *n); /* BasicObject Object */
 int is_boolean_class_name(const char *n); /* FalseClass TrueClass */
@@ -219,6 +226,7 @@ int is_string_append(const char *n); /* << concat: appends answering the receive
 int is_replace_name(const char *n); /* replace: a String's, Array's or Hash's contents swapped for another's, which ignores a block */
 
 int is_string_rebind_mutator(const char *n); /* mutators needing argument-rebind snapshots */
+int str_mutator_str_args(const char *n, int argc, int *int_ok); /* the arguments a String mutator takes as Strings */
 
 int builtin_module_owns(const char *cls, const char *name); /* included ahead of Object */
 
@@ -244,5 +252,10 @@ int is_enumerator_with(const char *n); /* with_index with_object: an enumerator 
 int is_lazy_name(const char *n);       /* lazy */
 int is_concat_name(const char *n);     /* concat */
 int is_array_constructor(const char *recv, const char *meth); /* Array.new */
+int is_pow_name(const char *n); /* pow: Integer power, with an optional modulus */
+
+int is_lazy_name(const char *n);         /* lazy: makes a Lazy of its receiver */
+int is_new_name(const char *n);          /* new: a class's constructor */
+int is_native_share_decl(const char *n); /* native_share: a package's share declaration */
 
 #endif

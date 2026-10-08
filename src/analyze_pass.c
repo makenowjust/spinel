@@ -1008,6 +1008,16 @@ static int infer_case_pattern_locals(Compiler *c) {
       int pat = nt_ref(nt, conds[ci], "pattern");
       if (pat < 0) continue;
       Scope *ms = comp_scope_of(c, conds[ci]);
+      if (nt_kind(nt, pat) == NK_IfNode || nt_kind(nt, pat) == NK_UnlessNode) {
+        /* in x if guard -- binding is in IfNode.statements body.
+           UnlessNode wraps the pattern the same way. Unwrap either guard so
+           every pattern uses the same binding types as its unguarded form. */
+        int stmts = nt_ref(nt, pat, "statements");
+        int bn = 0;
+        const int *body = stmts >= 0 ? nt_arr(nt, stmts, "body", &bn) : NULL;
+        if (bn <= 0) continue;
+        pat = body[0];
+      }
       const char *pty = nt_type(nt, pat);
       if (!pty) continue;
       int bind_lv_node = -1;
@@ -1016,21 +1026,6 @@ static int infer_case_pattern_locals(Compiler *c) {
       if (sp_streq(pty, "LocalVariableTargetNode")) {
         /* in x */
         bind_lv_node = pat;
-      }
-      else if (sp_streq(pty, "IfNode")) {
-        /* in x if guard -- binding is in IfNode.statements body */
-        int stmts = nt_ref(nt, pat, "statements");
-        if (stmts >= 0 && nt_type(nt, stmts) &&
-            sp_streq(nt_type(nt, stmts), "StatementsNode")) {
-          int bn = 0;
-          const int *body = nt_arr(nt, stmts, "body", &bn);
-          for (int k = 0; k < bn; k++) {
-            const char *bty = nt_type(nt, body[k]);
-            if (bty && sp_streq(bty, "LocalVariableTargetNode")) {
-              bind_lv_node = body[k]; break;
-            }
-          }
-        }
       }
       else if (sp_streq(pty, "CapturePatternNode")) {
         /* in PATTERN => var */
@@ -1271,9 +1266,14 @@ void intern_block_params(Compiler *c) {
 /* --share-strings: is lv the shared handle a String of type t is held in?
    A pass that types the slot as that String leaves it so; resetting it each
    round, against share_default_apply setting it back, kept the fixpoint
-   from settling. */
+   from settling. A String Array the rule settled in its poly form, whose
+   boxes hold the handles, is that Array the same way: a block's parameter
+   `tap` hands the Array of `"x y".split(" ")` went back to the typed Array
+   every round and the rule converted it again. */
 static int lv_is_handle_of(const Compiler *c, const LocalVar *lv, TyKind t) {
-  return t == TY_STRING && repr_of_slot(c, lv).share;
+  if (t != TY_STRING && t != TY_STR_ARRAY) return 0;
+  Repr r = repr_of_slot(c, lv);
+  return t == TY_STRING ? r.share : r.elems_handle;
 }
 
 static int lv_widen(LocalVar *lv, TyKind t) {
@@ -2297,7 +2297,7 @@ static int ppl_ready(Compiler *c) {
 /* The proc or lambda literal written in scope `sc` (`proc { |a| }`,
    `lambda { |a| }`, `Proc.new { |a| }`, `->(a) { }`) that has a parameter
    `nm`, held as a local of that scope; -1 if none. */
-static int local_proc_literal_param_of(Compiler *c, Scope *sc, const char *nm) {
+int local_proc_literal_param_of(Compiler *c, Scope *sc, const char *nm) {
   PplEnt *e = ppl_ready(c) && nm ? ppl_slot_at(sc, nm, 0) : NULL;
   return e ? e->lit : -1;
 }
@@ -2309,7 +2309,7 @@ static int local_proc_literal_param_of(Compiler *c, Scope *sc, const char *nm) {
    stored, read into another local, curried -- is called where the binders
    cannot look. A call on the literal that does not run it (`.curry`,
    `.itself`) answers a Proc its caller calls out of sight. */
-static int proc_literal_calls_in_sight(Compiler *c, int lit) {
+int proc_literal_calls_in_sight(Compiler *c, int lit) {
   return ppl_ready(c) && lit >= 0 && lit < ppl_ntc && ppl_sight[lit];
 }
 
@@ -5971,7 +5971,7 @@ static int leaves_widen_to_poly_array(Compiler *c, const int *lv, int n, int app
    literal in (`def fw(f, x) = f.call(x)` with `fw(l, a)`), where the
    argument is the method's own parameter in turn, whose callers the
    binding checks (boxed_push_elem). */
-static int proc_lit_carrier(Compiler *c, int v, int lit) {
+int proc_lit_carrier(Compiler *c, int v, int lit) {
   const NodeTable *nt = c->nt;
   v = unwrap_parens(c, v);
   if (v == lit) return 1;
@@ -5990,7 +5990,7 @@ static int proc_lit_carrier(Compiler *c, int v, int lit) {
    stored through it. A typed Hash that cannot widens to the poly-keyed
    one; a method's parameter records the store for its own callers'
    binding (boxed_store_key/val), or widens as a typed one does. */
-static int widen_hash_arg_for_store(Compiler *c, int arg, TyKind hk, TyKind hv) {
+int widen_hash_arg_for_store(Compiler *c, int arg, TyKind hk, TyKind hv) {
   const NodeTable *nt = c->nt;
   arg = unwrap_parens(c, arg);
   TyKind at = infer_type(c, arg);
@@ -15256,6 +15256,10 @@ static int irt_scope(Compiler *c, int s, IrtCtx *x) {
      build, #4451), and an Integer to a Bignum (`def get = @v` returned a
      promoted loop local's Bignum through an sp_int). Everything else is
      left where the earlier, gated re-runs settled it. */
+  /* At 3 (--share-strings' late conversion, an_phase_storage) a return
+     follows its body only from a typed String Array to the poly Array the
+     rule made of the local it answers. */
+  if (g_ret_no_new_poly == 3 && !(r == TY_POLY_ARRAY && sc->ret == TY_STR_ARRAY)) return ch;
   if (g_ret_no_new_poly == 2 &&
       !(r == TY_POLY && sc->ret != TY_POLY && sc->ret != TY_UNKNOWN && sc->ret != TY_VOID && sc->ret != TY_NIL) &&
       !(r == TY_BIGINT && sc->ret == TY_INT)) return ch;

@@ -20,6 +20,8 @@
    require-gated stdlib (stringio, io/console, ...) so they match CRuby's
    uninitialized-constant / NoMethodError when the require is absent. */
 extern int g_require_gate;
+/* SPINEL_SHARE_STRINGS is on: set, not empty and not "0" (spinel_parse.c) */
+int sp_share_strings_env(void);
 void sp_feature_mark(const char *name);
 int sp_feature_enabled(const char *name);
 int        sp_feature_required(const char *name); /* require was actually written (gate-independent) */
@@ -379,6 +381,11 @@ typedef struct {
                           of docs/internals/ext-design.md) */
   int ret_rbs_seeded;  /* ret pinned from an --rbs advisory seed: the fixpoint
                           must not recompute it from the body */
+  int ret_pub_fresh;   /* --share-strings: a deep-return pickup takes this
+                          method's value, and a tail of it answers a fresh
+                          String (share_node_fresh) beside the handle reads
+                          the others publish: that tail clears the side
+                          channel (emit_tail_value), so the caller wraps it */
   int ret_rbs_nilable; /* that seed was RBS's nilable form (`Integer?`), and the
                           pinned kind is an unboxed scalar: the return can be
                           the reserved sentinel, so a caller boxing it has to
@@ -390,9 +397,17 @@ typedef struct {
                            methods (`def pass(x) = x.p_`) and methods whose value
                            is their block's (`def key_of(x) = yield x`), which no
                            RBS signature covers (#3505). */
+  unsigned char ret_handle; /* --share-strings: every return path reads a String
+                               the rule shares, so a call's value is that
+                               String's handle, which the callee's tail read
+                               publishes (_sp_ret_strbuf); set once the
+                               analysis settles (an_mark_handle_returns) */
   int ret_obj_may_nil; /* the nil fact for the method's value (analyze_nil.c,
                           #7444): its body's value or a `return` may be nil;
                           nonzero, where the nil comes from (NFW_*) */
+  unsigned char ret_nil_pickup; /* --share-strings: a `return` of the method
+                          answers nil and the deep-return pickup takes it
+                          (an_returns_shared_handles, an_tail_answers_nil) */
   TyKind ret_oa_pin;   /* the pointer-array return type the narrowing pass gave
                           this method, re-asserted every round for the same
                           reason LocalVar.oa_pin is. TY_UNKNOWN = not narrowed. */
@@ -429,6 +444,9 @@ typedef struct {
   unsigned char *ivar_str_shared; /* (#3227) the slot is a shared-mutable
                                      string handle (sp_String *): survives
                                      re-clears; post-fixpoint reasserts it */
+  unsigned char *ivar_elems_shared; /* --share-strings: the TY_POLY_ARRAY slot
+                                       holds its Strings as handles, as a
+                                       LocalVar's elems_shared */
   unsigned char *ivar_nullable_int; /* the slot holds a nilable scalar: some
                                      write to it can leave the nil sentinel, so
                                      a read of it (or of its attr_reader) has to
@@ -499,6 +517,9 @@ typedef struct {
                                        ivar_nullable_int for an ivar */
   unsigned char *cvar_str_shared;   /* --share-strings: the TY_STRBUF slot is
                                        the shared handle, as ivar_str_shared */
+  unsigned char *cvar_elems_shared; /* --share-strings: the TY_POLY_ARRAY slot
+                                       holds its Strings as handles, as a
+                                       LocalVar's elems_shared */
   int ncvars, ccvars;
   char **readers;      /* attr reader method names (no '@') */
   int nreaders, creaders;
@@ -579,6 +600,9 @@ typedef struct {
      struct name; free_sym its optional finalizer. Method bindings live in the
      compiler's native_methods registry, keyed by this class's index. */
   int is_native_class;
+  /* --share-strings: a native class whose binding declares that its object
+     keeps a String (`native_share ... "keeps"`): its objects are holders */
+  int native_share_keeps;
   /* An Array subclass (#7449): its instances ARE Arrays -- the struct starts
      with the Array by value, so a pointer to one is a pointer to its Array --
      and Array's methods dispatch on them. ary_root is the class right below
@@ -712,7 +736,19 @@ typedef struct {
   int nargs;       /* fixed arguments, not counting a trailing :rest */
   int rest;        /* a trailing :rest takes every further argument, boxed,
                       as a count and an array after the fixed ones */
+  /* --share-strings: what the binding does with the String its object
+     keeps, as the package declares it (`native_share`): NSH_* bits, and
+     the C symbol of the form that takes or answers it as the shared
+     handle (sp_String *), or NULL */
+  unsigned share;
+  char *share_csym;
 } NativeMethod;
+enum {
+  NSH_KEEPS   = 1,   /* a constructor: the object keeps its first String
+                        argument, or with none a String of its own */
+  NSH_ANSWERS = 2,   /* answers the String the object keeps */
+  NSH_CHANGES = 4    /* changes the String the object keeps */
+};
 /* Whether a binding accepts a call of argc positional arguments. */
 static inline int native_takes(const NativeMethod *m, int argc) {
   return m->nargs == argc || (m->rest && argc > m->nargs);
@@ -770,6 +806,19 @@ typedef struct {
                           so the call is armed once; 2 when a cached array
                           read tests it in its out-of-range branch
                           (emit_nil_target_cold) */
+  int args_in_call;     /* the receiver of the call an arm last emitted with
+                          every operand a C argument of the one runtime call
+                          that raises (sp_poly_add, sp_poly_shl, ...), for
+                          the nil arm's trial (nil_target_runs_in_call) */
+  int args_in_call_trial; /* nonzero while that trial emits: a call nested
+                          in it takes its head without a trial of its own,
+                          so nested operators are not emitted 2^depth times */
+  unsigned char *head_held; /* [node_cap] an operand the nil arm's head
+                          (emit_nil_target_head) ran into a temp of its own
+                          ahead of the call: set only as a view
+                          (VR_HEAD_HELD) around the call's own emission,
+                          where an arm that holds the operand reads that
+                          temp (hold_operand) */
   TyKind *nilnarrow; /* [node_cap] param-read narrowed by a `return .. if p.nil?`
                         guard: the read's non-nil type (codegen unboxes the poly
                         slot at the read site); TY_UNKNOWN = not narrowed */
@@ -880,6 +929,12 @@ typedef struct {
   int bcall_nscopes, bcall_count;
   unsigned bcall_version;
   int bcall_built;
+  /* ReturnNode chain, by the scope the return is in; see comp_ret_first */
+  int *ret_head;        /* [ret_nscopes] first ReturnNode id per scope */
+  int *ret_next;        /* [ret_count] next one in the same scope */
+  int ret_nscopes, ret_count;
+  unsigned ret_version;
+  int ret_built;
 
   /* (CallNode, ivar-read argument)-by-ivar-name index; see comp_ivarg_first */
   int *ivarg_head;      /* [ivarg_nbuckets] first entry in each name bucket */
@@ -1074,11 +1129,21 @@ Scope *comp_scope_of(Compiler *c, int node_id);        /* owning scope */
    each write is still read fresh at every visit. */
 int comp_is_local_write(NodeKind k);
 /* Can a call's block `blk` (a literal or a `&blk` argument) assign the
-   variable argument node `arg` reads while the call runs: the literal's
-   body writes it (a local of the same scope, or an instance variable, by
-   any write kind, at any depth), or, for a local, a proc that captures it
-   assigns it? 0 for any other argument, or a call with no block. */
+   variable argument node `arg` reads while the call runs? A local: the
+   literal's body writes it (of the same scope, by any write kind, at any
+   depth), or a proc that captures it assigns it. An instance variable:
+   the literal's body may write it (subtree_may_write_ivar: a write, a self
+   call whose method may, anything else that runs code), and a `&blk`
+   argument always may. 0 for any other argument, or a call with no block. */
 int comp_block_rebinds_arg(Compiler *c, int blk, int arg);
+/* Can the subtree at id write ivar `iv` of class cls's object: a write of
+   it, a self call whose method may, or anything else that runs code
+   (codegen_util.c) */
+int subtree_may_write_ivar(Compiler *c, int id, const char *iv, int cls, int depth);
+/* Does the subtree under node n assign the variable argument node `arg`
+   reads (a local of the same scope, or an instance variable), by any write
+   kind, at any depth? 0 when `arg` is no variable read. */
+int comp_node_writes_var(Compiler *c, int n, int arg);
 int comp_lvw_first(Compiler *c, const char *name);
 int comp_class_singleton_has_module(Compiler *c, int ci, int mod);
 int comp_class_extends_any(Compiler *c, int ci);
@@ -1089,6 +1154,10 @@ int comp_scall_first(Compiler *c, int scope_idx);
 int comp_scall_next(const Compiler *c, int u);
 int comp_bcall_first(Compiler *c, int scope_idx);
 int comp_bcall_next(const Compiler *c, int u);
+/* the ReturnNodes of a scope, in node order (one index per node-table
+   version) */
+int comp_ret_first(Compiler *c, int scope_idx);
+int comp_ret_next(const Compiler *c, int u);
 int comp_ivarg_first(Compiler *c, const char *name);
 void comp_ivarg_invalidate(Compiler *c);
 int comp_ivarg_next(const Compiler *c, int e);
@@ -1257,6 +1326,7 @@ int lazy_alias_chain(Compiler *c, int var_read);
 int lazy_method_chain(Compiler *c, int call);      /* parameterless method whose body is a lazy chain -> chain node, else -1 */
 int lazy_resolve_chain(Compiler *c, int n);
 int local_is_handle(Compiler *c, int a);
+int ivar_read_is_handle(Compiler *c, int a);
 int        hash_new_default_arg(Compiler *c, int recv); /* Hash.new(d) literal: d node or -1 */
 int        recv_hash_new_default_arg(Compiler *c, int recv); /* the same through a local or ivar READ node */
 TyKind     hash_default_value_ty(Compiler *c, int dn);      /* the value type a Hash.new(d) default contributes */

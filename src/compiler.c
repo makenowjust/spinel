@@ -85,6 +85,8 @@ Compiler *comp_new(const NodeTable *nt) {
   c->strbuf_read_raw = calloc((size_t)n, 1);
   c->poly_strbuf_lift = calloc((size_t)n, 1);
   c->nil_tested = calloc((size_t)n, 1);
+  c->head_held = calloc((size_t)n, 1);
+  if (!c->head_held) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
   c->nscope = calloc((size_t)n, sizeof(int));   /* default scope 0 */
   c->node_cbody = malloc((size_t)n * sizeof(int));   /* enclosing class-body, -1 = none */
   for (int i = 0; i < n; i++) c->node_cbody[i] = -1;
@@ -104,8 +106,7 @@ Compiler *comp_new(const NodeTable *nt) {
   /* On only when set to something: empty is off, as SPINEL_DEFER_REFUSALS
      reads it, and so is "0", as SPINEL_GATE_RAISE=0 and SPINEL_INLINE_FORCE=0
      are. An environment that exports the variable as "0" or "" means off. */
-  { const char *e = getenv("SPINEL_SHARE_STRINGS");
-    c->share_strings = e && *e && strcmp(e, "0") != 0; }
+  c->share_strings = sp_share_strings_env();
   comp_node_ord(c, 0, NULL);   /* number the parsed nodes before any rewrite */
   c->node_ord_parsed = nt->count;
   return c;
@@ -230,6 +231,8 @@ void comp_grow_node_arrays(Compiler *c) {
   c->strbuf_read_raw = realloc(c->strbuf_read_raw, (size_t)n);
   c->poly_strbuf_lift = realloc(c->poly_strbuf_lift, (size_t)n);
   c->nil_tested = realloc(c->nil_tested, (size_t)n);
+  c->head_held = realloc(c->head_held, (size_t)n);
+  if (!c->head_held) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
   c->nscope = realloc(c->nscope, sizeof(int) * (size_t)n);
   c->node_cbody = realloc(c->node_cbody, sizeof(int) * (size_t)n);
   c->empty_arr_recv = realloc(c->empty_arr_recv, (size_t)n);
@@ -246,7 +249,7 @@ void comp_grow_node_arrays(Compiler *c) {
   for (int i = c->node_cap; i < n; i++) c->bop_inf[i] = NULL;
   c->ucall_inf = realloc(c->ucall_inf, sizeof *c->ucall_inf * (size_t)n);
   memset(c->ucall_inf + c->node_cap, 0, sizeof *c->ucall_inf * (size_t)(n - c->node_cap));
-  for (int i = c->node_cap; i < n; i++) { c->ntype[i] = TY_UNKNOWN; c->norigin[i] = -1; c->nilnarrow[i] = TY_UNKNOWN; c->nscope[i] = 0; c->node_cbody[i] = -1; c->empty_arr_recv[i] = 0; c->empty_hash_recv[i] = 0; c->empty_hash_arg[i] = 0; c->store_misfit_arg[i] = 0; c->ivar_widen_src[i] = 0; c->hash_want[i] = TY_UNKNOWN; c->arr_want[i] = TY_UNKNOWN; c->poly_builtin_ty[i] = TY_UNKNOWN; c->lw_joined[i] = TY_UNKNOWN; c->strbuf_box[i] = 0; c->strbuf_handle_demand[i] = 0; c->strbuf_read_raw[i] = 0; c->poly_strbuf_lift[i] = 0; c->nil_tested[i] = 0; }
+  for (int i = c->node_cap; i < n; i++) { c->ntype[i] = TY_UNKNOWN; c->norigin[i] = -1; c->nilnarrow[i] = TY_UNKNOWN; c->nscope[i] = 0; c->node_cbody[i] = -1; c->empty_arr_recv[i] = 0; c->empty_hash_recv[i] = 0; c->empty_hash_arg[i] = 0; c->store_misfit_arg[i] = 0; c->ivar_widen_src[i] = 0; c->hash_want[i] = TY_UNKNOWN; c->arr_want[i] = TY_UNKNOWN; c->poly_builtin_ty[i] = TY_UNKNOWN; c->lw_joined[i] = TY_UNKNOWN; c->strbuf_box[i] = 0; c->strbuf_handle_demand[i] = 0; c->strbuf_read_raw[i] = 0; c->poly_strbuf_lift[i] = 0; c->nil_tested[i] = 0; c->head_held[i] = 0; }
   c->node_cap = n;
 }
 
@@ -611,6 +614,7 @@ int comp_ivar_intern(ClassInfo *ci, const char *name) {
     ci->ivars = realloc(ci->ivars, sizeof(char *) * (size_t)ci->civars);
     ci->ivar_types = realloc(ci->ivar_types, sizeof(TyKind) * (size_t)ci->civars);
     ci->ivar_str_shared = realloc(ci->ivar_str_shared, (size_t)ci->civars);
+    ci->ivar_elems_shared = realloc(ci->ivar_elems_shared, (size_t)ci->civars);
     ci->ivar_int_table = realloc(ci->ivar_int_table, (size_t)ci->civars);
     ci->ivar_oa_type = realloc(ci->ivar_oa_type, sizeof(TyKind) * (size_t)ci->civars);
     ci->ivar_oa_seed = realloc(ci->ivar_oa_seed, sizeof(int) * (size_t)ci->civars);
@@ -622,6 +626,7 @@ int comp_ivar_intern(ClassInfo *ci, const char *name) {
   ci->ivars[ci->nivars] = strdup(name);
   ci->ivar_types[ci->nivars] = TY_UNKNOWN;
   ci->ivar_str_shared[ci->nivars] = 0;
+  ci->ivar_elems_shared[ci->nivars] = 0;
   ci->ivar_int_table[ci->nivars] = 0;
   ci->ivar_oa_type[ci->nivars] = TY_UNKNOWN;
   ci->ivar_oa_seed[ci->nivars] = 0;
@@ -644,6 +649,7 @@ int comp_member_intern(ClassInfo *ci, const char *name) {
     IV_SWAP(ivars, char *);
     IV_SWAP(ivar_types, TyKind);
     IV_SWAP(ivar_str_shared, unsigned char);
+    IV_SWAP(ivar_elems_shared, unsigned char);
     IV_SWAP(ivar_int_table, unsigned char);
     IV_SWAP(ivar_oa_type, TyKind);
     IV_SWAP(ivar_oa_seed, int);
@@ -691,11 +697,13 @@ int comp_cvar_intern(ClassInfo *ci, const char *name) {
     ci->cvar_types = realloc(ci->cvar_types, sizeof(TyKind) * (size_t)ci->ccvars);
     ci->cvar_nullable_int = realloc(ci->cvar_nullable_int, (size_t)ci->ccvars);
     ci->cvar_str_shared = realloc(ci->cvar_str_shared, (size_t)ci->ccvars);
+    ci->cvar_elems_shared = realloc(ci->cvar_elems_shared, (size_t)ci->ccvars);
   }
   ci->cvars[ci->ncvars] = strdup(name);
   ci->cvar_types[ci->ncvars] = TY_UNKNOWN;
   ci->cvar_nullable_int[ci->ncvars] = 0;
   ci->cvar_str_shared[ci->ncvars] = 0;
+  ci->cvar_elems_shared[ci->ncvars] = 0;
   return ci->ncvars++;
 }
 
@@ -2017,6 +2025,13 @@ static int comp_subtree_writes_var(Compiler *c, int n, int arg, const char *name
   }
   return 0;
 }
+int comp_node_writes_var(Compiler *c, int n, int arg) {
+  const NodeTable *nt = c->nt;
+  NodeKind ak = arg >= 0 ? nt_kind(nt, arg) : NK__COUNT;
+  const char *name = arg >= 0 ? nt_str(nt, arg, "name") : NULL;
+  if (n < 0 || !name || (ak != NK_LocalVariableReadNode && ak != NK_InstanceVariableReadNode)) return 0;
+  return comp_subtree_writes_var(c, n, arg, name, 0);
+}
 int comp_block_rebinds_arg(Compiler *c, int blk, int arg) {
   const NodeTable *nt = c->nt;
   NodeKind ak = arg >= 0 ? nt_kind(nt, arg) : NK__COUNT;
@@ -2025,8 +2040,14 @@ int comp_block_rebinds_arg(Compiler *c, int blk, int arg) {
   if (ak == NK_LocalVariableReadNode) {
     LocalVar *lv = scope_local(comp_scope_of(c, arg), name);
     if (lv && lv->proc_rebinds) return 1;
+    return nt_kind(nt, blk) == NK_BlockNode && comp_subtree_writes_var(c, blk, arg, name, 0);
   }
-  return nt_kind(nt, blk) == NK_BlockNode && comp_subtree_writes_var(c, blk, arg, name, 0);
+  /* an instance variable: a write in the block, or one a method the block
+     calls on self makes, or anything else that runs code the walk cannot
+     name (subtree_may_write_ivar); a block passed as a value (`&pr`) is a
+     proc whose body is not known here */
+  if (nt_kind(nt, blk) != NK_BlockNode) return 1;
+  return subtree_may_write_ivar(c, nt_ref(nt, blk, "body"), name, comp_ivar_owner(c, arg), 0);
 }
 static int comp_chain_alloc(int **head, int **next, int nb, int n, int *built) {
   *head = malloc((size_t)nb * sizeof(int));
@@ -2171,6 +2192,40 @@ int comp_bcall_first(Compiler *c, int scope_idx) {
 }
 int comp_bcall_next(const Compiler *c, int u) {
   return (u >= 0 && u < c->bcall_count) ? c->bcall_next[u] : -1;
+}
+
+/* Every ReturnNode, chained by the scope it is in (comp_scope_of), in node
+   order. The values a method answers through `return` were found by a
+   walk over every ReturnNode of the program per method asked about. */
+static void ret_build(Compiler *c) {
+  free(c->ret_head); free(c->ret_next);
+  const NodeTable *nt = c->nt;
+  int n = nt->count;
+  int ns = c->nscopes > 0 ? c->nscopes : 1;
+  if (!comp_chain_alloc(&c->ret_head, &c->ret_next, ns, n, &c->ret_built)) return;
+  c->ret_nscopes = ns;
+  c->ret_count = n;
+  for (int s = 0; s < ns; s++) c->ret_head[s] = -1;
+  for (int u = n - 1; u >= 0; u--) {   /* reverse: chains run in node order */
+    c->ret_next[u] = -1;
+    if (nt_kind(nt, u) != NK_ReturnNode) continue;
+    Scope *sc = comp_scope_of(c, u);
+    int si = sc ? (int)(sc - c->scopes) : -1;
+    if (si < 0 || si >= ns) continue;
+    c->ret_next[u] = c->ret_head[si];
+    c->ret_head[si] = u;
+  }
+  c->ret_version = nt->version;
+  c->ret_built = 1;
+}
+int comp_ret_first(Compiler *c, int scope_idx) {
+  if (!c->ret_built || c->ret_version != c->nt->version || c->ret_count != c->nt->count ||
+      c->ret_nscopes < c->nscopes) ret_build(c);
+  if (!c->ret_built || scope_idx < 0 || scope_idx >= c->ret_nscopes) return -1;
+  return c->ret_head[scope_idx];
+}
+int comp_ret_next(const Compiler *c, int u) {
+  return (u >= 0 && u < c->ret_count) ? c->ret_next[u] : -1;
 }
 
 /* Every ivar read handed to a call as an argument, chained by the ivar's
@@ -2382,7 +2437,11 @@ static void vsite_build(Compiler *c, int toplevel) {
       int r = nt_ref(nt, u, "receiver"), ru = an_unparen(nt, r);
       const char *un = nt_str(nt, u, "name");
       if (ru >= 0 && ru < n) c->vs_rparent[ru] = u;
-      if (vsite_is_read(nt, ru)) vsite_add(c, VS_RECV, u, ru);
+      /* a constant or a class variable is a receiver here too: the share
+         rule's stores into its container (strbuf_static_store_walk) */
+      if (vsite_is_read(nt, ru) || nt_kind(nt, ru) == NK_ConstantReadNode ||
+          nt_kind(nt, ru) == NK_ClassVariableReadNode)
+        vsite_add(c, VS_RECV, u, ru);
       if (un && sp_str_mutator(un, SP_MUT_LOCAL)) {
         while (str_self_call(nt, an_unparen(nt, r))) r = nt_ref(nt, an_unparen(nt, r), "receiver");
         int base = an_unparen(nt, r);
@@ -2717,9 +2776,10 @@ const char *comp_super_shadow(Compiler *c, const Scope *s) {
      of its own: its super reaches the shadow the method's does -- the
      shadow's own clone when it has one, as the clone of a class's
      initialize does that calls super into an included module's on a cycle
-     of constructors, or the shadow itself when it does not yield. Sent up
-     the parent chain instead, it raised "no superclass method". A yielding
-     shadow with no clone has no function to call and is left so. */
+     of constructors, or the shadow itself. A yielding shadow without a
+     clone is kept so make_yield_proc_forms can give it one. Sent up the
+     parent chain instead, it skipped that method or raised "no superclass
+     method". */
   size_t n = strlen(key);
   if (t || n <= 3 || n >= sizeof key || strcmp(key + n - 3, "#pf") != 0) return t;
   key[n - 3] = '\0';
@@ -2731,7 +2791,7 @@ const char *comp_super_shadow(Compiler *c, const Scope *s) {
   int k = in_class(c, s->class_id, pf);
   if (k >= 0) return c->scopes[k].name;
   k = in_class(c, s->class_id, t);
-  return k >= 0 && !c->scopes[k].yields ? t : NULL;
+  return k >= 0 ? t : NULL;
 }
 
 void comp_cprep_chain_add(ClassInfo *ci, const char *from, const char *to) {

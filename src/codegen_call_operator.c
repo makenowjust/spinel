@@ -1203,10 +1203,15 @@ int emit_call_operator_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
       return 1;
     }
   }
-  if ((is_unary_sign(name)) && recv >= 0 && argc == 0 && !ty_is_object(rt)) {
+  /* A boxed receiver whose class may define the sign itself goes to the
+     method dispatch, whose default arm comes back here for the builtin
+     kinds (user_defines_or_reads answers 0 inside it) */
+  if ((is_unary_sign(name)) && recv >= 0 && argc == 0 && !ty_is_object(rt) &&
+      !(rt == TY_POLY && user_defines_or_reads(c, name))) {
     if (rt == TY_POLY) {
-      if (name[0] == '-') { buf_puts(b, "sp_poly_neg("); emit_expr(c, recv, b); buf_puts(b, ")"); }
-      else { buf_puts(b, "sp_poly_uplus("); emit_expr(c, recv, b); buf_puts(b, ")"); }
+      /* a value with no sign of its own raises NoMethodError */
+      buf_puts(b, name[0] == '-' ? "sp_poly_neg_chk(" : "sp_poly_uplus_chk(");
+      emit_expr(c, recv, b); buf_puts(b, ")");
     }
     else if (rt == TY_STRING) {
       /* +str is str itself unless it is frozen, else a mutable copy (so a
@@ -1215,6 +1220,27 @@ int emit_call_operator_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
          sizes it with strlen, which truncated an embedded NUL (#3473). */
       if (name[0] == '+') { buf_puts(b, "sp_str_uplus("); emit_expr(c, recv, b); buf_puts(b, ")"); }
       else { buf_puts(b, "sp_str_uminus_val("); emit_expr(c, recv, b); buf_puts(b, ")"); }  /* frozen recv: identity (#2369) */
+    }
+    /* nil, true, false, a Symbol, a container, a Range and a Time have no
+       sign: NoMethodError, as CRuby raises. The C `+x`/`-x` of such a slot
+       answered it (nil printed for `+true`) or did not build. */
+    else if (rt == TY_NIL || rt == TY_BOOL || rt == TY_SYMBOL || ty_is_array(rt) || ty_is_hash(rt) ||
+             rt == TY_RANGE || rt == TY_FLOAT_RANGE || rt == TY_STR_RANGE || rt == TY_TIME) {
+      TyKind ret = repr_of(c, id).as_ty;
+      buf_printf(b, "(sp_raise_poly_nomethod(\"%s\", ", name);
+      emit_boxed(c, recv, b);
+      /* the value after the raise is never reached; it only types the
+         expression: true/false and a Symbol keep the C `-x` their slot took
+         before (a narrowed arm that never runs reads it as an Integer),
+         anything else the call's own type */
+      int unset = ret == TY_VOID || ret == TY_NIL || ret == TY_UNKNOWN;
+      if (rt == TY_BOOL || rt == TY_SYMBOL) {
+        buf_printf(b, "), (%c", name[0]);
+        emit_expr(c, recv, b);
+        buf_puts(b, "))");
+      }
+      else
+        buf_printf(b, "), %s)", unset ? "sp_box_nil()" : default_value_from_compiler(c, ret));
     }
     else if (rt == TY_BIGINT) {
       /* -@ negates via 0 - b (no unary neg on a bigint pointer); +@ is self (#2304) */
@@ -1350,6 +1376,7 @@ int emit_call_operator_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
   if (recv >= 0 && rt == TY_POLY && sp_streq(name, "<<") && argc == 1) {
     buf_puts(b, "sp_poly_shl("); emit_expr(c, recv, b); buf_puts(b, ", ");
     emit_boxed(c, argv[0], b); buf_puts(b, ")");
+    c->args_in_call = recv;
     return 1;
   }
   /* poly `push` with no argument in expression position: an array answers
@@ -1513,13 +1540,7 @@ int emit_call_operator_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
         }
       Buf pcall; memset(&pcall, 0, sizeof pcall);
       if (subtree_may_allocate(nt, argv[0])) {
-        int th = ++g_tmp;
-        Buf rb; memset(&rb, 0, sizeof rb);
-        emit_boxed(c, recv, &rb);
-        emit_indent(g_pre, g_indent);
-        buf_printf(g_pre, "sp_RbVal _t%d = %s; SP_GC_ROOT_RBVAL(_t%d);\n",
-                   th, rb.p ? rb.p : "sp_box_nil()", th);
-        free(rb.p);
+        int th = hold_operand_pre(c, recv, TY_POLY, 1, ++g_tmp, 1);
         buf_printf(&pcall, "%s(_t%d, ", pfn, th); emit_boxed(c, argv[0], &pcall); buf_puts(&pcall, ")");
       }
       else {
@@ -1547,6 +1568,7 @@ int emit_call_operator_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
       }
       else buf_puts(b, pcall.p ? pcall.p : "sp_box_nil()");
       free(pcall.p);
+      c->args_in_call = recv;
       return 1;
     }
     const char *cfn = NULL;
@@ -1562,6 +1584,7 @@ int emit_call_operator_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
     }
     if (cfn) {
       buf_printf(b, "%s(", cfn); emit_boxed(c, recv, b); buf_puts(b, ", "); emit_boxed(c, argv[0], b); buf_puts(b, ")");
+      c->args_in_call = recv;
       return 1;
     }
   }

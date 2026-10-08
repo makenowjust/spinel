@@ -1,4 +1,7 @@
 #include "analyze_internal.h"
+#include "builtin_names.h"
+#include "call_plan.h"
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -3581,6 +3584,16 @@ static void bare_native_func_calls(Compiler *c) {
   }
 }
 
+/* A `native_share` kind word ("keeps", "answers", "changes", as a
+   package's <name>.share.rb spells it): its NSH_* bit, or 0 */
+static unsigned native_share_kind(const char *kind) {
+  static const char *const words[] = { "keeps", "answers", "changes" };
+  static const unsigned bits[] = { NSH_KEEPS, NSH_ANSWERS, NSH_CHANGES };
+  for (int i = 0; kind && i < 3; i++)
+    if (strcmp(kind, words[i]) == 0) return bits[i];
+  return 0;
+}
+
 void register_ffi_decls(Compiler *c) {
   const NodeTable *nt = c->nt;
   NT_FOREACH_KIND(nt, NK_ModuleNode, id) {
@@ -3777,6 +3790,44 @@ void register_ffi_decls(Compiler *c) {
         c->native_methods[mi].args = arg_specs;
         c->native_methods[mi].rest = en > 0 && sp_streq(arg_specs[en - 1], "rest");
         c->native_methods[mi].nargs = c->native_methods[mi].rest ? en - 1 : en;
+        c->native_methods[mi].share = 0;
+        c->native_methods[mi].share_csym = NULL;
+        continue;
+      }
+      /* native_share "name", [arg_specs], "kind"[, "csym"]  (or "name",
+         "kind" for every binding of the name): what the bindings declared
+         above do with the String their object keeps, for --share-strings.
+         "new" names the constructors; kind is "keeps", "answers" or
+         "changes", and csym the form taking or answering that String as the
+         shared handle. Strings, not Symbols: a Symbol in a binding joins
+         the program's own. A package keeps them in <name>.share.rb, which
+         the parser reads only under the flag. */
+      if (is_native_share_decl(dname) && native_cid >= 0 && an >= 2) {
+        const char *sname = ffi_arg_str(nt, args[0]);
+        int has_specs = nt_type(nt, args[1]) && sp_streq(nt_type(nt, args[1]), "ArrayNode");
+        int ki = has_specs ? 2 : 1;
+        const char *kind = ki < an ? ffi_arg_str(nt, args[ki]) : NULL;
+        const char *hsym = ki + 1 < an ? ffi_arg_str(nt, args[ki + 1]) : NULL;
+        unsigned bit = native_share_kind(kind);
+        if (!sname || !bit) continue;
+        int sn = 0;
+        const int *se = has_specs ? nt_arr(nt, args[1], "elements", &sn) : NULL;
+        for (int k = 0; k < c->n_native_methods; k++) {
+          NativeMethod *m = &c->native_methods[k];
+          if (m->class_id != native_cid || m->kind != is_new_name(sname) || !sp_streq(m->name, sname)) continue;
+          int same = !has_specs || (m->nargs == sn && !m->rest);
+          for (int ei = 0; same && has_specs && ei < sn; ei++) {
+            const char *spec = ffi_arg_str(nt, se[ei]);
+            same = spec && sp_streq(spec, m->args[ei]);
+          }
+          if (!same) continue;
+          m->share |= bit;
+          if (bit == NSH_KEEPS) c->classes[native_cid].native_share_keeps = 1;
+          if (hsym && !m->share_csym) {
+            m->share_csym = strdup(hsym);
+            if (!m->share_csym) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+          }
+        }
         continue;
       }
       /* The classes themselves are registered in the pre-scan above; what this
@@ -6728,16 +6779,18 @@ void inherit_members(Compiler *c) {
        type but lost the pin, so the final narrowing no longer saw it as a
        slot, the locals in its component fell back to the poly array, and
        the C did not build (#4642, a controller under a superclass). */
-    unsigned char *old_ss = ci->ivar_str_shared, *old_it = ci->ivar_int_table,
+    unsigned char *old_ss = ci->ivar_str_shared, *old_es = ci->ivar_elems_shared, *old_it = ci->ivar_int_table,
                   *old_oc = ci->ivar_oa_conflict, *old_ni = ci->ivar_nullable_int,
                   *old_ne = ci->ivar_nullable_int_elem, *old_ae = ci->ivar_arr_elem_arr_or_nil;
     TyKind *old_oa = ci->ivar_oa_type; int *old_os = ci->ivar_oa_seed;
-    ci->ivars = NULL; ci->ivar_types = NULL; ci->ivar_str_shared = NULL; ci->ivar_int_table = NULL;
+    ci->ivars = NULL; ci->ivar_types = NULL; ci->ivar_str_shared = NULL; ci->ivar_elems_shared = NULL;
+    ci->ivar_int_table = NULL;
     ci->ivar_oa_type = NULL; ci->ivar_oa_seed = NULL; ci->ivar_oa_conflict = NULL;
     ci->ivar_nullable_int = NULL; ci->ivar_nullable_int_elem = NULL; ci->ivar_arr_elem_arr_or_nil = NULL;
     ci->nivars = ci->civars = 0;
     #define IV_SIDE_COPY(dst, di, src, si) do { \
       (dst)->ivar_str_shared[di] = (src)->ivar_str_shared[si]; \
+      (dst)->ivar_elems_shared[di] = (src)->ivar_elems_shared[si]; \
       (dst)->ivar_int_table[di] = (src)->ivar_int_table[si]; \
       (dst)->ivar_oa_type[di] = (src)->ivar_oa_type[si]; \
       (dst)->ivar_oa_seed[di] = (src)->ivar_oa_seed[si]; \
@@ -6783,7 +6836,8 @@ void inherit_members(Compiler *c) {
       /* an own slot keeps its side fields; one the parent also carries took
          the parent's above */
       if (comp_ivar_index(pc, old[k]) < 0 && old_oa) {
-        ci->ivar_str_shared[idx] = old_ss[k]; ci->ivar_int_table[idx] = old_it[k];
+        ci->ivar_str_shared[idx] = old_ss[k]; ci->ivar_elems_shared[idx] = old_es[k];
+        ci->ivar_int_table[idx] = old_it[k];
         ci->ivar_oa_type[idx] = old_oa[k]; ci->ivar_oa_seed[idx] = old_os[k];
         ci->ivar_oa_conflict[idx] = old_oc[k]; ci->ivar_nullable_int[idx] = old_ni[k];
         ci->ivar_nullable_int_elem[idx] = old_ne[k]; ci->ivar_arr_elem_arr_or_nil[idx] = old_ae[k];
@@ -6793,7 +6847,7 @@ void inherit_members(Compiler *c) {
     #undef IV_SIDE_COPY
     /* the parent's ivars lead the rebuilt layout, so its members lead them */
     if (pc->is_struct && ci->nmembers < pc->nmembers) ci->nmembers = pc->nmembers;
-    free(old); free(oldt); free(old_ss); free(old_it); free(old_oa); free(old_os);
+    free(old); free(oldt); free(old_ss); free(old_es); free(old_it); free(old_oa); free(old_os);
     free(old_oc); free(old_ni); free(old_ne); free(old_ae);
 
     /* An inherited attribute the child overrides with a `def` stops there: the
@@ -7194,10 +7248,14 @@ int poly_ivar_set_class(Compiler *c, int k) {
    serves. */
 enum { PX_BLOCK_PARAM, PX_SYMBOL, PX_BLOCK_WRITE, PX_SUPER, PX_N };
 typedef struct PivsFacts {
-  struct { int ok; char *set; int *cls, ncls; } *memo;
+  struct { int ok; char *set; int *cls, ncls; int *hash, nhash, typed, sweep; } *memo;
   int *memo_at;             /* per node: its call's memo entry + 1, or 0 */
+                           /* two slots: classes, then Hash origins */
+  struct { int call; uint64_t done[4]; } *seen;
   int nmemo, cmemo, memo_n, memo_count;
   unsigned memo_ver;
+  int query, sweep, hash_mode, active;
+  int stores_settled, stores_held, stores_widened;
   const NodeTable *ix_nt;
   unsigned ix_ver;
   int ix_count;
@@ -7217,8 +7275,8 @@ static void pivs_ix_clear(PivsFacts *f) {
 void pivs_facts_free(Compiler *c) {
   PivsFacts *f = c->pivs;
   if (!f) return;
-  for (int i = 0; i < f->nmemo; i++) { free(f->memo[i].set); free(f->memo[i].cls); }
-  free(f->memo); free(f->memo_at);
+  for (int i = 0; i < f->nmemo; i++) { free(f->memo[i].set); free(f->memo[i].cls); free(f->memo[i].hash); }
+  free(f->memo); free(f->memo_at); free(f->seen);
   pivs_ix_clear(f);
   free(f);
   c->pivs = NULL;
@@ -7391,12 +7449,36 @@ static int pivs_param(Compiler *c, Scope *s, const char *pn, char *set, int dept
   }
   return ncalls > 0;
 }
+/* A proc parameter follows arguments only while all its calls are in sight. */
+static int pivs_proc_param(Compiler *c, int lit, const char *pn, char *set, int depth, int elems) {
+  const NodeTable *nt = c->nt;
+  if (!proc_literal_calls_in_sight(c, lit)) return 0;
+  int ps = a_proc_params_node(c, lit), rn = 0, at = -1, calls = 0;
+  const int *rq = ps >= 0 ? nt_arr(nt, ps, "requireds", &rn) : NULL;
+  for (int i = 0; i < rn; i++) if (sp_streq(nt_str(nt, rq[i], "name"), pn)) at = i;
+  if (at < 0) return 0;
+  Scope *s = comp_scope_of(c, lit);
+  for (int w = comp_lvw_first_sc(c, (int)(s - c->scopes), pn); w >= 0; w = comp_lvw_next_sc(c, w))
+    if (comp_scope_of(c, w) == s && sp_streq(nt_str(nt, w, "name"), pn)) return 0;
+  for (int u = comp_kind_first(c, NK_CallNode); u >= 0; u = comp_kind_next(c, u)) {
+    if (!is_call_or_yield(nt_str(nt, u, "name")) || !proc_lit_carrier(c, nt_ref(nt, u, "receiver"), lit)) continue;
+    int a = nt_ref(nt, u, "arguments"), ac = 0;
+    const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
+    for (int i = 0; i < ac; i++) if (nt_kind(nt, av[i]) == NK_SplatNode || nt_kind(nt, av[i]) == NK_KeywordHashNode) return 0;
+    if (at >= ac) return 0;
+    if (elems ? !pivs_elems(c, av[at], set, depth + 1) : !pivs_value(c, av[at], set, depth + 1)) return 0;
+    calls++;
+  }
+  return calls > 0;
+}
 static int pivs_local(Compiler *c, int v, char *set, int depth, int elems) {
   const NodeTable *nt = c->nt;
   const char *vn = nt_str(nt, v, "name");
   Scope *s = vn ? comp_scope_of(c, v) : NULL;
   if (!s) return 0;
   int si = (int)(s - c->scopes);
+  int lit = c->pivs->hash_mode ? local_proc_literal_param_of(c, s, vn) : -1;
+  if (lit >= 0) return pivs_proc_param(c, lit, vn, set, depth, elems);
   /* a parameter of an iterator's literal block (one spliced into its
      method keeps the parameter there, renamed): the first is an element
      of the receiver */
@@ -7504,6 +7586,35 @@ static int pivs_local(Compiler *c, int v, char *set, int depth, int elems) {
   }
   return 1;
 }
+/* Does write or target `w` name the ivar `vn` of class `key`, or, rk a
+   global read, the global `vn` (its alias resolved)? */
+static int pivs_names_var(Compiler *c, int w, NodeKind rk, const char *vn, int key) {
+  const char *wn = nt_str(c->nt, w, "name");
+  if (!wn) return 0;
+  if (rk == NK_GlobalVariableReadNode) return wn[0] == '$' && sp_streq(comp_resolve_gvar(c, wn + 1), vn);
+  return comp_ivar_owner(c, w) == key && sp_streq(wn, vn);
+}
+/* What the variable an ivar or global read `rk` names can hold: the values
+   of its writes, each a plain `=`. 0 when another store reaches it or none
+   is in sight. */
+static int pivs_var_stores(Compiler *c, NodeKind rk, const char *vn, int key, char *set, int depth) {
+  const NodeTable *nt = c->nt;
+  int glob = rk == NK_GlobalVariableReadNode, saw = 0;
+  /* The variable-site index omits operator writes and multiple-assignment targets. */
+  const NodeKind ks[] = { glob ? NK_GlobalVariableOperatorWriteNode : NK_InstanceVariableOperatorWriteNode,
+                          glob ? NK_GlobalVariableTargetNode : NK_InstanceVariableTargetNode };
+  for (int k = 0; k < 2; k++)
+    for (int w = comp_kind_first(c, ks[k]); w >= 0; w = comp_kind_next(c, w))
+      if (pivs_names_var(c, w, rk, vn, key)) return 0;
+  for (int e = comp_vsite_first(c, VS_STORE, rk, vn, key); e >= 0; e = comp_vsite_next(c, e)) {
+    int w = comp_vsite_var(c, e);
+    if (!pivs_names_var(c, w, rk, vn, key)) continue;
+    if (nt_kind(nt, w) != (glob ? NK_GlobalVariableWriteNode : NK_InstanceVariableWriteNode) ||
+        !pivs_value(c, nt_ref(nt, w, "value"), set, depth + 1)) return 0;
+    saw = 1;
+  }
+  return saw;
+}
 static int pivs_branches(Compiler *c, int v, char *set, int depth, int elems) {
   const NodeTable *nt = c->nt;
   int (*f)(Compiler *, int, char *, int) = elems ? pivs_elems : pivs_value;
@@ -7525,20 +7636,93 @@ static int pivs_branches(Compiler *c, int v, char *set, int depth, int elems) {
       return f(c, nt_ref(nt, v, "else_clause"), set, depth + 1);
     }
     case NK_LocalVariableReadNode: return pivs_local(c, v, set, depth, elems);
+    case NK_InstanceVariableReadNode: {
+      if (!c->pivs->hash_mode || elems) return 0;
+      const char *vn = nt_str(nt, v, "name");
+      int ci = comp_ivar_owner(c, v);
+      if (ci < 0 || !vn || pivs_ix_first(c, PX_SYMBOL, vn) >= 0) return 0;
+      if (comp_is_writer(&c->classes[ci], vn + 1) || comp_is_sg_writer(&c->classes[ci], vn + 1)) return 0;
+      return pivs_var_stores(c, NK_InstanceVariableReadNode, vn, ci, set, depth);
+    }
+    /* a global, its alias resolved, as an ivar */
+    case NK_GlobalVariableReadNode: {
+      if (!c->pivs->hash_mode || elems) return 0;
+      const char *vn = nt_str(nt, v, "name");
+      return vn && pivs_var_stores(c, NK_GlobalVariableReadNode, comp_resolve_gvar(c, vn + 1), -1, set, depth);
+    }
+    case NK_CallNode: {
+      if (!c->pivs->hash_mode) return -1;
+      int ms[CPT_MAX], vals[64], nm = cplan_targets(c, v, ms, CPT_MAX);
+      c->pivs->memo[c->pivs->active].typed = 1;
+      if (nm <= 0) return nm < 0 ? 0 : -1;
+      for (int i = 0; i < nm; i++) {
+        int n = method_value_leaves_or_nil(c, ms[i], vals, 64);
+        if (n < 0) return 0;
+        for (int j = 0; j < n; j++) if (!f(c, vals[j], set, depth + 1)) return 0;
+      }
+      return 1;
+    }
     default: return -1;
   }
 }
-static int pivs_value(Compiler *c, int v, char *set, int depth) {
-  const NodeTable *nt = c->nt;
-  if (v < 0) return 1;
+static int pivs_value_uncached(Compiler *c, int v, char *set, int depth);
+static int pivs_elems_uncached(Compiler *c, int v, char *set, int depth);
+/* Within one call, a completed visit has already added its classes to set.
+   Keep value and element visits separate, and the exact depth: skipping a
+   deeper visit must not turn the depth limit's unbounded answer into a set.
+   Reads of one local share its first indexed write as their key, in separate
+   slots from visits to that write node itself. The call's memo number avoids
+   clearing the table per query; failed or unfinished visits are never reused.
+   A Hash query that follows inferred method targets advances that number
+   when its answer is recomputed for a new inference sweep. */
+static int pivs_visit(Compiler *c, int v, char *set, int depth, int elems) {
+  if (v < 0) return !elems;
   if (depth > 32) return 0;
+  PivsFacts *f = c->pivs;
+  int key = v, slot = elems;
+  if (nt_kind(c->nt, v) == NK_LocalVariableReadNode) {
+    const char *vn = nt_str(c->nt, v, "name");
+    Scope *s = vn ? comp_scope_of(c, v) : NULL;
+    if (s) {
+      int si = (int)(s - c->scopes);
+      for (int w = comp_lvw_first_sc(c, si, vn); w >= 0; w = comp_lvw_next_sc(c, w)) {
+        if (c->nscope[w] != si || !sp_streq(nt_str(c->nt, w, "name"), vn)) continue;
+        key = w; slot += 2; break;
+      }
+    }
+  }
+  if (f->seen[key].call != f->query) {
+    f->seen[key].call = f->query;
+    memset(f->seen[key].done, 0, sizeof f->seen[key].done);
+  }
+  uint64_t bit = UINT64_C(1) << depth;
+  if (f->seen[key].done[slot] & bit) return 1;
+  int ok = elems ? pivs_elems_uncached(c, v, set, depth) : pivs_value_uncached(c, v, set, depth);
+  if (ok) f->seen[key].done[slot] |= bit;
+  return ok;
+}
+static int pivs_value(Compiler *c, int v, char *set, int depth) {
+  return pivs_visit(c, v, set, depth, 0);
+}
+static int pivs_elems(Compiler *c, int arr, char *set, int depth) {
+  return pivs_visit(c, arr, set, depth, 1);
+}
+static int pivs_value_uncached(Compiler *c, int v, char *set, int depth) {
+  const NodeTable *nt = c->nt;
   int br = pivs_branches(c, v, set, depth, 0);
   if (br >= 0) return br;
   switch (nt_kind(nt, v)) {
+    case NK_HashNode:
+      if (c->pivs->hash_mode && !c->pivs->seen[v].done[0]) {
+        int m = c->pivs->active, n = c->pivs->memo[m].nhash;
+        if (n == 64) return 0;
+        c->pivs->memo[m].hash[n] = v; c->pivs->memo[m].nhash++;
+      }
+      return 1;
     case NK_NilNode: case NK_TrueNode: case NK_FalseNode: case NK_IntegerNode: case NK_FloatNode:
     case NK_RationalNode: case NK_ImaginaryNode: case NK_StringNode: case NK_InterpolatedStringNode:
     case NK_XStringNode: case NK_SymbolNode: case NK_InterpolatedSymbolNode: case NK_ArrayNode:
-    case NK_HashNode: case NK_RangeNode: case NK_RegularExpressionNode:
+    case NK_RangeNode: case NK_RegularExpressionNode:
     case NK_InterpolatedRegularExpressionNode:
       return 1;
     case NK_SelfNode: {
@@ -7555,6 +7739,7 @@ static int pivs_value(Compiler *c, int v, char *set, int depth) {
       if (a >= 0) nt_arr(nt, a, "arguments", &ac);
       if (!un || r < 0) return 0;
       if (sp_streq(un, "new") && (nt_kind(nt, r) == NK_ConstantReadNode || nt_kind(nt, r) == NK_ConstantPathNode)) {
+        if (c->pivs->hash_mode && sp_streq(nt_str(nt, r, "name"), "Hash")) return 0;
         int ci = comp_class_index(c, nt_str(nt, r, "name"));
         if (ci < 0) return builtin_class_id(nt_str(nt, r, "name")) != 0;
         /* a class method `new` of its own may answer anything */
@@ -7575,9 +7760,8 @@ static int pivs_value(Compiler *c, int v, char *set, int depth) {
       return 0;
   }
 }
-static int pivs_elems(Compiler *c, int arr, char *set, int depth) {
+static int pivs_elems_uncached(Compiler *c, int arr, char *set, int depth) {
   const NodeTable *nt = c->nt;
-  if (arr < 0 || depth > 32) return 0;
   /* a Hash literal's `[]` answers one of its values (or nil) */
   if (nt_kind(nt, arr) == NK_HashNode) {
     int n = 0; const int *el = nt_arr(nt, arr, "elements", &n);
@@ -7598,21 +7782,26 @@ static int pivs_elems(Compiler *c, int arr, char *set, int depth) {
 /* The classes the boxed receiver of call `call` can be an instance of
    (pivs_value): marked in a set, and listed (*cls, *n). NULL when the
    analysis cannot bound them. Memoized per call, found through a
-   node-indexed slot, until the tree or the class table changes. */
-static const char *pivs_call_set(Compiler *c, int call, const int **cls, int *n) {
+   node-indexed slot, until the tree or the class table changes.
+   Hash stores ask separately, retaining up to 64 literal origins and using
+   the return, ivar and proc arms without changing the class-only answer.
+   Only answers that read inferred call targets expire each inference sweep;
+   their targets can change as the receiver types converge. */
+static const char *pivs_call_set(Compiler *c, int call, const int **cls, int *n, int hashes) {
   PivsFacts *f = pivs_facts(c);
   if (f->memo_n != c->nclasses || f->memo_count != c->nt->count ||
       f->memo_ver != c->nt->version) {
-    for (int i = 0; i < f->nmemo; i++) { free(f->memo[i].set); free(f->memo[i].cls); }
-    free(f->memo_at);
-    f->nmemo = 0; f->memo_n = c->nclasses; f->memo_count = c->nt->count;
+    for (int i = 0; i < f->nmemo; i++) { free(f->memo[i].set); free(f->memo[i].cls); free(f->memo[i].hash); }
+    free(f->memo_at); free(f->seen);
+    f->nmemo = f->query = 0; f->memo_n = c->nclasses; f->memo_count = c->nt->count;
     f->memo_ver = c->nt->version;
-    f->memo_at = calloc((size_t)(f->memo_count > 0 ? f->memo_count : 1), sizeof *f->memo_at);
-    if (!f->memo_at) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+    f->memo_at = calloc((size_t)(f->memo_count > 0 ? f->memo_count : 1) * 2, sizeof *f->memo_at);
+    f->seen = calloc((size_t)(f->memo_count > 0 ? f->memo_count : 1), sizeof *f->seen);
+    if (!f->memo_at || !f->seen) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
   }
   if (cls) { *cls = NULL; *n = 0; }
   if (call < 0 || call >= f->memo_count) return NULL;
-  int m = f->memo_at[call] - 1;
+  int m = f->memo_at[(size_t)call * 2 + hashes] - 1;
   if (m < 0) {
     if (f->nmemo == f->cmemo) {
       f->cmemo = f->cmemo ? f->cmemo * 2 : 16;
@@ -7621,9 +7810,19 @@ static const char *pivs_call_set(Compiler *c, int call, const int **cls, int *n)
       f->memo = nm;
     }
     m = f->nmemo++;
-    f->memo_at[call] = m + 1;
+    f->memo_at[(size_t)call * 2 + hashes] = m + 1;
+    memset(&f->memo[m], 0, sizeof f->memo[m]);
+    f->memo[m].sweep = -1;
     f->memo[m].set = (char *)calloc((size_t)(c->nclasses > 0 ? c->nclasses : 1), 1);
     if (!f->memo[m].set) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+    if (hashes) f->memo[m].hash = malloc(64 * sizeof *f->memo[m].hash);
+    if (hashes && !f->memo[m].hash) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+  }
+  if (f->memo[m].sweep < 0 || (hashes && f->memo[m].typed && f->memo[m].sweep != f->sweep)) {
+    f->memo[m].sweep = f->sweep; f->memo[m].nhash = 0; f->memo[m].typed = 0;
+    f->hash_mode = hashes; f->active = m; f->query++;
+    memset(f->memo[m].set, 0, (size_t)(c->nclasses > 0 ? c->nclasses : 1));
+    free(f->memo[m].cls);
     f->memo[m].ok = pivs_value(c, nt_ref(c->nt, call, "receiver"), f->memo[m].set, 0);
     f->memo[m].cls = NULL; f->memo[m].ncls = 0;
     if (f->memo[m].ok) {
@@ -7643,14 +7842,14 @@ static const char *pivs_call_set(Compiler *c, int call, const int **cls, int *n)
    when the analysis cannot bound them. */
 int poly_ivar_set_reaches(Compiler *c, int call, int k) {
   if (call < 0 || call >= c->nt->count) return 0;   /* no receiver: no class */
-  const char *set = pivs_call_set(c, call, NULL, NULL);
+  const char *set = pivs_call_set(c, call, NULL, NULL, 0);
   if (k < 0 || k >= c->nclasses) return 0;
   return set ? set[k] : 1;
 }
 /* See analyze_internal.h. */
 const int *poly_recv_classes(Compiler *c, int call, int *n) {
   const int *cls;
-  return pivs_call_set(c, call, &cls, n) ? cls : NULL;
+  return pivs_call_set(c, call, &cls, n, 0) ? cls : NULL;
 }
 static void nil_write_note(NilWrites *w, int cls, const char *nm) {
   if (cls < 0 || !nm) return;
@@ -8032,11 +8231,45 @@ static int infer_struct_aset_call(Compiler *c, int id, NilWrites *writes, Struct
   return changed;
 }
 
+/* A store through a bounded box types the original Hashes, so every alias
+   observes the store. An unbounded answer changes no Hash. The store
+   decides from settled types: until the re-narrow it is only noted as held
+   (pivs_settle_hash_stores). */
+static int infer_hash_aset_call(Compiler *c, int id) {
+  const NodeTable *nt = c->nt;
+  int recv = nt_ref(nt, id, "receiver"), a = nt_ref(nt, id, "arguments"), ac = 0;
+  const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
+  if (recv < 0 || ac != 2 || infer_type(c, recv) != TY_POLY) return 0;
+  TyKind hk = infer_type(c, av[0]), hv = infer_type(c, av[1]);
+  if (hk == TY_UNKNOWN || hv == TY_UNKNOWN) return 0;
+  PivsFacts *f = pivs_facts(c);
+  if (!f->stores_settled) { f->stores_held = 1; return 0; }
+  if (!pivs_call_set(c, id, NULL, NULL, 1)) return 0;
+  int m = f->memo_at[(size_t)id * 2 + 1] - 1, changed = 0;
+  for (int i = 0; i < f->memo[m].nhash; i++) changed |= widen_hash_arg_for_store(c, f->memo[m].hash[i], hk, hv);
+  f->stores_widened += changed;
+  return changed;
+}
+
+/* From the re-narrow on, Hash stores through a box decide (above). 1 when
+   one was held back until then. */
+int pivs_settle_hash_stores(Compiler *c) {
+  PivsFacts *f = pivs_facts(c);
+  f->stores_settled = 1;
+  return f->stores_held;
+}
+/* How many times such a store has widened a Hash: two counts differ when
+   the stores between them widened one. */
+int pivs_hash_stores_widened(Compiler *c) {
+  return c->pivs ? c->pivs->stores_widened : 0;
+}
+
 int infer_ivar_types(Compiler *c) {
   const NodeTable *nt = c->nt;
   int changed = 0;
   NilWrites nilw = {0};
   StructAsetIx aset = {0};
+  if (c->pivs) c->pivs->sweep++;
   if (dn_nscopes != c->nscopes || dn_count != nt->count) dn_build(c);
   for (int id = 0; id < nt->count; id++) {
     const char *ty = nt_type(nt, id);
@@ -8219,7 +8452,8 @@ int infer_ivar_types(Compiler *c) {
         if (infer_ivar_set_call(c, id, &nilw)) changed = 1;
         continue;
       }
-      if (sp_streq(nt_str(nt, id, "name"), "[]=")) {
+      if (is_store_alias(nt_str(nt, id, "name"))) {
+        if (infer_hash_aset_call(c, id)) changed = 1;
         if (infer_struct_aset_call(c, id, &nilw, &aset)) changed = 1;
         continue;
       }

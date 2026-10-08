@@ -22,6 +22,15 @@ int is_record_class_builder(const char *recv, const char *meth) {
                           (sp_streq(recv, "Data") && sp_streq(meth, "define")));
 }
 
+/* the Array class's own name, exactly */
+int is_array_class_name(const char *n) {
+  return n && sp_streq(n, "Array");
+}
+/* `Array.new(...)`, by its receiver's constant name and the method */
+int is_array_new(const char *recv, const char *meth) {
+  return is_array_class_name(recv) && meth && sp_streq(meth, "new");
+}
+
 int is_call_alias(const char *n) {
   return sp_streq(n, "call") || sp_streq(n, "()") || sp_streq(n, "[]");
 }
@@ -97,6 +106,12 @@ int is_async_code_entry(const char *recv, const char *n) {
 
 int is_name_reader(const char *n) {
   return sp_streq(n, "name") || sp_streq(n, "to_s") || sp_streq(n, "inspect");
+}
+
+/* `tap` alone: it answers its receiver, where then/yield_self answer the
+   block's value (is_tap_alias takes all three) */
+int is_tap_name(const char *n) {
+  return sp_streq(n, "tap");
 }
 
 int is_tap_alias(const char *n) {
@@ -236,6 +251,9 @@ int is_str_string_yield(const char *n) {
 int is_unpack_name(const char *n) {
   return sp_streq(n, "unpack");
 }
+
+int is_catch_name(const char *n) { return sp_streq(n, "catch"); }
+int is_throw_name(const char *n) { return sp_streq(n, "throw"); }
 
 int is_diverging_call(const char *n) {
   return sp_streq(n, "raise") || sp_streq(n, "fail") || sp_streq(n, "throw") ||
@@ -627,6 +645,8 @@ int is_index_assign(const char *n) {
   return sp_streq(n, "[]=");
 }
 
+int is_fill_name(const char *n) { return sp_streq(n, "fill"); }
+
 int is_first_or_take(const char *n) {
   return sp_streq(n, "first") || sp_streq(n, "take");
 }
@@ -784,6 +804,10 @@ int is_standard_output_global(const char *n) {
   return sp_streq(n, "$stdout") || sp_streq(n, "$stderr");
 }
 
+int is_file_class_name(const char *n) {
+  return n && sp_streq(n, "File");
+}
+
 int is_io_class_name(const char *n) {
   return sp_streq(n, "IO") || sp_streq(n, "File");
 }
@@ -834,6 +858,21 @@ int is_string_append(const char *n) {
 
 int is_replace_name(const char *n) {
   return sp_streq(n, "replace");
+}
+
+/* The arguments String mutator `n`, called with `argc` of them, takes as
+   Strings: the first one's position (argc when none), the rest following
+   it, and in *int_ok whether an Integer is taken there too. `<<`, concat
+   and append_as_bytes take each one (an Integer as a codepoint), prepend
+   each one, replace its one, insert its second and `[]=` its last (the
+   value; the index is an Integer, a Range, a String or a Regexp). */
+int str_mutator_str_args(const char *n, int argc, int *int_ok) {
+  *int_ok = 0;
+  if (is_string_append(n) || sp_streq(n, "append_as_bytes")) { *int_ok = 1; return 0; }
+  if (sp_streq(n, "prepend") || (is_replace_name(n) && argc == 1)) return 0;
+  if (sp_streq(n, "insert") && argc == 2) return 1;
+  if (sp_streq(n, "[]=") && (argc == 2 || argc == 3)) return argc - 1;
+  return argc;
 }
 
 int is_string_rebind_mutator(const char *n) {
@@ -974,10 +1013,16 @@ int is_scan_name(const char *n) { return sp_streq(n, "scan"); }
 int is_enumerator_with(const char *n) {
   return sp_streq(n, "with_index") || sp_streq(n, "with_object");
 }
-int is_lazy_name(const char *n) { return sp_streq(n, "lazy"); }
+int is_lazy_name(const char *n) { return n && sp_streq(n, "lazy"); }
 int is_concat_name(const char *n) { return sp_streq(n, "concat"); }
 
 /* `Array.new(...)`, by its receiver's constant name and the method */
 int is_array_constructor(const char *recv, const char *meth) {
   return recv && meth && sp_streq(meth, "new") && sp_streq(recv, "Array");
 }
+int is_pow_name(const char *n) { return sp_streq(n, "pow"); }
+/* `new`: a class's constructor (a native binding's "new" names them) */
+int is_new_name(const char *n) { return n && sp_streq(n, "new"); }
+/* `native_share`: a package's declaration of what a native binding does
+   with the String its object keeps (--share-strings) */
+int is_native_share_decl(const char *n) { return n && sp_streq(n, "native_share"); }

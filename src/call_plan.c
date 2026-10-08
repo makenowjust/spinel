@@ -1788,6 +1788,10 @@ static int cplan_nil_user_method(Compiler *c, const char *name) {
   return 0;
 }
 
+int cplan_nil_written(int why) {
+  return why == NFW_NIL || why == NFW_NO_ELSE || why == NFW_SAFE_NAV || why == NFW_UNSET || why == NFW_ELEM_NIL;
+}
+
 int cplan_nil(Compiler *c, int id) {
   const NodeTable *nt = c->nt;
   if (id < 0 || id >= nt->count || nt_kind(nt, id) != NK_CallNode) return CN_NONE;
@@ -1798,7 +1802,9 @@ int cplan_nil(Compiler *c, int id) {
   /* the receiver as settled, not as a view retypes it: a poly arm's
      unboxed String is never its box's nil */
   TyKind rt = c->ntype[r];
-  if (!cplan_nil_family(rt) || comp_ntype(c, r) != rt) return CN_NONE;
+  /* under --share-strings, a String the rule made the shared handle is
+     nil as its NULL handle (#6765) */
+  if (!(cplan_nil_family(rt) || (rt == TY_STRBUF && c->share_strings)) || comp_ntype(c, r) != rt) return CN_NONE;
   Repr rr = repr_of(c, r);
   if ((rr.kind != RK_PTR && rr.kind != RK_STRBUF) || !rr.may_nil || rr.nil_tested) return CN_NONE;
   /* an ivar keeps the release build's policy (ivar_nil_recv_guard, #5960);
@@ -1826,8 +1832,7 @@ int cplan_nil(Compiler *c, int id) {
      read, a global, an ivar, a caller not seen, a builtin's answer), which
      a hot loop over a receiver that is never nil would pay for */
   int why = nil_fact_why(c, r);
-  if (why != NFW_NIL && why != NFW_NO_ELSE && why != NFW_SAFE_NAV && why != NFW_UNSET && why != NFW_ELEM_NIL)
-    return CN_NONE;
+  if (!cplan_nil_written(why)) return CN_NONE;
   /* the definite-assignment walk over a temp the compiler wrote itself (a
      desugared splat's receiver) is not the program's nil */
   if (why == NFW_UNSET && nt_int(nt, r, "node_line", 0) <= 0) return CN_NONE;

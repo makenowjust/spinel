@@ -3,6 +3,7 @@
 #include "call_plan.h"
 #include "repr.h"
 #include "holder.h"
+#include "builtin_names.h"
 #include <stdint.h>
 #include <limits.h>
 
@@ -2906,9 +2907,23 @@ static int infer_poly_operand_call(Compiler *c, int id, const NodeTable *nt, con
         if (sp_streq(name, "setsockopt") && argc == 3) { *out = an_poly_concrete(c, name, TY_INT); return 1; }
       }
       /* a boxed socket's addresses, as the TY_IO arm types them */
-      if ((is_socket_address(name)) && argc == 0 &&
+      if ((is_socket_address(name)) && argc <= 1 &&
           sp_feature_required("socket"))
         { *out = an_poly_concrete(c, name, TY_POLY_ARRAY); return 1; }
+      /* a boxed server's accept family, as the TY_IO arm types it: the
+         connection, or with `exception: false` the connection or the
+         :wait_readable marker; to_io answers the handle itself */
+      if (sp_feature_required("socket") && sp_streq(name, "accept") && argc == 0)
+        { *out = an_poly_concrete(c, name, TY_IO); return 1; }
+      if (sp_feature_required("socket") && sp_streq(name, "accept_nonblock"))
+        { *out = an_poly_concrete(c, name, an_nonblock_no_exception(c, id) ? TY_POLY : TY_IO); return 1; }
+      if (sp_streq(name, "to_io") && argc == 0)
+        { *out = an_poly_concrete(c, name, TY_IO); return 1; }
+      /* and its reverse-lookup flag, as the TY_IO arm types it */
+      if (sp_streq(name, "do_not_reverse_lookup") && argc == 0 && sp_feature_required("socket"))
+        { *out = an_poly_concrete(c, name, TY_BOOL); return 1; }
+      if (sp_streq(name, "do_not_reverse_lookup=") && argc == 1 && sp_feature_required("socket"))
+        { *out = an_poly_concrete(c, name, infer_type(c, argv[0])); return 1; }
       /* the non-blocking pair on a poly-carried handle, typed as the TY_IO arm
          types it: `exception: false` answers a wait symbol (read) or nil
          (write) as well as the ordinary result, so that shape is poly and a
@@ -3034,6 +3049,14 @@ static int infer_poly_operand_call(Compiler *c, int id, const NodeTable *nt, con
   return 0;
 }
 
+/* `Array.new(n, v)`: an Array of v's kind. Under --share-strings a fill
+   stored as the shared handle settles it in its poly form, whose boxes hold
+   the handle, as a literal's element does (#6765). */
+static TyKind infer_array_new_fill(Compiler *c, int fill) {
+  TyKind ft = infer_type(c, fill);
+  if (ft == TY_STRBUF && c->share_strings) ft = TY_POLY;
+  return ty_array_of(ft);
+}
 /* A constructor call: a class's .new, and the builtin constructors (infer_call_inner's rules, in their order) */
 static int infer_new_call(Compiler *c, int id, const NodeTable *nt, const char *name, int recv, int argc, const int *argv, TyKind *out) {
   /* Class.new(...) -> an instance of that class; built-in .new constructors */
@@ -3059,7 +3082,7 @@ static int infer_new_call(Compiler *c, int id, const NodeTable *nt, const char *
       if (cn && (is_builtin_exception_name(cn) || superclass_builtin_exc_name(nt, recv)))
         { *out = TY_EXCEPTION; return 1; }
       /* ::Array.new / ::String.new / ::StringIO.new etc. */
-      if (cn && sp_streq(cn, "Array") && argc == 2) { *out = ty_array_of(infer_type(c, argv[1])); return 1; }
+      if (is_array_class_name(cn) && argc == 2) { *out = infer_array_new_fill(c, argv[1]); return 1; }
       if (cn && sp_streq(cn, "Array")) { *out = TY_POLY_ARRAY; return 1; }
       if (cn && (is_object_base_name(cn))) { *out = TY_POLY; return 1; }
       if (cn && sp_streq(cn, "String")) { *out = TY_STRING; return 1; }
@@ -3107,7 +3130,7 @@ static int infer_new_call(Compiler *c, int id, const NodeTable *nt, const char *
         if (!(cn && is_builtin_reopen(cn))) { *out = ty_object(ci); return 1; }
       }
       if (cn && is_builtin_exception_name(cn)) { *out = TY_EXCEPTION; return 1; }
-      if (cn && sp_streq(cn, "Array") && argc == 2) { *out = ty_array_of(infer_type(c, argv[1])); return 1; }
+      if (is_array_class_name(cn) && argc == 2) { *out = infer_array_new_fill(c, argv[1]); return 1; }
       if (cn && sp_streq(cn, "Array")) {
         int blk = nt_ref(nt, id, "block");
         if (blk >= 0) {
@@ -3408,6 +3431,16 @@ static int infer_builtin_cmethod_call(Compiler *c, int id, const NodeTable *nt, 
           ((sp_streq(name, "ip") || sp_streq(name, "unix")) && argc == 1))
         { *out = TY_ADDRINFO; return 1; }
     }
+    /* BasicSocket.do_not_reverse_lookup, on any socket class; the writer
+       answers its argument */
+    if (rty && sp_streq(rty, "ConstantReadNode") && sp_feature_required("socket") &&
+        io_family_name(nt_str(nt, recv, "name")) && !is_io_class_name(nt_str(nt, recv, "name"))) {
+      int skc = comp_class_index(c, nt_str(nt, recv, "name"));
+      if (skc < 0 || comp_cmethod_in_chain(c, skc, name, NULL) < 0) {
+        if (sp_streq(name, "do_not_reverse_lookup") && argc == 0) { *out = TY_BOOL; return 1; }
+        if (sp_streq(name, "do_not_reverse_lookup=") && argc == 1) { *out = infer_type(c, argv[0]); return 1; }
+      }
+    }
     if (rty && sp_streq(rty, "ConstantReadNode") && nt_str(nt, recv, "name") &&
         sp_streq(nt_str(nt, recv, "name"), "Socket") && sp_feature_required("socket")) {
       if (sp_streq(name, "gethostname") && argc == 0) { *out = TY_STRING; return 1; }
@@ -3580,8 +3613,11 @@ static int infer_handle_call(Compiler *c, int id, const NodeTable *nt, const cha
     /* socket methods on the IO handle (#2922) */
     if (sp_feature_required("socket")) {
       if (sp_streq(name, "accept") && argc == 0) { *out = TY_IO; return 1; }
-      if ((is_socket_address(name)) && argc == 0)
+      if ((is_socket_address(name)) && argc <= 1)
         { *out = TY_POLY_ARRAY; return 1; }
+      /* the reverse-lookup flag; its writer answers its argument */
+      if (sp_streq(name, "do_not_reverse_lookup") && argc == 0) { *out = TY_BOOL; return 1; }
+      if (sp_streq(name, "do_not_reverse_lookup=") && argc == 1) { *out = infer_type(c, argv[0]); return 1; }
       if ((sp_streq(name, "local_address") || sp_streq(name, "remote_address")) && argc == 0)
         { *out = TY_ADDRINFO; return 1; }
       /* the non-blocking family: the handle / the bytes / the byte count, each
@@ -3609,6 +3645,7 @@ static int infer_handle_call(Compiler *c, int id, const NodeTable *nt, const cha
     if (sp_streq(name, "write_nonblock")) { *out = TY_INT; return 1; }
     if (sp_streq(name, "read_nonblock")) { *out = TY_STRING; return 1; }
     if (sp_streq(name, "winsize") && sp_feature_enabled("io/console")) { *out = TY_INT_ARRAY; return 1; }
+    if (sp_streq(name, "winsize=") && argc == 1 && sp_feature_enabled("io/console")) { *out = TY_INT_ARRAY; return 1; }
     if (sp_streq(name, "each_line") || sp_streq(name, "each") ||
         sp_streq(name, "each_char") || sp_streq(name, "each_byte") ||
         sp_streq(name, "each_codepoint")) {
@@ -7854,7 +7891,8 @@ static int stmts_diverge(Compiler *c, int st) {
   int last = b[n - 1];
   if (nt_kind(nt, last) != NK_CallNode || nt_ref(nt, last, "receiver") >= 0) return 0;
   const char *nm = nt_str(nt, last, "name");
-  return nm && is_diverging_call(nm);
+  return nm && is_diverging_call(nm) && !an_bare_call_class_owned(c, last) &&
+         comp_method_index(c, nm) < 0;
 }
 /* Whether call `w`, named `wn`, can run a method the program defines: a
    receiverless call (or one on self) when some user method has the name; a

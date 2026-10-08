@@ -149,6 +149,7 @@ int emit_call_identity_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
       buf_printf(b, "(sp_poly_recv_ck(_t%d, \"%s\"), "
                     "sp_poly_cmp_ck(_t%d, _t%d) >= 0 && sp_poly_cmp_ck(_t%d, _t%d) <= 0)",
                  ts, name, ts, tlo, ts, thi);
+      c->args_in_call = recv;
       return 1;
     }
     /* Comparable: user type with <=> method */
@@ -942,6 +943,15 @@ int emit_call_freeze_dup_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, 
     char fsref[1024];
     if ((frt == TY_STRING || frt == TY_STRBUF) && strbuf_slot_ref(c, recv, fsref, sizeof fsref)) {
       buf_printf(b, "sp_String_is_frozen(%s)", fsref);
+      return 1;
+    }
+    /* --share-strings: so does a route that hands on the handle (`String(t)`,
+       `x.tap { }`, a conditional over one): its read face is an unfrozen
+       copy */
+    if (frt == TY_STRING && strbuf_value_carries(c, recv)) {
+      buf_puts(b, "sp_String_is_frozen(");
+      emit_strbuf_handle_of(c, recv, b);
+      buf_puts(b, ")");
       return 1;
     }
     if (frt == TY_STRING) {
@@ -2129,9 +2139,8 @@ static void emit_bivar_name(Compiler *c, int arg, Buf *b) {
     return;
   }
   int tn = ++g_tmp;
-  buf_printf(b, "({ sp_RbVal _t%d = ", tn); emit_boxed(c, arg, b);
-  buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); sp_ivar_name_check(_t%d); sp_sym_intern(sp_poly_to_name(_t%d)); })",
-             tn, tn, tn);
+  buf_puts(b, "({ "); tn = hold_operand(c, arg, TY_POLY, 1, tn, 1, " ", b);
+  buf_printf(b, "sp_ivar_name_check(_t%d); sp_sym_intern(sp_poly_to_name(_t%d)); })", tn, tn);
 }
 
 /* An ivar access the runtime's map answers (sp_bivar_*): the receiver, the
@@ -2142,8 +2151,7 @@ static int emit_bivar_table_op(Compiler *c, const BopCtx *x, char op, Buf *b) {
   int id = x->id, argc;
   const int *argv = call_args(nt, id, &argc);
   int tv = ++g_tmp;
-  buf_printf(b, "({ sp_RbVal _t%d = ", tv); emit_boxed(c, x->recv, b);
-  buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); ", tv);
+  buf_puts(b, "({ "); tv = hold_operand(c, x->recv, TY_POLY, 1, tv, 1, " ", b);
   if (op == 'l') { buf_printf(b, "sp_bivar_list(_t%d); })", tv); return 1; }
   buf_printf(b, "sp_sym _k%d = ", tv); emit_bivar_name(c, argv[0], b); buf_puts(b, "; ");
   if (op == 'd') { buf_printf(b, "sp_bivar_defined(_t%d, _k%d); })", tv, tv); return 1; }
@@ -2186,14 +2194,12 @@ int emit_op_ivar_reflection(Compiler *c, const BopCtx *x, Buf *b) {
   const char *sym = a0ty && sp_streq(a0ty, "SymbolNode") ? nt_str(nt, argv[0], "value")
                   : a0ty && sp_streq(a0ty, "StringNode") ? nt_str(nt, argv[0], "content") : NULL;
   int tv = ++g_tmp;
-  buf_printf(b, "({ sp_RbVal _t%d = ", tv); emit_boxed(c, recv, b);
-  buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); ", tv);
+  buf_puts(b, "({ "); tv = hold_operand(c, recv, TY_POLY, 1, tv, 1, " ", b);
   int tn = -1;
   for (int k = 0; k < argc; k++) {
     if (k == 0 && !sym) {
       tn = ++g_tmp;
-      buf_printf(b, "sp_RbVal _t%d = ", tn); emit_boxed(c, argv[k], b);
-      buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); ", tn);
+      tn = hold_operand(c, argv[k], TY_POLY, 1, tn, 1, " ", b);
     }
     else { buf_puts(b, "(void)("); emit_expr(c, argv[k], b); buf_puts(b, "); "); }
   }
@@ -2304,9 +2310,8 @@ int emit_object_ivar_list(Compiler *c, int recv, int ivcid, Buf *b) {
 static int emit_data_ivar_set(Compiler *c, int id, int recv, int value, int cid, Buf *b) {
   const char *dn = class_ruby_name(c, cid) ? class_ruby_name(c, cid) : c->classes[cid].name;
   int td = ++g_tmp;
-  buf_printf(b, "({ sp_RbVal _t%d = ", td);
-  emit_boxed(c, recv, b);
-  buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); (void)(", td);
+  buf_puts(b, "({ "); td = hold_operand(c, recv, TY_POLY, 1, td, 1, " ", b);
+  buf_puts(b, "(void)(");
   emit_boxed(c, value, b);
   buf_printf(b, "); sp_raise_frozen_obj(_t%d, (&(\"\\xff\" \"can't modify frozen %s\")[1])); ", td, dn);
   Repr rp = repr_of(c, id);
@@ -2485,13 +2490,15 @@ int emit_object_ivar_call(Compiler *c, int id, const char *name, int recv, TyKin
         else emit_coerce(c, argv[1], mt, CO_HOLD, "an instance variable write", b);
         buf_puts(b, ")");
       }
-      else if (mt == TY_STRBUF && repr_of(c, id).demand) {
+      else if ((mt == TY_STRBUF || (repr_share_rule(c) && mt == TY_STRING)) && repr_of(c, id).demand) {
         /* the caller asked for the HANDLE, not a reading of it. The
            out-of-line reader answers the same way for the same demand;
            inlined, it copied regardless, so `obj.reader.equal?(x)` compared
            two fresh copies and answered false for one object (#4363). */
+        if (mt == TY_STRING) buf_puts(b, "sp_String_new_shared(");
         buf_puts(b, "("); emit_expr(c, recv, b);
         buf_printf(b, ")%siv_%s", acc, iv_c(sym + 1));
+        if (mt == TY_STRING) buf_puts(b, ")");
       }
       else if (mt == TY_STRBUF) {
         /* a shared-mutable slot reads out as a GC copy; the raw handle
@@ -2499,8 +2506,7 @@ int emit_object_ivar_call(Compiler *c, int id, const char *name, int recv, TyKin
         int tvG = ++g_tmp;
         buf_printf(b, "({ sp_String *_t%d = (", tvG);
         emit_expr(c, recv, b);
-        buf_printf(b, ")%siv_%s; _t%d ? sp_str_concat(sp_String_cstr(_t%d), (&(\"\\xff\")[1])) : NULL; })",
-                   acc, iv_c(sym + 1), tvG, tvG);
+        buf_printf(b, ")%siv_%s; sp_strbuf_read(_t%d); })", acc, iv_c(sym + 1), tvG);
       }
       /* a number field with a nil bit reads with it: the oint where the
          call's consumer takes one, boxed nil, or unwrapped */

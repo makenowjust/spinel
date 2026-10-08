@@ -165,6 +165,7 @@ void emit_callee_block_arg(Compiler *c, int id, const Scope *m, Buf *b) {
 void emit_method_call(Compiler *c, int id, Buf *b) {
   const NodeTable *nt = c->nt;
   const char *name = nt_str(nt, id, "name");
+  if (nt_str(nt, id, "vis_enforce") && emit_vis_refusal(c, id, b)) return;
   /* the target is the call's plan (call_plan.c): a top-level def, reached
      bare or through a retargeted send. A plan of another kind does not
      serve this site, which then takes the top-level def by name as it
@@ -1487,8 +1488,7 @@ int emit_poly_uniq_block(Compiler *c, int id, Buf *b) {
 
   if (rr.kind != RK_BOXED) return 0;
   int trecv = ++g_tmp, tarr = ++g_tmp, tseen = ++g_tmp, tres = ++g_tmp, ti = ++g_tmp;
-  Buf rb; memset(&rb, 0, sizeof rb); emit_expr(c, recv, &rb);
-  emit_indent(g_pre, g_indent); buf_printf(g_pre, "sp_RbVal _t%d = %s; SP_GC_ROOT_RBVAL(_t%d);\n", trecv, rb.p ? rb.p : "sp_box_nil()", trecv); free(rb.p);
+  trecv = hold_operand_pre(c, recv, TY_POLY, 0, trecv, 1);
   /* uniq hands its block every value one step of an Enumerator yielded,
      which the walk below reads packed as one item: a lone `|x|` takes the
      first of them, any other shape but plain requireds all of them */
@@ -1768,9 +1768,8 @@ int emit_sum_block_poly_expr(Compiler *c, int id, Buf *b) {
   /* the receiver, then the initial value, then the receiver's check: nil, a
      number, a boolean or a Symbol has no sum (it answered the initial
      value), raised as CRuby does once the operands ran */
-  buf_printf(b, "({ sp_RbVal _t%d = ", tr);
-  emit_expr(c, recv, b);
-  buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); sp_RbVal _t%d = ", tr, tacc);
+  buf_puts(b, "({ "); tr = hold_operand(c, recv, TY_POLY, 0, tr, 1, " ", b);
+  buf_printf(b, "sp_RbVal _t%d = ", tacc);
   if (argc == 1) emit_boxed(c, argv[0], b);
   else buf_puts(b, "sp_box_int(0)");
   /* a String's sum is its checksum, the argument its bit width, and the
@@ -3401,6 +3400,17 @@ int emit_reduce_block_expr(Compiler *c, int id, Buf *b) {
     if (pl0) pl0->type = s0;
     if (pl1) pl1->type = s1;
   }
+  /* --share-strings: read as the handle (emit_strbuf_route,
+     strbuf_route_inject), the accumulator is the handle its seed hands on,
+     the block's first parameter binds it, and each turn takes the block's
+     value as a handle, so a block answering its accumulator answers the
+     seed itself */
+  int hacc = 0;
+  if (acc_ty == TY_STRING && init >= 0 && p0_orig && repr_share_rule(c) && repr_of(c, id).demand) {
+    Scope *hsc = comp_scope_of(c, block);
+    hacc = repr_of_slot(c, hsc ? scope_local(hsc, p0_orig) : NULL).handle;
+    if (hacc) acc_ty = TY_STRBUF;
+  }
   int ta = ++g_tmp, tacc = ++g_tmp, ti = ++g_tmp;
   buf_puts(b, "({ ");
   emit_ctype(c, rt, b); buf_printf(b, " _t%d = ", ta); emit_expr(c, recv, b); buf_puts(b, "; ");
@@ -3454,7 +3464,8 @@ int emit_reduce_block_expr(Compiler *c, int id, Buf *b) {
   }
   else if (init >= 0) {
     /* a boxed accumulator wants a boxed seed */
-    if (acc_ty == TY_POLY && repr_of(c, init).kind != RK_BOXED) emit_boxed(c, init, b);
+    if (hacc) emit_strbuf_handle_of(c, init, b);
+    else if (acc_ty == TY_POLY && repr_of(c, init).kind != RK_BOXED) emit_boxed(c, init, b);
     /* a seed of a narrower array kind than the widened accumulator converts */
     else if (acc_ty == TY_POLY_ARRAY && repr_of(c, init).elem != TY_POLY) {
       buf_puts(b, "sp_poly_to_poly_array("); emit_boxed(c, init, b); buf_puts(b, ")");
@@ -3549,7 +3560,8 @@ int emit_reduce_block_expr(Compiler *c, int id, Buf *b) {
     Repr rbr = repr_of(c, bb[bn - 1]);
     TyKind rbt = rbr.as_ty;
     int rb_boxed = rbr.kind == RK_BOXED;
-    if (rb_boxed && acc_ty == TY_INT) { buf_puts(&tail, "sp_poly_opnd_i("); emit_expr(c, bb[bn - 1], &tail); buf_puts(&tail, ")"); }
+    if (hacc) emit_strbuf_handle_of(c, bb[bn - 1], &tail);
+    else if (rb_boxed && acc_ty == TY_INT) { buf_puts(&tail, "sp_poly_opnd_i("); emit_expr(c, bb[bn - 1], &tail); buf_puts(&tail, ")"); }
     else if (rb_boxed && acc_ty == TY_FLOAT) { buf_puts(&tail, "sp_poly_opnd_f("); emit_expr(c, bb[bn - 1], &tail); buf_puts(&tail, ")"); }
     else if (rb_boxed && acc_ty == TY_STRING) { buf_puts(&tail, "sp_poly_to_s("); emit_expr(c, bb[bn - 1], &tail); buf_puts(&tail, ")"); }
     else if (rb_boxed && acc_ty == TY_SYMBOL) { buf_puts(&tail, "(sp_sym)("); emit_expr(c, bb[bn - 1], &tail); buf_puts(&tail, ").v.i"); }
@@ -3559,6 +3571,12 @@ int emit_reduce_block_expr(Compiler *c, int id, Buf *b) {
     else if (rb_boxed && acc_ty == TY_POLY_ARRAY) {
       buf_puts(&tail, "sp_poly_to_poly_array("); emit_expr(c, bb[bn - 1], &tail); buf_puts(&tail, ")");
     }
+    /* --share-strings: a String the rule shares goes into a boxed
+       accumulator as its handle's box (emit_boxed_next_value), so the fold's
+       answer is that String */
+    else if (acc_ty == TY_POLY && !rb_boxed && (rbt == TY_STRING || rbt == TY_STRBUF) &&
+             strbuf_value_carries(c, bb[bn - 1]))
+      emit_boxed_next_value(c, bb[bn - 1], &tail);
     /* The mirror: a concretely typed block value going back into a boxed
        accumulator has to be boxed. Without this a fold with no init over
        Hashes assigned a hash pointer into the sp_RbVal seed slot. */
@@ -4048,6 +4066,10 @@ int emit_each_with_index_terminal(Compiler *c, int id, Buf *b) {
      Enumerator there gives its items (sp_poly_ewi_items). */
   int poly_src = rr.kind == RK_BOXED;
   if (poly_src) { rt = TY_POLY_ARRAY; rr.elem = TY_POLY; }
+  /* a fresh String Array whose elements the rule shares is walked as the
+     PolyArray of handles a local's would be */
+  int as_handles = !poly_src && iter_src_as_handles(c, arr);
+  if (as_handles) { rt = TY_POLY_ARRAY; rr.elem = TY_POLY; }
   if (!ty_is_array(rt)) return 0;
   const char *k = rr.elem == TY_POLY ? "Poly" : array_kind(rt);
   if (!k) return 0;
@@ -4087,6 +4109,7 @@ int emit_each_with_index_terminal(Compiler *c, int id, Buf *b) {
     Buf bx; memset(&bx, 0, sizeof bx); emit_boxed(c, arr, &bx);
     buf_printf(&rb, "sp_poly_ewi_items(%s)", bx.p ? bx.p : "sp_box_nil()"); free(bx.p);
   }
+  else if (as_handles) emit_str_array_handles(c, arr, &rb);
   else emit_expr(c, arr, &rb);
   emit_indent(g_pre, g_indent); emit_ctype(c, rt, g_pre); buf_printf(g_pre, " _t%d = %s;\n", ta, rb.p ? rb.p : ""); free(rb.p);
   emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", ta);
@@ -5452,7 +5475,10 @@ int emit_collect_expr(Compiler *c, int id, Buf *b) {
   Scope *csc = (p0 && !autosplat) ? comp_scope_of(c, block) : NULL;
   LocalVar *clv0 = (csc && p0) ? scope_local(csc, p0) : NULL;
   TyKind csaved0 = clv0 ? clv0->type : TY_UNKNOWN;
-  int use_shadow = clv0 && clv0->type != et_elem && et_elem != TY_UNKNOWN;
+  /* a parameter the scope holds as the shared handle binds each String
+     element through it (elem_param_is_handle) rather than shadowing it */
+  int as_handle = !autosplat && elem_param_is_handle(clv0, et_elem);
+  int use_shadow = !as_handle && clv0 && clv0->type != et_elem && et_elem != TY_UNKNOWN;
   if (use_shadow) {
     clv0->type = et_elem;
     for (int j = 0; j < bn; j++) infer_subtree(c, bb[j]);
@@ -5472,6 +5498,10 @@ int emit_collect_expr(Compiler *c, int id, Buf *b) {
     emit_indent(g_pre, innerIndent);
     if (bp_slot_oint(c, block, BP0(c, block), k)) buf_printf(g_pre, "%s lv_%s = sp_%sArray_oget(_t%d, _t%d);\n", oint_ctype(et_elem), p0, k, trecv, ti);
     else { emit_ctype(c, et_elem, g_pre); buf_printf(g_pre, " lv_%s = sp_%sArray_get(_t%d, _t%d);\n", p0, k, trecv, ti); }
+  }
+  else if (as_handle) {
+    emit_indent(g_pre, bodyIndent);
+    buf_printf(g_pre, "lv_%s = sp_String_new_shared(sp_%sArray_get(_t%d, _t%d));\n", p0, k, trecv, ti);
   }
   else if (p0) {
     emit_indent(g_pre, bodyIndent);
@@ -5787,11 +5817,7 @@ int emit_enum_find_expr(Compiler *c, int id, Buf *b) {
   int tneedle = 0;
   if (inc) {
     tneedle = ++g_tmp;
-    Buf nb; memset(&nb, 0, sizeof nb); emit_boxed(c, iargv[0], &nb);
-    emit_indent(g_pre, g_indent);
-    buf_printf(g_pre, "sp_RbVal _t%d = %s; SP_GC_ROOT_RBVAL(_t%d);\n",
-               tneedle, nb.p ? nb.p : "sp_box_nil()", tneedle);
-    free(nb.p);
+    tneedle = hold_operand_pre(c, iargv[0], TY_POLY, 1, tneedle, 1);
   }
 
   int te = ++g_tmp, tres = ++g_tmp, tv = ++g_tmp, tg = ++g_tmp;
@@ -6832,6 +6858,18 @@ static void emit_arg_or_default_fill(Compiler *c, Scope *m, int idx, int provide
         int th = ran_first_handle(provided);
         if (th >= 0) { buf_printf(out, "_t%d", th); return; }
       }
+      /* --share-strings: a value that ran first as the handle it hands on
+         (a route, `s << x`), or one that runs here as it */
+      if (repr_share_rule(c) && !late && arg_ran_first(provided, 0) && ran_first_handle(provided) >= 0) {
+        buf_printf(out, "_t%d", ran_first_handle(provided));
+        return;
+      }
+      if (!late && !arg_ran_first(provided, 0) && pk != NK_LocalVariableReadNode &&
+          pk != NK_InstanceVariableReadNode && !repr_static_read_kind(pk) &&
+          repr_of(c, provided).as_ty == TY_STRING && strbuf_value_carries(c, provided)) {
+        emit_strbuf_handle_of(c, provided, out);
+        return;
+      }
       if (!late && strbuf_slot_ref(c, provided, srefP, sizeof srefP)) {
         buf_puts(out, srefP);
         return;
@@ -6854,9 +6892,8 @@ static void emit_arg_or_default_fill(Compiler *c, Scope *m, int idx, int provide
          nil (`n = nil` beside a String, `def go(v) = run(v) { |t| ... }`) */
       if (repr_of(c, provided).kind == RK_BOXED) {
         int tpv = ++g_tmp;
-        buf_printf(out, "({ sp_RbVal _t%d = ", tpv);
-        emit_expr(c, provided, out);
-        buf_printf(out, "; SP_GC_ROOT_RBVAL(_t%d); sp_poly_nil_p(_t%d) ? NULL : %s(sp_poly_arg_str_chk(_t%d)); })", tpv, tpv,
+        buf_puts(out, "({ "); tpv = hold_operand(c, provided, TY_POLY, 0, tpv, 1, " ", out);
+        buf_printf(out, "sp_poly_nil_p(_t%d) ? NULL : %s(sp_poly_arg_str_chk(_t%d)); })", tpv,
                    p->dyn_handle && pk != NK_LocalVariableReadNode && pk != NK_InstanceVariableReadNode
                      ? "sp_String_new_fresh" : "sp_String_new_shared", tpv);
         return;
@@ -8374,6 +8411,82 @@ static int ran_first_temp(int node, int from, const char *text) {
 }
 
 /* See codegen_internal.h. */
+int head_held_temp(Compiler *c, int node) {
+  if (node < 0 || !repr_of(c, node).head_held) return -1;
+  /* the head roots a boxed temp and a heap pointer (needs_root), not the
+     Strings a by-value kind carries: such a temp holds nothing for an arm */
+  TyKind t = comp_ntype(c, node);
+  if (t != TY_POLY && !needs_root(t) && ty_gc_holds_refs(c, t)) return -1;
+  for (int i = g_n_argov - 1; i >= 0; i--) {
+    if (g_argov_node[i] != node) continue;
+    int h, n = 0;
+    return sscanf(g_argov_text[i], "_t%d%n", &h, &n) == 1 && g_argov_text[i][n] == '\0' ? h : -1;
+  }
+  return -1;
+}
+
+/* See codegen_internal.h. */
+int head_held_read(Compiler *c, int node, const char *text) {
+  int h = head_held_temp(c, node);
+  char ht[24];
+  if (h < 0 || !text) return -1;
+  snprintf(ht, sizeof ht, "_t%d", h);
+  return sp_streq(text, ht) ? h : -1;
+}
+
+/* A box that only wraps what its operand holds (an immediate, or a pointer
+   the operand's own temp roots): built from the head's temp, it needs no
+   root of its own. A struct, a value object or a fresh handle is a new
+   heap object. */
+static int box_wraps(ReprForm f) {
+  switch (f) {
+  case RF_PASS: case RF_INT: case RF_INT_NIL: case RF_FLT: case RF_FLT_NIL: case RF_BIGINT:
+  case RF_STR: case RF_BOOL: case RF_SYM: case RF_NULLABLE: case RF_NULLABLE_DYN:
+  case RF_STRBUF_HANDLE: case RF_PTR_ARRAY:
+    return 1;
+  default:
+    return 0;
+  }
+}
+
+/* See codegen_internal.h. */
+int head_held_box(Compiler *c, int node) {
+  return head_held_temp(c, node) >= 0 && box_wraps(repr_box_form(c, repr_of(c, node)));
+}
+
+/* See codegen_internal.h. */
+int hold_operand(Compiler *c, int node, TyKind ty, int boxed, int t, int root, const char *sep, Buf *b) {
+  /* a value with no C slot of its own (nil) is held boxed */
+  if (!boxed && (ty == TY_NIL || ty == TY_VOID || ty == TY_UNKNOWN)) { boxed = 1; ty = TY_POLY; }
+  Buf vb; memset(&vb, 0, sizeof vb);
+  if (boxed) emit_boxed(c, node, &vb); else emit_expr(c, node, &vb);
+  /* the head's temp, read unconverted: no copy, no second root */
+  int h = head_held_read(c, node, vb.p);
+  if (h >= 0) {
+    free(vb.p);
+    return h;
+  }
+  /* boxed from the head's temp, which roots what the box wraps */
+  int wrap = !root || (boxed && head_held_box(c, node));
+  if (boxed || ty == TY_POLY) buf_puts(b, "sp_RbVal"); else emit_ctype(c, ty, b);
+  buf_printf(b, " _t%d = %s;", t, vb.p ? vb.p : boxed ? "sp_box_nil()" : default_value_from_compiler(c, ty));
+  if (!wrap && (boxed || ty == TY_POLY)) buf_printf(b, " SP_GC_ROOT_RBVAL(_t%d);", t);
+  else if (!wrap && needs_root(ty)) buf_printf(b, " SP_GC_ROOT(_t%d);", t);
+  buf_puts(b, sep);
+  free(vb.p);
+  return t;
+}
+
+/* See codegen_internal.h. */
+int hold_operand_pre(Compiler *c, int node, TyKind ty, int boxed, int t, int root) {
+  Buf hb; memset(&hb, 0, sizeof hb);
+  t = hold_operand(c, node, ty, boxed, t, root, "\n", &hb);
+  if (hb.p) { emit_indent(g_pre, g_indent); buf_puts(g_pre, hb.p); }
+  free(hb.p);
+  return t;
+}
+
+/* See codegen_internal.h. */
 int read_rebound_by(Compiler *c, int x, int after) {
   const NodeTable *nt = c->nt;
   if (after < 0) return 0;
@@ -8620,11 +8733,7 @@ int emit_ds_hash_merge(Compiler *c, int kwh, int any_key, TyKind *out_type) {
       /* a key of another class, into the hash that takes any: a computed
          one runs ahead of its value, into a rooted temp */
       int kt = ++g_tmp;
-      Buf kb; memset(&kb, 0, sizeof kb);
-      emit_boxed(c, key, &kb);
-      emit_indent(g_pre, g_indent);
-      buf_printf(g_pre, "sp_RbVal _t%d = %s; SP_GC_ROOT_RBVAL(_t%d);\n", kt, kb.p ? kb.p : "sp_box_nil()", kt);
-      free(kb.p);
+      kt = hold_operand_pre(c, key, TY_POLY, 1, kt, 1);
       emit_boxed(c, v, &vb);
       emit_indent(g_pre, g_indent);
       buf_printf(g_pre, "sp_PolyPolyHash_set(_t%d, _t%d, %s);\n", mh, kt, vb.p ? vb.p : "sp_box_nil()");
@@ -8633,11 +8742,7 @@ int emit_ds_hash_merge(Compiler *c, int kwh, int any_key, TyKind *out_type) {
       /* a computed key into the Symbol-keyed hash a `**kwrest` collects:
          it has to answer a Symbol, as every key there does */
       int kt = ++g_tmp;
-      Buf kb; memset(&kb, 0, sizeof kb);
-      emit_boxed(c, key, &kb);
-      emit_indent(g_pre, g_indent);
-      buf_printf(g_pre, "sp_RbVal _t%d = %s; SP_GC_ROOT_RBVAL(_t%d);\n", kt, kb.p ? kb.p : "sp_box_nil()", kt);
-      free(kb.p);
+      kt = hold_operand_pre(c, key, TY_POLY, 1, kt, 1);
       emit_boxed(c, v, &vb);
       emit_indent(g_pre, g_indent);
       buf_printf(g_pre, "sp_SymPolyHash_set(_t%d, sp_poly_hkey_sym(_t%d), %s);\n", mh, kt, vb.p ? vb.p : "sp_box_nil()");
@@ -10774,6 +10879,17 @@ void emit_args_filled_argv(Compiler *c, int callee_idx, const int *argv, int arg
          with its handle taken, which a box or a handle slot binds
          (emit_arg_temp, ran_first_handle) */
       if (repr_write_share(c, unwrap_parens(c, argv[k]))) { emit_arg_temp(c, argv[k]); continue; }
+      /* --share-strings: a value that hands on a shared String's handle (a
+         route, `s << x`) into a parameter that is the handle runs as that
+         handle, which the binding takes (ran_first_handle) */
+      if (repr_of_slot(c, hp).kind == RK_STRBUF && at == TY_STRING && strbuf_value_carries(c, argv[k])) {
+        emit_strbuf_handle_of(c, argv[k], &hb);
+        emit_indent(g_pre, g_indent);
+        buf_printf(g_pre, "sp_String *_t%d = %s; SP_GC_ROOT(_t%d);\n", ht, hb.p, ht);
+        free(hb.p);
+        ran_first_bind(argv[k], ht, ht);
+        continue;
+      }
       emit_expr(c, argv[k], &hb);
       emit_indent(g_pre, g_indent);
       if (at == TY_POLY) {

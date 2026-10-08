@@ -1040,11 +1040,9 @@ int emit_call_method_obj_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, 
       self_tmp = ++g_tmp;
       self_kind = "SP_BM_SELF_OBJ";
       self_rooted = 1;
-      buf_printf(b, "({ sp_RbVal _t%d = ", tbr);
-      emit_boxed(c, recv, b);
-      buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); void *_t%d = (void *)sp_PolyArray_new(); SP_GC_ROOT(_t%d);"
-                    " sp_PolyArray_push((sp_PolyArray *)_t%d, _t%d); ",
-                 tbr, self_tmp, self_tmp, self_tmp, tbr);
+      buf_puts(b, "({ "); tbr = hold_operand(c, recv, TY_POLY, 1, tbr, 1, " ", b);
+      buf_printf(b, "void *_t%d = (void *)sp_PolyArray_new(); SP_GC_ROOT(_t%d);"
+                    " sp_PolyArray_push((sp_PolyArray *)_t%d, _t%d); ", self_tmp, self_tmp, self_tmp, tbr);
     }
     else if (self_receiver) {
       Repr rr2 = repr_of(c, recv);
@@ -1140,12 +1138,12 @@ int emit_call_method_obj_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, 
             if (oi == 0) {
               buf_printf(&g_proc_protos, "static sp_RbVal _bam_%sArray_get(void *a, sp_RbVal i);\n", bk);
               buf_printf(&g_procs, "static sp_RbVal _bam_%sArray_get(void *a, sp_RbVal i) {\n"
-                                   "  return %s(%s((sp_%sArray *)a, sp_poly_arg_i(i)));\n}\n", bk, boxret, getfn, bk);
+                                   "  return %s(%s((sp_%sArray *)a, sp_poly_arg_int_chk(i)));\n}\n", bk, boxret, getfn, bk);
             }
             else if (oi == 1) {
               buf_printf(&g_proc_protos, "static sp_RbVal _bam_%sArray_set(void *a, sp_RbVal i, sp_RbVal v);\n", bk);
               buf_printf(&g_procs, "static sp_RbVal _bam_%sArray_set(void *a, sp_RbVal i, sp_RbVal v) {\n"
-                                   "  sp_%sArray_%s((sp_%sArray *)a, sp_poly_arg_i(i), %s(v));\n  return v;\n}\n", bk, bk, ki == 0 ? "oset" : "set", bk, unbox);
+                                   "  sp_%sArray_%s((sp_%sArray *)a, sp_poly_arg_int_chk(i), %s(v));\n  return v;\n}\n", bk, bk, ki == 0 ? "oset" : "set", bk, unbox);
             }
             else {
               buf_printf(&g_proc_protos, "static sp_RbVal _bam_%sArray_push(void *a, sp_RbVal v);\n", bk);
@@ -1885,11 +1883,16 @@ int emit_call_poly_callable_arms(Compiler *c, int id, Buf *b, const NodeTable *n
           emit_expr(c, argv[k], &valb);
           g_pre = saved_pre;
           if (inner.p) buf_puts(g_pre, inner.p);
-          emit_indent(g_pre, g_indent);
-          if (storable) emit_ctype(c, at, g_pre); else buf_puts(g_pre, "sp_int");
-          buf_printf(g_pre, " _t%d = %s;\n", aptmp[k], valb.p ? valb.p : "0");
-          if (at == TY_POLY) { emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT_RBVAL(_t%d);\n", aptmp[k]); }
-          else if (proc_slot_is_ptr(at) || at == TY_PROC) { emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", aptmp[k]); }
+          /* one the nil arm's head ran is its temp already, rooted ahead of the call */
+          int held = storable ? head_held_read(c, argv[k], valb.p) : -1;
+          if (held >= 0) aptmp[k] = held;
+          else {
+            emit_indent(g_pre, g_indent);
+            if (storable) emit_ctype(c, at, g_pre); else buf_puts(g_pre, "sp_int");
+            buf_printf(g_pre, " _t%d = %s;\n", aptmp[k], valb.p ? valb.p : "0");
+            if (at == TY_POLY) { emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT_RBVAL(_t%d);\n", aptmp[k]); }
+            else if (proc_slot_is_ptr(at) || at == TY_PROC) { emit_indent(g_pre, g_indent); buf_printf(g_pre, "SP_GC_ROOT(_t%d);\n", aptmp[k]); }
+          }
           /* The publish belongs to THIS call, not to the statement above it:
              the side channel is one global array, and an argument that is
              itself a proc call writes it -- and its callee's prologue then
@@ -2107,11 +2110,7 @@ int emit_send_blind(Compiler *c, int id, Buf *b) {
       if (g_arm.send_split != id && g_n_argov < MAX_ARG_OVERRIDE &&
           repr_of(c, id).kind == RK_BOXED) {
         int tv = ++g_tmp;
-        Buf rb; memset(&rb, 0, sizeof rb);
-        emit_boxed(c, srcv, &rb);
-        emit_indent(g_pre, g_indent);
-        buf_printf(g_pre, "sp_RbVal _t%d = %s; SP_GC_ROOT_RBVAL(_t%d);\n", tv, rb.p ? rb.p : "sp_box_nil()", tv);
-        free(rb.p);
+        tv = hold_operand_pre(c, srcv, TY_POLY, 1, tv, 1);
         int sac = 0; const int *sav = call_args(c->nt, id, &sac);
         int sv_argov = g_n_argov;
         view_bind(srcv, "_t%d", tv);

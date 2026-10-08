@@ -29,6 +29,15 @@ TyKind ffi_spec_to_ty(const char *spec);
 int ffi_find_func(Compiler *c, const char *mod, const char *name);
 /* `Fiber.new { }`'s block, or -1 */
 int an_fiber_new_block(Compiler *c, int v);
+/* --share-strings: can boxed or untyped receiver r be a String
+   (analyze.c)? `lits` is the asker's: bound() says how a literal block or
+   a lambda of scope `scope` binds variable `name`: 0 not at all, 1 only as
+   Enumerator.new's yielder, 2 another way (analyze_share.c keeps it). */
+typedef struct PolyLits {
+  int (*bound)(void *ctx, Compiler *c, int scope, const char *name);
+  void *ctx;
+} PolyLits;
+int an_recv_may_be_string(Compiler *c, int r, const PolyLits *lits);
 int ffi_find_buf(Compiler *c, const char *mod, const char *name);
 int ffi_find_reader(Compiler *c, const char *mod, const char *name);
 int ffi_find_writer(Compiler *c, const char *mod, const char *name);
@@ -235,6 +244,12 @@ int object_reopen_answers(Compiler *c, const char *cls, int call_id, TyKind *out
 /* 1 if `id` is any proc-creating literal: a proc/lambda/Proc.new call (above)
    or a `->(){}` LambdaNode. */
 int is_proc_create(Compiler *c, int id);
+int local_proc_literal_param_of(Compiler *c, Scope *sc, const char *nm);
+int proc_literal_calls_in_sight(Compiler *c, int lit);
+int proc_lit_carrier(Compiler *c, int v, int lit);
+int widen_hash_arg_for_store(Compiler *c, int arg, TyKind hk, TyKind hv);
+int pivs_settle_hash_stores(Compiler *c);
+int pivs_hash_stores_widened(Compiler *c);
 int subtree_has_side_effect(Compiler *c, int id);   /* codegen_util.c */
 
 /* Shared cached local-write index (analyze_pass.c): bucket walk over

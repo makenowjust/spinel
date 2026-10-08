@@ -279,8 +279,13 @@ int emit_call_reflection_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, 
             if (class_implicit_responds(c, k, imp[l][i])) emit_responds_name(c, k, imp[l][i], tv, b);
         buf_puts(b, "0)) || ");
       }
-      buf_printf(b, "0)) || (_a%d && (!strcmp(_n%d, \"initialize\") || !strcmp(_n%d, \"initialize_copy\"))) || "
-                 "sp_poly_responds_builtin(_t%d, _n%d)", tv, tv, tv, tv, tv);
+      buf_printf(b, "0)) || (_a%d && (!strcmp(_n%d, \"initialize\") || !strcmp(_n%d, \"initialize_copy\")", tv, tv, tv);
+      for (int s = 0; s < c->nscopes; s++) {
+        const Scope *ts = &c->scopes[s];
+        if (ts->name && ts->def_node >= 0 && ts->class_id < 0 && !ts->is_cmethod && !ts->is_proc_form)
+          buf_printf(b, " || !strcmp(_n%d, \"%s\")", tv, ts->name);
+      }
+      buf_printf(b, ")) || sp_poly_responds_builtin(_t%d, _n%d)", tv, tv);
       /* a boxed IO: the methods IO reopenings add, by the handle's kind */
       for (int s2 = 0; s2 < c->nscopes; s2++) {
         Scope *ms = &c->scopes[s2];
@@ -1696,6 +1701,7 @@ int emit_call_new_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const c
     buf_printf(b, "} _t%d; })", rt2);
     g_ctor_blk_tmp = sv_cbt;
     free(atmp);
+    c->args_in_call = recv;
     return 1;
   }
 
@@ -1932,6 +1938,7 @@ int emit_call_new_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const c
     buf_printf(b, "} _t%d; })", rt2);
     g_ctor_blk_tmp = sv_cbt;
     free(atmp);
+    c->args_in_call = recv;
     return 1;
   }
 
@@ -2001,6 +2008,11 @@ int emit_call_new_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const c
              An ivar-bearing subclass needs its dedicated struct size (#2772). */
           const char *cn2 = class_ruby_name(c, ci); if (!cn2) cn2 = c->classes[ci].name;
           const char *par = exc_builtin_parent(c, ci);
+          /* a shared String message is held as its handle (exc_msg_handle) */
+          char mh[256];
+          int hm = !class_is_syserr(c, ci) && argc >= 1 && comp_ntype(c, argv[0]) == TY_STRING &&
+                   exc_msg_handle(c, argv[0], mh, sizeof mh);
+          if (hm) buf_printf(b, "((sp_%s *)sp_exc_attach_msg(", c->classes[ci].nivars > 0 ? c->classes[ci].c_name : "Exception");
           if (c->classes[ci].nivars > 0)
             buf_printf(b, "((sp_%s *)sp_exc_new_sub_sized(sizeof(sp_%s), \"%s\", ",
                        c->classes[ci].c_name, c->classes[ci].c_name, cn2);
@@ -2013,6 +2025,7 @@ int emit_call_new_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const c
           }
           else emit_exc_msg_arg(c, argc >= 1 ? argv[0] : -1, b);
           buf_puts(b, c->classes[ci].nivars > 0 ? "))" : ")");
+          if (hm) buf_printf(b, ", %s))", mh);
         }
         return 1;
       }
@@ -2052,9 +2065,13 @@ int emit_call_new_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const c
     }
     if (cn && is_exc_name(cn)) {
       if (emit_syserr_family_new(c, id, cn, argc, argv, b)) return 1;
+      char mh[256];
+      int hm = argc >= 1 && comp_ntype(c, argv[0]) == TY_STRING && exc_msg_handle(c, argv[0], mh, sizeof mh);
+      if (hm) buf_puts(b, "((sp_Exception *)sp_exc_attach_msg(");
       buf_printf(b, "sp_exc_new(\"%s\", ", cn);
       emit_exc_msg_arg(c, argc >= 1 ? argv[0] : -1, b);
       buf_puts(b, ")");
+      if (hm) buf_printf(b, ", %s))", mh);
       return 1;
     }
   }
@@ -2707,6 +2724,20 @@ int emit_call_class_value_arms(Compiler *c, int id, Buf *b, const NodeTable *nt,
            the arg's runtime class, so a non-literal boolean matches (#2966).
            (Only these builtins emit as a usable class value here.) */
         int o = ++g_tmp;
+        /* a builtin the program reopens (`class Numeric; def kb`) has a
+           program class entry, but its values carry the builtin's tag, not
+           that entry: test them as is_a? does */
+        if (is_builtin_reopen(rcn2)) {
+          char tv[24]; snprintf(tv, sizeof tv, "_t%d", o);
+          Buf tb = {0, 0, 0};
+          if (emit_poly_isa_test(c, rcn2, tv, 0, &tb) && tb.p) {
+            buf_printf(b, "({ sp_RbVal _t%d = ", o); emit_boxed(c, argv[0], b);
+            buf_printf(b, "; (sp_bool)(%s); })", tb.p);
+            free(tb.p);
+            return 1;
+          }
+          free(tb.p);
+        }
         buf_printf(b, "({ sp_Class _cl%d = ", _clt); emit_expr(c, recv, b);
         buf_printf(b, "; sp_RbVal _t%d = ", o); emit_boxed(c, argv[0], b);
         buf_printf(b, "; sp_poly_is_a(_t%d, _cl%d); })", o, _clt);
@@ -2819,11 +2850,7 @@ int emit_call_class_value_arms(Compiler *c, int id, Buf *b, const NodeTable *nt,
           }
           if (any_pf9) {
             int tsd = ++g_tmp;
-            Buf rb9; memset(&rb9, 0, sizeof rb9); emit_boxed(c, recv, &rb9);
-            emit_indent(g_pre, g_indent);
-            buf_printf(g_pre, "sp_RbVal _t%d = %s; SP_GC_ROOT_RBVAL(_t%d);\n",
-                       tsd, rb9.p ? rb9.p : "sp_box_nil()", tsd);
-            free(rb9.p);
+            tsd = hold_operand_pre(c, recv, TY_POLY, 1, tsd, 1);
             view_bind(recv, "_t%d", tsd);
             int vw = view_push(c, recv, TY_POLY);
             int svcv = g_cls_value_recv; g_cls_value_recv = recv;

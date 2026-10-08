@@ -631,9 +631,9 @@ no_gsub_enum:
       int nref = fmt ? parse_named_format(fmt, &rew, names, name_len, 64) : -1;
       if (nref >= 0) {
         int th = ++g_tmp, ta = ++g_tmp;
-        buf_printf(b, "({ sp_RbVal _t%d = ", th); emit_boxed(c, argv[0], b);
-        buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); sp_PolyArray *_t%d = sp_PolyArray_new();"
-                      " SP_GC_ROOT(_t%d); ", th, ta, ta);
+        buf_puts(b, "({ "); th = hold_operand(c, argv[0], TY_POLY, 1, th, 1, " ", b);
+        buf_printf(b, "sp_PolyArray *_t%d = sp_PolyArray_new();"
+                      " SP_GC_ROOT(_t%d); ", ta, ta);
         for (int k = 0; k < nref; k++) {
           char disp[132];  /* "{name}" / "<name>"; the name itself is < 128 */
           memcpy(disp, names[k], (size_t)name_len[k]); disp[name_len[k]] = 0;
@@ -1244,12 +1244,15 @@ int emit_string_handle_append(Compiler *c, int id, Buf *b, const char *name, int
       int chain_handle = sn && is_append_concat(sn) && rp.handle && rp.kind == RK_STRBUF;
       /* or a route over a handle (`(+s) << x`, --share-strings), which
          appends to the String it hands on */
-      if (chain_handle || strbuf_recv_handle(c, id, sr, sref0, sizeof sref0)) {
+      int hr0 = chain_handle ? 0 : strbuf_recv_handle(c, id, sr, sref0, sizeof sref0);
+      if (chain_handle || hr0) {
         int tb2 = ++g_tmp;
         buf_printf(b, "({ sp_String *_t%d = ", tb2);
         if (chain_handle) emit_expr(c, sr, b);
         else buf_puts(b, sref0);
         buf_puts(b, ";");
+        /* (prepend builds its text with sp_str_concat, which allocates) */
+        emit_route_recv_root(c, hr0, tb2, argc, is_append_concat(name) ? argv : NULL, TY_STRING, b);
         if (!is_append_concat(name)) {
           int ordered = 0;
           for (int j = 0; j < argc && argc > 1; j++)
@@ -1303,27 +1306,27 @@ int emit_op_poly_case_options(Compiler *c, const BopCtx *x, Buf *b) {
     if (plain_args) {
       const char *sfx = argc == 1 ? case_map_suffix(c, argc, argv) : "";
       int tv = ++g_tmp;
-      buf_printf(b, "({ sp_RbVal _t%d = ", tv); emit_expr(c, recv, b);
-      buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); ", tv);
+      buf_puts(b, "({ ");
+      tv = hold_operand(c, recv, TY_POLY, 0, tv, 1, " ", b);
       if (!*sfx) {
         int literals = 1;
         for (int i = 0; i < argc; i++)
           if (nt_kind(nt, argv[i]) != NK_SymbolNode) literals = 0;
-        int first = g_tmp + 1;
+        int *ta = calloc((size_t)argc + 1, sizeof *ta);
+        if (!ta) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
         if (!literals) {
+          int first = g_tmp + 1;
           g_tmp += argc;
-          for (int i = 0; i < argc; i++) {
-            buf_printf(b, "sp_RbVal _t%d = ", first + i); emit_boxed(c, argv[i], b);
-            buf_printf(b, "; SP_GC_ROOT_RBVAL(_t%d); ", first + i);
-          }
+          for (int i = 0; i < argc; i++) ta[i] = hold_operand(c, argv[i], TY_POLY, 1, first + i, 1, " ", b);
         }
         buf_printf(b, "if (_t%d.tag == SP_TAG_STR || _t%d.tag == SP_TAG_SYM || sp_poly_is_strbuf(_t%d)) "
                       "sp_case_opts_check(%d, (sp_RbVal[]){", tv, tv, tv, argc);
         for (int i = 0; i < argc; i++) {
           if (i) buf_puts(b, ", ");
           if (literals) emit_boxed(c, argv[i], b);
-          else buf_printf(b, "_t%d", first + i);
+          else buf_printf(b, "_t%d", ta[i]);
         }
+        free(ta);
         buf_printf(b, "}, %s, _t%d); ", x->op->arg, tv);
       }
       buf_printf(b, "sp_poly_case_conv(_t%d, sp_str_%s%s, \"%s\"); })", tv, name, sfx, name);
