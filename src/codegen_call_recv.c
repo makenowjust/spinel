@@ -11796,7 +11796,7 @@ int emit_range_call(Compiler *c, int id, Buf *b) {
       else if (sp_streq(name, "end") && argc == 0 && comp_ntype(c, id) == TY_FLOAT) {
         /* `x..Float::INFINITY`: the literal named the bound the int range can
            only record as "unbounded" -- answer the Float itself (#3670) */
-        buf_puts(b, "HUGE_VAL"); (void)t;
+        buf_puts(b, node_is_oint(c, id) ? "sp_ofloat_of(HUGE_VAL)" : "HUGE_VAL"); (void)t;   /* never nil */
       }
       else if (sp_streq(name, "end") && ({ int _rr = unwrap_parens(c, recv);
                nt_type(nt, _rr) && sp_streq(nt_type(nt, _rr), "RangeNode") &&
