@@ -293,7 +293,12 @@ int emit_call_poly_io_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
           same boxed handle. Not where a class method may own the name. */
        (argc == 0 && boxed_stat_pred(name) >= 0 && !class_method_named(c, name)))) {
     int iocand = 0;
-    for (int k = 0; k < c->nclasses && !iocand; k++) {
+    /* Inside the builtin default arm of a class-id switch (the call
+       re-entered by emit_poly_builtin_default) the value is none of the
+       classes that own the name, so none is a candidate: counting them
+       declined the arm, and a socket beside an SSLSocket that owns the
+       same name (write_nonblock, addr) raised NoMethodError. */
+    for (int k = 0; k < c->nclasses && !iocand && !g_poly_builtin_arm; k++) {
       /* a native class's methods are its declared bindings, which is the
          rule the poly dispatch counts candidates by: a Ruby-side def on it
          (IO::Buffer#write over an IO, #4474) is not a candidate there, so
@@ -681,12 +686,14 @@ int emit_call_poly_io_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
           int skw9 = repr_of(c, argv[0]).as_ty == TY_STRING;
           const char *wfn9 = skw9 ? "sp_sock_write_nb_bin" : "sp_sock_write_nb";
           int tw9 = ++g_tmp;
-          buf_printf(b, "sp_int _t%d = %s(_t%d, ", tw9, wfn9, tio2);
+          /* the runtime answers an sp_oint: nil where the write would block
+             (exception: false), which CRuby answers :wait_writable */
+          buf_printf(b, "sp_oint _t%d = %s(_t%d, ", tw9, wfn9, tio2);
           emit_to_s_expr(c, argv[0], b);
           if (no_exc9)
-            buf_printf(b, ", 0); _t%d < 0 ? sp_box_nil() : sp_box_int(_t%d); })", tw9, tw9);
+            buf_printf(b, ", 0); _t%d.nil ? sp_box_sym(sp_sym_intern(\"wait_writable\")) : sp_box_int(_t%d.v); })", tw9, tw9);
           else
-            buf_printf(b, ", 1); _t%d; })", tw9);
+            buf_printf(b, ", 1); _t%d.v; })", tw9);
         }
       }
       /* read takes (len, buf): a third argument was dropped and the read
