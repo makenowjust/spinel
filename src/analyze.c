@@ -27332,6 +27332,10 @@ static int nullable_int_elem_expr(Compiler *c, int v, int depth) {
                             sp_streq(nm, "flat_map") || sp_streq(nm, "collect_concat")))
       return nullable_int_value(c, tail);
     int rc = nt_ref(nt, v, "receiver");
+    /* the values of a typed Integer-valued Hash that may hold a nil (D3b-ii) */
+    if (nm && (sp_streq(nm, "values") || sp_streq(nm, "values_at") || sp_streq(nm, "fetch_values")) &&
+        hash_vals_nullable(c, rc))
+      return 1;
     /* `Array.new(n) { ... }` / `Array.new(n, v)` builds its elements here */
     if (nm && sp_streq(nm, "new") && rc >= 0 && nt_kind(nt, rc) == NK_ConstantReadNode) {
       const char *rn = nt_str(nt, rc, "name");
@@ -29425,7 +29429,12 @@ int nullable_int_value(Compiler *c, int v) {
         int sv2 = sav[san - 1];
         TyKind st2 = infer_type(c, sv2);
         return nt_kind(nt, sv2) == NK_NilNode || st2 == TY_POLY || st2 == TY_NIL || nullable_int_value(c, sv2);
-      } }
+      }
+      /* a present entry of a typed Integer-valued Hash that may hold a nil
+         value is that nil (D3b-ii): `[]`, fetch / dig / delete in every form */
+      if (sn && (sp_streq(sn, "[]") || sp_streq(sn, "fetch") || sp_streq(sn, "dig") || sp_streq(sn, "delete")) &&
+          hash_vals_nullable(c, nt_ref(nt, v, "receiver")))
+        return 1; }
     if (nn_index_inbounds(c, v)) return 0;
     /* a call that answers nothing (`$stdout.puts(x)`) is nil */
     { TyKind cvt = infer_type(c, v); if (cvt == TY_NIL || cvt == TY_VOID) return 1; }
@@ -30858,6 +30867,96 @@ static void sync_captured_nullable(Compiler *c) {
   }
 }
 
+/* The per-kind flag of a typed Integer-valued Hash kind, or NULL */
+static unsigned char *hash_vnil_flag(Compiler *c, TyKind t) {
+  return t == TY_STR_INT_HASH ? &c->hash_vnil_str_int : t == TY_INT_INT_HASH ? &c->hash_vnil_int_int : NULL;
+}
+int hash_vals_nullable(Compiler *c, int node) {
+  if (node < 0) return 0;
+  TyKind t = c->ntype && node < c->node_cap && c->ntype[node] != TY_UNKNOWN ? c->ntype[node] : infer_type(c, node);
+  unsigned char *f = hash_vnil_flag(c, t);
+  return f && *f;
+}
+/* A value a store hands an Integer-valued typed Hash that can be nil: a nil
+   literal, an Integer that can be nil, or a boxed value (the store unboxes
+   it with its nil) */
+static int hash_store_val_may_nil(Compiler *c, int v) {
+  if (v < 0) return 0;
+  if (nt_kind(c->nt, an_unparen(c->nt, v)) == NK_NilNode) return 1;
+  return nullable_int_value(c, v) || infer_type(c, v) == TY_POLY;
+}
+/* The block parameters a walk over a Hash binds its key and value to (-1:
+   none), as `each { |k, v| }` / `each_value { |v| }`; 0 for a call that is
+   no such walk, or binds the pair as one boxed parameter */
+static int hash_walk_params(Compiler *c, int call, int *pk, int *pv) {
+  const NodeTable *nt = c->nt;
+  const char *nm = nt_str(nt, call, "name");
+  int blk = nt_ref(nt, call, "block");
+  *pk = *pv = -1;
+  if (!nm || blk < 0 || nt_kind(nt, blk) != NK_BlockNode) return 0;
+  if (sp_streq(nm, "each_key")) { *pk = 0; return 1; }
+  if (sp_streq(nm, "each_value") || sp_streq(nm, "transform_values") || sp_streq(nm, "transform_values!")) { *pv = 0; return 1; }
+  static const char *const two[] = {
+    "each", "each_pair", "select", "filter", "reject", "map", "collect", "flat_map", "filter_map", "any?", "all?",
+    "none?", "count", "delete_if", "keep_if", "select!", "reject!", "filter!", "find", "detect", "find_all",
+    "partition", "group_by", "sum", "sort_by", "min_by", "max_by", "to_h", "each_with_index"
+  };
+  for (size_t i = 0; i < sizeof two / sizeof two[0]; i++) {
+    if (!sp_streq(nm, two[i])) continue;
+    if (!block_param_name(c, blk, 1)) return 0;   /* a solo parameter is the boxed pair */
+    if (sp_streq(nm, "each_with_index")) return 0;   /* |(k, v), i|: the pair is destructured */
+    *pk = 0; *pv = 1;
+    return 1;
+  }
+  return 0;
+}
+/* D3b-ii, W2: a store that can put a nil value into a typed Integer-valued
+   Hash marks that kind program-wide (a first cut: per kind, not per slot),
+   and every walk over a Hash of a marked kind binds its value parameter with
+   the nil (an oint slot). 1 when something changed. */
+static int mark_hash_nil_values(Compiler *c) {
+  const NodeTable *nt = c->nt;
+  int changed = 0;
+  NT_FOREACH_KIND(nt, NK_CallNode, id) {
+    const char *nm = nt_str(nt, id, "name");
+    if (!nm || (!sp_streq(nm, "[]=") && !sp_streq(nm, "store"))) continue;
+    unsigned char *f = hash_vnil_flag(c, infer_type(c, nt_ref(nt, id, "receiver")));
+    if (!f || *f) continue;
+    int a = nt_ref(nt, id, "arguments"), an = 0;
+    const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &an) : NULL;
+    if (av && an == 2 && hash_store_val_may_nil(c, av[1])) { *f = 1; changed = 1; }
+  }
+  /* `h[k] ||= v` / `h[k] &&= v` store v (an op-write stores the op's Integer) */
+  for (int q = 0; q < 2; q++) {
+    NodeKind wk = q ? NK_IndexAndWriteNode : NK_IndexOrWriteNode;
+    NT_FOREACH_KIND(nt, wk, id) {
+      unsigned char *f = hash_vnil_flag(c, infer_type(c, nt_ref(nt, id, "receiver")));
+      if (f && !*f && hash_store_val_may_nil(c, nt_ref(nt, id, "value"))) { *f = 1; changed = 1; }
+    }
+  }
+  if (!c->hash_vnil_str_int && !c->hash_vnil_int_int) return changed;
+  NT_FOREACH_KIND(nt, NK_CallNode, id) {
+    int recv = nt_ref(nt, id, "receiver"), pk, pv;
+    if (recv < 0 || !hash_vals_nullable(c, recv)) continue;
+    int blk = nt_ref(nt, id, "block");
+    int pis[2] = { -1, -1 };
+    const char *nm = nt_str(nt, id, "name");
+    /* merge / update with a block: |key, old, new| are both hashes' values */
+    if (nm && blk >= 0 && nt_kind(nt, blk) == NK_BlockNode &&
+        (sp_streq(nm, "merge") || sp_streq(nm, "merge!") || sp_streq(nm, "update"))) { pis[0] = 1; pis[1] = 2; }
+    else if (hash_walk_params(c, id, &pk, &pv) && pv >= 0) pis[0] = pv;
+    else continue;
+    Scope *bs = comp_scope_of(c, blk);
+    for (int q = 0; q < 2; q++) {
+      const char *pn = pis[q] >= 0 ? block_param_name(c, blk, pis[q]) : NULL;
+      LocalVar *plv = pn && bs ? scope_local(bs, pn) : NULL;
+      if (!plv || plv->type != TY_INT || plv->nullable_int) continue;
+      plv->nullable_int = 1; changed = 1;
+    }
+  }
+  return changed;
+}
+
 static void mark_nullable_int_locals(Compiler *c) {
   const NodeTable *nt = c->nt;
   /* A scalar local a read can reach before any write starts as its nil and
@@ -31110,6 +31209,9 @@ static void mark_nullable_int_locals(Compiler *c) {
         plv->nullable_int = 1; changed = 1;
       }
     }
+    /* a nil value stored into a typed Integer-valued Hash, and the walks that
+       bind it (D3b-ii) */
+    if (mark_hash_nil_values(c)) changed = 1;
     /* `x.then { |y| }`, `x.tap { |y| }`: the block parameter IS the receiver,
        nil included. A boxed receiver (every Integer local under
        --int-overflow=promote) is unboxed into it with its nil kept as the

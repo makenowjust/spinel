@@ -25,6 +25,7 @@
 #include "sp_string.h"  /* sp_String builder for sp_IntIntHash_inspect */
 #include "sp_re.h"      /* mrb_regexp_pattern for sp_re_gsub_str_str_hash/sub_str_str_hash */
 
+SP_NORETURN SP_COLD void sp_raise_hash_nil_value(void);
 void sp_StrIntHash_fin(void*p);
 void sp_StrIntHash_scan(void*p);
 sp_StrIntHash*sp_StrIntHash_new(void);
@@ -42,6 +43,16 @@ sp_int sp_StrIntHash_length(sp_StrIntHash*h);
 void sp_StrIntHash_delete(sp_StrIntHash*h,const char*k);
 sp_StrArray*sp_StrIntHash_keys(sp_StrIntHash*h);
 sp_IntArray*sp_StrIntHash_values(sp_StrIntHash*h);
+/* D3b-ii: a nil VALUE (sp_types.h `vnil`). set_nil stores one, oset either;
+   vget answers an entry's value with its nil (a miss: nil, no default);
+   delete_o answers the deleted value with its nil; has_nil_value is
+   value?(nil). _get raises on a nil value: the emitter uses it only where
+   it holds the hash nil-free. */
+void sp_StrIntHash_set_nil(sp_StrIntHash*h,const char*k);
+static inline void sp_StrIntHash_oset(sp_StrIntHash*h,const char*k,sp_oint v){if(SP_UNLIKELY(v.nil))sp_StrIntHash_set_nil(h,k);else sp_StrIntHash_set(h,k,v.v);}
+sp_oint sp_StrIntHash_vget(sp_StrIntHash*h,const char*k);
+sp_bool sp_StrIntHash_has_nil_value(sp_StrIntHash*h);
+sp_oint sp_StrIntHash_delete_o(sp_StrIntHash*h,const char*k);
 sp_StrIntHash*sp_StrIntHash_merge(sp_StrIntHash*a,sp_StrIntHash*b);
 void sp_StrIntHash_update(sp_StrIntHash*a,sp_StrIntHash*b);
 sp_StrIntHash*sp_StrIntHash_dup(sp_StrIntHash*h);
@@ -91,6 +102,12 @@ sp_IntIntHash*sp_IntIntHash_new_with_default(sp_int d);
 void sp_IntIntHash_grow(sp_IntIntHash*h);
 void sp_IntIntHash_set(sp_IntIntHash*h,sp_int k,sp_int v);
 sp_int sp_IntIntHash_get(sp_IntIntHash*h,sp_int k);
+/* D3b-ii: as the sp_StrIntHash ones above */
+void sp_IntIntHash_set_nil(sp_IntIntHash*h,sp_int k);
+static inline void sp_IntIntHash_oset(sp_IntIntHash*h,sp_int k,sp_oint v){if(SP_UNLIKELY(v.nil))sp_IntIntHash_set_nil(h,k);else sp_IntIntHash_set(h,k,v.v);}
+sp_oint sp_IntIntHash_vget(sp_IntIntHash*h,sp_int k);
+sp_bool sp_IntIntHash_has_nil_value(sp_IntIntHash*h);
+sp_oint sp_IntIntHash_delete_o(sp_IntIntHash*h,sp_int k);
 sp_IntIntHash*sp_IntIntHash_merge(sp_IntIntHash*a,sp_IntIntHash*b);
 void sp_IntIntHash_update(sp_IntIntHash*a,sp_IntIntHash*b);
 void sp_IntIntHash_delete(sp_IntIntHash*h,sp_int k);

@@ -25964,7 +25964,7 @@ void emit_call_body(Compiler *c, int id, Buf *b) {
 
   if (emit_call_bigint_arms(c, id, b, nt, name, recv, argc, argv, rt)) return;
 
-  if (emit_call_store_value_arms(c, b, nt, name, recv, argc, argv, rt)) return;
+  if (emit_call_store_value_arms(c, id, b, nt, name, recv, argc, argv, rt)) return;
 
   if (emit_call_print_arms(c, b, nt, name, recv, argc, argv, rt)) return;
 

@@ -790,10 +790,14 @@ void sp_poly_hash_merge_into(sp_RbVal dst, sp_RbVal src)
       case SP_BUILTIN_STR_INT_HASH:
         if (k.tag == SP_TAG_STR && v.tag == SP_TAG_INT)
           sp_StrIntHash_set((sp_StrIntHash *)dst.v.p, k.v.s, v.v.i);
+        else if (k.tag == SP_TAG_STR && v.tag == SP_TAG_NIL)   /* a nil value is kept (D3b-ii) */
+          sp_StrIntHash_set_nil((sp_StrIntHash *)dst.v.p, k.v.s);
         break;
       case SP_BUILTIN_INT_INT_HASH:
         if (k.tag == SP_TAG_INT && v.tag == SP_TAG_INT)
           sp_IntIntHash_set((sp_IntIntHash *)dst.v.p, k.v.i, v.v.i);
+        else if (k.tag == SP_TAG_INT && v.tag == SP_TAG_NIL)   /* a nil value is kept (D3b-ii) */
+          sp_IntIntHash_set_nil((sp_IntIntHash *)dst.v.p, k.v.i);
         break;
       case SP_BUILTIN_INT_STR_HASH:
         if (k.tag == SP_TAG_INT && v.tag == SP_TAG_STR)
@@ -1075,10 +1079,10 @@ void sp_poly_hash_writeback_ex(sp_RbVal orig, sp_PolyPolyHash *work, int with_de
     sp_int j = work->order[i];
     sp_RbVal k = work->keys[j], v = work->vals[j];
     switch (orig.cls_id) {
-      case SP_BUILTIN_STR_INT_HASH: sp_hash_wb_want(k, SP_TAG_STR, 0, "key", "String keys"); sp_hash_wb_want(v, SP_TAG_INT, 0, "value", "Integer values"); break;
+      case SP_BUILTIN_STR_INT_HASH: sp_hash_wb_want(k, SP_TAG_STR, 0, "key", "String keys"); sp_hash_wb_want(v, SP_TAG_INT, 1, "value", "Integer values"); break;   /* a nil value is kept (D3b-ii) */
       case SP_BUILTIN_STR_STR_HASH: sp_hash_wb_want(k, SP_TAG_STR, 0, "key", "String keys"); sp_hash_wb_want(v, SP_TAG_STR, 1, "value", "String values"); break;
       case SP_BUILTIN_INT_STR_HASH: sp_hash_wb_want(k, SP_TAG_INT, 0, "key", "Integer keys"); sp_hash_wb_want(v, SP_TAG_STR, 1, "value", "String values"); break;
-      case SP_BUILTIN_INT_INT_HASH: sp_hash_wb_want(k, SP_TAG_INT, 0, "key", "Integer keys"); sp_hash_wb_want(v, SP_TAG_INT, 0, "value", "Integer values"); break;
+      case SP_BUILTIN_INT_INT_HASH: sp_hash_wb_want(k, SP_TAG_INT, 0, "key", "Integer keys"); sp_hash_wb_want(v, SP_TAG_INT, 1, "value", "Integer values"); break;
       case SP_BUILTIN_STR_POLY_HASH: sp_hash_wb_want(k, SP_TAG_STR, 0, "key", "String keys"); break;
       case SP_BUILTIN_SYM_POLY_HASH: sp_hash_wb_want(k, SP_TAG_SYM, 0, "key", "Symbol keys"); break;
       default: return;
@@ -1110,7 +1114,7 @@ void sp_poly_hash_writeback_ex(sp_RbVal orig, sp_PolyPolyHash *work, int with_de
       if (with_default) { h->default_nil = work->default_v.tag == SP_TAG_NIL; h->default_v = h->default_nil ? 0 : sp_poly_to_i(work->default_v); }
       for (sp_int i = 0; i < work->len; i++) {
         sp_int j = work->order[i];
-        sp_StrIntHash_set(h, sp_poly_to_s(work->keys[j]), sp_poly_hval_i(work->vals[j]));
+        sp_StrIntHash_oset(h, sp_poly_to_s(work->keys[j]), sp_poly_hval_oi(work->vals[j]));
       }
       return;
     }
@@ -1140,7 +1144,7 @@ void sp_poly_hash_writeback_ex(sp_RbVal orig, sp_PolyPolyHash *work, int with_de
       if (with_default) { h->default_nil = work->default_v.tag == SP_TAG_NIL; h->default_v = h->default_nil ? 0 : sp_poly_to_i(work->default_v); }
       for (sp_int i = 0; i < work->len; i++) {
         sp_int j = work->order[i];
-        sp_IntIntHash_set(h, sp_poly_to_i(work->keys[j]), sp_poly_hval_i(work->vals[j]));
+        sp_IntIntHash_oset(h, sp_poly_to_i(work->keys[j]), sp_poly_hval_oi(work->vals[j]));
       }
       return;
     }
