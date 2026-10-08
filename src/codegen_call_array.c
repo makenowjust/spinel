@@ -1800,7 +1800,7 @@ int emit_call_append_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, cons
 }
 
 /* an element store in expression position, answering the stored value: Fiber[:k] = v, and h[k] = v / a[i] = v */
-int emit_call_store_value_arms(Compiler *c, Buf *b, const NodeTable *nt, const char *name, int recv, int argc, const int *argv, TyKind rt) {
+int emit_call_store_value_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv, int argc, const int *argv, TyKind rt) {
   /* Fiber[:k] = v (expression form) */
   if (sp_streq(name, "[]=") && argc == 2 && recv >= 0) {
     if (fiber_storage_recv(nt, recv)) {
@@ -1848,6 +1848,14 @@ int emit_call_store_value_arms(Compiler *c, Buf *b, const NodeTable *nt, const c
            fires before either is read (#3256). */
         int coerce_unknown_val = (!is_poly_hash && vt == TY_UNKNOWN &&
                                   (hvt == TY_STRING || hvt == TY_INT || hvt == TY_FLOAT));
+        /* a value that can be nil into an Integer-valued typed hash: held as
+           its oint and stored with its nil (_oset, DESIGN.md D3b-ii); the
+           expression answers it in the form node_is_oint gives the store */
+        int voset = !is_poly_hash && hvt == TY_INT && !unbox_poly_val &&
+                    (nt_kind(c->nt, argv[1]) == NK_NilNode || node_has_oint_form(c, argv[1]));
+        /* ...and a boxed one, which may hold nil at run time: unboxed with its
+           nil, and the expression answers it boxed again */
+        int vboxo = unbox_poly_val && hvt == TY_INT;
         buf_puts(b, "({ ");
         /* A receiver or a key that can allocate goes into a temp ahead of the
            value, in Ruby's order; the receiver is rooted when the key or the
@@ -1874,11 +1882,13 @@ int emit_call_store_value_arms(Compiler *c, Buf *b, const NodeTable *nt, const c
            default block, whose value is what the read answers): boxed once,
            so the store and the expression's value are the one handle */
         if (is_poly_hash && repr_of(c, argv[1]).handle) decl_type = TY_POLY;
-        emit_ctype(c, decl_type, b);
+        if (voset || vboxo) buf_puts(b, "sp_oint"); else emit_ctype(c, decl_type, b);
         buf_printf(b, " _t%d = ", tv);
         /* When the slot is poly but the rhs has no type yet (e.g. `{}`),
            emit a boxed value so the sp_RbVal temp initialises correctly. */
-        if (unbox_poly_val) {
+        if (voset) emit_oint_expr(c, argv[1], TY_INT, b);
+        else if (vboxo) { buf_puts(b, "sp_poly_hval_oi("); emit_expr(c, argv[1], b); buf_puts(b, ")"); }
+        else if (unbox_poly_val) {
           const char *fn = hvt == TY_STRING ? "sp_poly_hval_s" : hvt == TY_INT ? "sp_poly_hval_i" : "sp_poly_hval_f";
           buf_printf(b, "%s(", fn); emit_expr(c, argv[1], b); buf_puts(b, ")");
         }
@@ -1887,11 +1897,18 @@ int emit_call_store_value_arms(Compiler *c, Buf *b, const NodeTable *nt, const c
         else emit_expr(c, argv[1], b);
         buf_puts(b, "; if (sp_gc_is_frozen("); emit_node_or_tmp(c, recv, tr, b);
         buf_puts(b, ")) sp_raise_frozen_hash_at("); emit_node_or_tmp(c, recv, tr, b); buf_printf(b, ", %s); ", hash_box_cls(rt));
-        buf_printf(b, "sp_%sHash_set(", hn); emit_node_or_tmp(c, recv, tr, b); buf_puts(b, ", ");
+        buf_printf(b, "sp_%sHash_%s(", hn, voset || vboxo ? "oset" : "set"); emit_node_or_tmp(c, recv, tr, b); buf_puts(b, ", ");
         if (tk >= 0) buf_printf(b, "_t%d", tk);
         else emit_hash_store_key(c, argv[0], rt, b);  /* unbox a poly key to the hash's key type */
         buf_puts(b, ", ");
         char tvn[32]; snprintf(tvn, sizeof tvn, "_t%d", tv);
+        if (voset || vboxo) {
+          buf_printf(b, "_t%d); ", tv);
+          if (vboxo) buf_printf(b, "sp_box_oint(_t%d); })", tv);
+          else if (node_is_oint(c, id)) buf_printf(b, "_t%d; })", tv);
+          else buf_printf(b, "sp_oint_arg(_t%d); })", tv);
+          return 1;
+        }
         if (is_poly_hash && decl_type != TY_POLY) {
           emit_boxed_text(c, decl_type, tvn, b);
         }

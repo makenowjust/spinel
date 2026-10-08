@@ -281,12 +281,14 @@ typedef struct{const char**data;sp_int len;sp_int cap;sp_int frozen;const char*i
 /* ---- Non-poly typed hashes ---- */
 /* An Integer-valued hash's miss answers its default: `default_nil` set is a
    hash with no default ({} / {k=>v}), whose miss is nil; clear, default_v is
-   Hash.new(N)'s N. Keys and values are never nil in a typed hash (a hash
-   that stores one is poly). */
-typedef struct{const char**keys;sp_int*vals;const char**order;sp_int len;sp_int cap;sp_int mask;sp_int default_v;sp_bool default_nil;}sp_StrIntHash;
+   Hash.new(N)'s N. Keys are never nil in a typed hash (a hash that stores
+   one is poly). A nil VALUE is a bit in `vnil`, one per slot (the
+   open-addressing index), NULL until the first nil value is stored; the
+   slot's vals word is 0 then (DESIGN.md D3b-ii). */
+typedef struct{const char**keys;sp_int*vals;const char**order;sp_int len;sp_int cap;sp_int mask;sp_int default_v;sp_bool default_nil;uint64_t*vnil;}sp_StrIntHash;
 typedef struct{const char**keys;const char**vals;const char**order;sp_int len;sp_int cap;sp_int mask;const char*default_v;}sp_StrStrHash;
 typedef struct{sp_int*keys;const char**vals;sp_int*order;sp_bool*used;sp_int len;sp_int cap;sp_int mask;const char*default_v;}sp_IntStrHash;
-typedef struct{sp_int*keys;sp_int*vals;sp_int*order;sp_bool*used;sp_int len;sp_int cap;sp_int mask;sp_int default_v;sp_bool default_nil;}sp_IntIntHash;
+typedef struct{sp_int*keys;sp_int*vals;sp_int*order;sp_bool*used;sp_int len;sp_int cap;sp_int mask;sp_int default_v;sp_bool default_nil;uint64_t*vnil;}sp_IntIntHash;
 
 /* Signal table bound (0..64): shared by the trap state in the generated TU
    and the trap machinery in lib/sp_cold.c. */
