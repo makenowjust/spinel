@@ -6556,6 +6556,9 @@ static int emit_poly_builtin_default_at(Compiler *c, int id, int recv, const cha
   }
   int va = view_push_arm(id, g_prbd_skip, 1);
   int vw = view_push(c, id, bt);
+  /* a boxed slot takes an Integer / Float answer that can be nil (a boxed
+     Enumerator's size) boxed with its nil */
+  int box_o = ret == TY_POLY && oint_kind(bt) && node_is_oint(c, id);
   /* Under the silent probe the dynamic-send arms use: a builtin emitter
      that refuses these arguments (Array#join given a user object, a
      separator no String can be) drops the arm, not the build -- the call
@@ -6574,7 +6577,11 @@ static int emit_poly_builtin_default_at(Compiler *c, int id, int recv, const cha
      asks must not record its unpinned (poly) answer over the pin, or the
      emitter answers boxed and the arm boxes it again */
   int sv_pin = an_pin_node(id);
-  if (setjmp(g_unsup_recover) == 0) { if (slot_o) emit_oint_expr(c, id, ret, nb); else emit_expr(c, id, nb); }
+  if (setjmp(g_unsup_recover) == 0) {
+    if (slot_o) emit_oint_expr(c, id, ret, nb);
+    else if (box_o) emit_oint_expr(c, id, bt, nb);
+    else emit_expr(c, id, nb);
+  }
   else ok = 0;
   an_pin_node(sv_pin);
   emit_state_release(sv_state, !ok);
@@ -6588,7 +6595,8 @@ static int emit_poly_builtin_default_at(Compiler *c, int id, int recv, const cha
   if (ok && nb->p) {
     /* a raise token is no value to box: the test below reads it bare */
     int is_raise = strncmp(nb->p, "sp_raise_", 9) == 0;
-    if (ret == TY_POLY && bt != TY_POLY && !is_raise) emit_boxed_text(c, bt, nb->p, &ib);
+    if (box_o && !is_raise) buf_printf(&ib, "%s(%s)", bt == TY_FLOAT ? "sp_box_ofloat" : "sp_box_oint", nb->p);
+    else if (ret == TY_POLY && bt != TY_POLY && !is_raise) emit_boxed_text(c, bt, nb->p, &ib);
     else buf_puts(&ib, nb->p);
   }
   free(nb->p); free(nb);
