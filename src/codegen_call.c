@@ -5824,6 +5824,10 @@ void abi_sig_token(TyKind t, char *out) {
    two registers with its own cast; the typed-array and user-object kinds
    are pointers boxed by their recorded class. */
 static int method_bm_ret_kind(Compiler *c, Scope *m, int *out_ret) {
+  /* an sp_oint return (method_ret_is_oint) is a by-value struct: a cast to
+     an sp_int return reads its .v and boxes a nil as 0, so it declines to
+     the thunk, which calls the target as an oint */
+  if (m->ret == TY_INT && method_ret_is_oint(m)) return 0;
   if (m->ret == TY_INT) { if (out_ret) *out_ret = 0; /* SP_BM_RET_INT */ }
   else if (m->ret == TY_STRING) { if (out_ret) *out_ret = 1; /* SP_BM_RET_STR */ }
   else if (m->ret == TY_BIGINT) { if (out_ret) *out_ret = 10; /* SP_BM_RET_BIGINT */ }
@@ -5920,6 +5924,8 @@ int method_legacy_int_abi(Compiler *c, int mi, int recv_bound, char *out_sig, si
       pt = lv ? lv->type : TY_INT;
       if (pt == TY_POLY || pt == TY_FLOAT || proc_slot_via_poly(c, pt)) return 0;
       if (!proc_slot_is_direct(pt) && pt != TY_PROC && !proc_slot_is_ptr(pt)) return 0;
+      /* an sp_oint parameter is two registers; the cast supplies one */
+      if (lv && slot_is_oint(lv)) return 0;
     }
     abi_sig_token(pt, out_sig + off);
     off += 8;
