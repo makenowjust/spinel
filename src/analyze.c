@@ -27201,6 +27201,8 @@ static int elem_miss_call(Compiler *c, int v) {
      only as type evidence (desugar_masgn_store_evidence): it is no more a
      miss there than it is for the assignment's local and ivar targets */
   if (nt_int(nt, v, "masgn_elem", LLONG_MIN) != LLONG_MIN) return 0;
+  /* Integer#[] reads a bit (0 or 1), never nil */
+  if (sp_streq(nm, "[]")) { TyKind brt = infer_type(c, recv); if (brt == TY_INT || brt == TY_BIGINT) return 0; }
   if (sp_streq(nm, "[]") || sp_streq(nm, "at") || sp_streq(nm, "slice"))
     return argc == 1 && blk < 0 && !const_array_index_in_range(c, recv, argv[0]);
   if (sp_streq(nm, "dig")) return argc >= 1;
