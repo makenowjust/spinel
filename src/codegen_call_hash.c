@@ -546,6 +546,11 @@ int emit_op_hash_set_default(Compiler *c, const BopCtx *x, Buf *b) {
   else if (rt == TY_STR_INT_HASH || rt == TY_INT_INT_HASH) {
     /* a nil default is the hash's default_nil flag, not a value */
     if (is_nil) buf_printf(b, " if (_t%d) { _t%d->default_nil = 1; _t%d->default_v = 0; }", t, t, t);
+    /* a boxed default that is nil is the flag too (the comment above: nil
+       is kept); any other is unboxed as before */
+    else if (held && at == TY_POLY)
+      buf_printf(b, " if (_t%d) { _t%d->default_nil = %s.tag == SP_TAG_NIL; _t%d->default_v = _t%d->default_nil ? 0 : sp_poly_hval_i(%s); }",
+                 t, t, av, t, t, av);
     else {
       buf_printf(b, " if (_t%d) { _t%d->default_nil = 0; _t%d->default_v = ", t, t, t);
       if (held && at == TY_POLY) buf_printf(b, "sp_poly_hval_i(%s)", av);
