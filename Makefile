@@ -1028,9 +1028,14 @@ re-lit-test: $(SPINEL)
 # the first `spinel:` line its .expected holds. gate-props runs it. A
 # compile whose inference ran to its round cap fails too: the answer can be
 # right all the same, and where the rounds stopped decided what was emitted.
-share-strings-test: $(SPINEL)
+SHARE_TESTS := $(wildcard test/share/*.rb)
+ifneq ($(FFI_AVAILABLE),yes)
+SHARE_TESTS := $(filter-out test/share/share_strings_fiddle.rb,$(SHARE_TESTS))
+endif
+share-strings-test: $(SPINEL) $(SP_RT_LIB) $(SP_RT_MT_LIB) $(BUNDLED_NATIVE_OBJS) $(BUNDLED_NATIVE_MT_OBJS)
 	@tmp=$$(mktemp -d "$${TMPDIR:-/tmp}/spinel-share.XXXXXX"); ok=1; \
-	for t in test/share/*.rb test/share_strings_*.rb test/nullable_string_identity.rb test/widened_param_reaches_its_callee.rb test/reader_or_assign_frozen.rb $$(cat test/share/reject.list); do \
+	for t in $(SHARE_TESTS) test/share_strings_*.rb test/nullable_string_identity.rb test/widened_param_reaches_its_callee.rb test/reader_or_assign_frozen.rb \
+	  test/builtins_inject.rb test/issue_3174.rb test/set_string_member_frozen.rb $$(cat test/share/reject.list); do \
 	  e="$$t.expected"; case "$$t" in test/reject/*) e="test/share/reject/$${t##*/}.expected";; esac; \
 	  if $(SPINEL) --share-strings "$$t" -o "$$tmp/b" >"$$tmp/out" 2>&1; then \
 	    ! grep -q 'did not converge' "$$tmp/out" || { echo "share-strings-test: FAIL $$t (the inference fixpoint ran to its round cap)"; ok=0; }; \
@@ -2251,6 +2256,7 @@ threaded-render-test: $(SPINEL) $(SP_RT_LIB) $(SP_RT_MT_LIB) $(SPINEL_TIMEOUT)
 GC_MINOR_TESTS := test/reopened_builtin_kwrest_keys.rb \
                   test/share_strings_argument_conversion_root.rb \
                   test/reader_or_assign_frozen.rb \
+                  test/share_strings_boxed_cond_order.rb \
                   test/string_unary_plus_nested.rb \
                   test/hash_store_boxed_origins.rb \
                   test/hash_store_boxed_chain.rb \
@@ -3323,6 +3329,14 @@ rubyspec: $(SPINEL) $(RUBYSPEC_DIR)/.pinned
 # rows than the list: an example that never ran is not one that still passes.
 # Unchecked, an extractor crash left most examples unextracted, run.sh bailed
 # out, and the missing results file counted as zero regressions.
+#
+# RUBYSPEC_SHARD=k/n: keep only every n-th expected-PASS example per suite
+# (0-indexed offset k-1), so a CI fork can split the slowest suite (language)
+# across parallel jobs while every shard still runs its own "every listed
+# example ran" and "no regression" check. Running k=1..n covers the full
+# list exactly once, so the shards' combined result is the same gate the
+# unsharded target runs. Unset (the default), the whole list runs, byte-for-byte
+# as before.
 rubyspec-gate: $(SPINEL) $(RUBYSPEC_DIR)/.pinned
 	@ok=1; for d in $(RUBYSPEC_SUITES); do \
 	  nm=$$(echo $$d | tr / -); \
@@ -3331,6 +3345,20 @@ rubyspec-gate: $(SPINEL) $(RUBYSPEC_DIR)/.pinned
 	    echo "rubyspec-gate[$$d]: extraction failed"; ok=0; continue; \
 	  fi; \
 	  awk -F'\t' '$$2=="PASS"{print $$1}' tools/rubyspec/expectations/$$nm.tsv > build/rubyspec-gate-$$nm.list; \
+	  if [ -n "$(RUBYSPEC_SHARD)" ]; then \
+	    case "$(RUBYSPEC_SHARD)" in \
+	      [1-9]*/[1-9]*) ;; \
+	      *) echo "rubyspec-gate: RUBYSPEC_SHARD must be k/n with positive integers, got '$(RUBYSPEC_SHARD)'" >&2; exit 1;; \
+	    esac; \
+	    k=$$(echo $(RUBYSPEC_SHARD) | cut -d/ -f1); n=$$(echo $(RUBYSPEC_SHARD) | cut -d/ -f2); \
+	    case "$$k" in *[!0-9]*) echo "rubyspec-gate: RUBYSPEC_SHARD's k must be a plain integer, got '$$k'" >&2; exit 1;; esac; \
+	    case "$$n" in *[!0-9]*) echo "rubyspec-gate: RUBYSPEC_SHARD's n must be a plain integer, got '$$n'" >&2; exit 1;; esac; \
+	    if [ "$$k" -lt 1 ] || [ "$$n" -lt 1 ] || [ "$$k" -gt "$$n" ]; then \
+	      echo "rubyspec-gate: RUBYSPEC_SHARD=$$k/$$n must have 1 <= k <= n" >&2; exit 1; \
+	    fi; \
+	    awk -v k="$$k" -v n="$$n" '(NR-1)%n==k-1' build/rubyspec-gate-$$nm.list > build/rubyspec-gate-$$nm.list.shard; \
+	    mv build/rubyspec-gate-$$nm.list.shard build/rubyspec-gate-$$nm.list; \
+	  fi; \
 	  if ! RUBYSPEC_ONLY=build/rubyspec-gate-$$nm.list RUBYSPEC_GATE=1 \
 	    REF_RUBY="$(REF_RUBY)" bash tools/rubyspec/run.sh build/rubyspec-ex-$$nm build/rubyspec-gate-$$nm.tsv >/dev/null; then \
 	    echo "rubyspec-gate[$$d]: run.sh failed"; ok=0; continue; \
