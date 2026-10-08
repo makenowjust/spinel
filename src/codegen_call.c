@@ -14205,6 +14205,28 @@ static int emit_array_arith_call(Compiler *c, int id, Buf *b) {
     }
     if (eff_res == TY_INT) {
       int isdivmod = is_div_or_mod(name);
+      /* `a[i] + j % u`: the right operand, a value with no side effect and
+         no nil, runs first, into its own temp. A nil element raises only at
+         the operator, after the right operand ran (CRuby reads a[i], runs
+         j % u, then calls +), which the checked read in front of it did
+         not keep; and computed ahead of the read's branch, the right
+         operand is no part of the store-to-load chain through the element
+         (clang folded its extension into the overflow-checked add there) */
+      NodeKind rk0 = recv >= 0 ? nt_kind(c->nt, recv) : NK_NONE;
+      NodeKind ak0 = nt_kind(c->nt, argv[0]);
+      if (rk0 == NK_CallNode && nt_str(c->nt, recv, "name") && sp_streq(nt_str(c->nt, recv, "name"), "[]") &&
+          comp_ntype(c, nt_ref(c->nt, recv, "receiver")) == TY_INT_ARRAY &&
+          ak0 != NK_IntegerNode && ak0 != NK_LocalVariableReadNode &&
+          !subtree_has_side_effect(c, argv[0]) &&
+          (isdivmod || !(oint_kind(comp_ntype(c, argv[0])) && cmp_operand_may_be_nil(c, argv[0])))) {
+        int trr = ++g_tmp;
+        buf_printf(b, "({ sp_int _t%d = ", trr);
+        if (isdivmod) emit_int_divisor(c, argv[0], b); else emit_scalar_operand(c, argv[0], "0", b);
+        buf_printf(b, "; %s(", int_arith_fn(name));
+        emit_scalar_operand_op(c, recv, name, b);
+        buf_printf(b, ", _t%d); })", trr);
+        return 1;
+      }
       buf_printf(b, "%s(", int_arith_fn(name));
       /* a receiver that can be nil raises NoMethodError naming the operator;
          a nil right operand the coercion TypeError */
