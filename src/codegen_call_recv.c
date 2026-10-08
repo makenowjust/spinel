@@ -8184,6 +8184,11 @@ static int emit_scalar_recv_arms(Compiler *c, int id, Buf *b, const NodeTable *n
     /* the arms that read only the receiver text and the arguments:
        builtin-op rows (builtin_ops.c) */
     else if (emit_builtin_op_text(c, id, recv, TY_STRING, name, r, b)) ;
+    /* a length is never nil: lifted where the call's slot holds its nil (a
+       site of a call whose other receivers can answer nil) */
+    else if (is_len_alias(name) && argc == 0 && node_is_oint(c, id)) {
+      buf_puts(b, "sp_oint_of("); str_arms_case_search(c, b, nt, name, recv, argc, argv, r); buf_puts(b, ")");
+    }
     else if (str_arms_case_search(c, b, nt, name, recv, argc, argv, r)) ;
     else if (str_arms_slice_encode(c, id, b, name, recv, argc, argv, r)) ;
     else if (sp_streq(name, "delete") && argc == 0) { buf_printf(b, "(%s)", r); { *out = 1; return 1; } }
