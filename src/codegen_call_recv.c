@@ -792,6 +792,7 @@ static const char *repl_hash_to_s_fn(Repr hr) {
 }
 static int str_arms_convert(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv, int argc, const int *argv, TyKind a0, const char *r);
 static void emit_blk_value_as(Compiler *c, int blk, TyKind vt, Buf *b);
+static void emit_blk_value_as_o(Compiler *c, int blk, TyKind vt, Buf *b);
 
 /* An operand whose evaluation cannot allocate: a local's read or a scalar
    literal. */
@@ -2023,16 +2024,22 @@ else {
     buf_printf(b, " sp_int _t%d = sp_%sArray_length(_t%d);", tn, k, ta);
     buf_printf(b, " sp_int _t%d = _t%d < 0 ? _t%d + _t%d : _t%d;", tnorm, ti, ti, tn, ti);
     buf_printf(b, " (_t%d >= 0 && _t%d < _t%d) ? ", tnorm, tnorm, tn);
+    /* an Integer or Float answer whose slot holds its nil (a default that
+       can be nil: `fetch(*idx)`) is the oint: the element lifted, the
+       default in its own oint form */
+    int fo = !boxed && oint_kind(et) && node_is_oint(c, id);
     if (boxed) {
       char getexpr[96];
       snprintf(getexpr, sizeof getexpr, "sp_%sArray_get(_t%d, _t%d)", k, ta, tnorm);
       emit_boxed_text(c, et, getexpr, b);
     }
+    else if (fo) buf_printf(b, "%s(sp_%sArray_get(_t%d, _t%d))", oint_of(et), k, ta, tnorm);
     else buf_printf(b, "sp_%sArray_get(_t%d, _t%d)", k, ta, tnorm);
     buf_puts(b, " :");
     if (argc == 2) {
       buf_puts(b, " ");
       if (boxed && repr_of(c, argv[1]).kind != RK_BOXED) emit_boxed(c, argv[1], b);
+      else if (fo) emit_oint_expr(c, argv[1], et, b);
       else emit_expr(c, argv[1], b);
       buf_puts(b, "; })");
     }
@@ -2042,7 +2049,8 @@ else {
       buf_puts(b, " ({ ");
       emit_fetch_blk_param(c, id, blk, TY_INT, ti, b);
       /* the value with its setup after the parameter is bound, as above */
-      emit_blk_value_as(c, blk, boxed ? TY_POLY : et, b);
+      if (fo) emit_blk_value_as_o(c, blk, et, b);
+      else emit_blk_value_as(c, blk, boxed ? TY_POLY : et, b);
       buf_puts(b, "; }); })");
     }
     else {
@@ -2050,7 +2058,7 @@ else {
       buf_printf(b, " (sp_raise_cls(\"IndexError\","
                     " sp_sprintf(\"index %%lld outside of array bounds: -%%lld...%%lld\","
                     " (long long)_t%d, (long long)_t%d, (long long)_t%d)), %s); })",
-                 ti, tn, tn, boxed ? "sp_box_nil()" : default_value_from_compiler(c, et));
+                 ti, tn, tn, boxed ? "sp_box_nil()" : fo ? oint_nil(et) : default_value_from_compiler(c, et));
     }
     { *out = 1; return 1; }
   }
@@ -5064,6 +5072,29 @@ static void emit_blk_value_as(Compiler *c, int blk, TyKind vt, Buf *b) {
   g_pre = saved_pre;
   if (tv.p) buf_puts(b, tv.p);
   else if (bval < 0) buf_puts(b, vt == TY_POLY ? "sp_box_nil()" : default_value_from_compiler(c, vt));
+  free(tv.p);
+  buf_puts(b, "; })");
+}
+
+/* emit_blk_value_as in the oint form of an Integer or Float kind vt: a
+   block value that can be nil (`fetch(i) { nil }`) answers it rather than
+   raising at the unwrap. A body with a `next` keeps the plain form, lifted. */
+static void emit_blk_value_as_o(Compiler *c, int blk, TyKind vt, Buf *b) {
+  const NodeTable *nt = c->nt;
+  int bbody = nt_ref(nt, blk, "body");
+  if (fold_body_has_next(c, bbody)) {
+    buf_printf(b, "%s(", oint_of(vt)); emit_blk_value_as(c, blk, vt, b); buf_puts(b, ")");
+    return;
+  }
+  int bn = 0; const int *bb = bbody >= 0 ? nt_arr(nt, bbody, "body", &bn) : NULL;
+  int bval = bn > 0 ? bb[bn - 1] : -1;
+  buf_puts(b, "({ ");
+  Buf *saved_pre = g_pre; g_pre = b;
+  for (int k = 0; k < bn - 1; k++) emit_stmt(c, bb[k], b, 0);
+  Buf tv; memset(&tv, 0, sizeof tv);
+  if (bval >= 0) emit_oint_expr(c, bval, vt, &tv);
+  g_pre = saved_pre;
+  buf_puts(b, tv.p ? tv.p : oint_nil(vt));
   free(tv.p);
   buf_puts(b, "; })");
 }
