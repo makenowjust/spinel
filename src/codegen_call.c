@@ -619,11 +619,15 @@ void emit_re_opts_flags(Compiler *c, int argc, const int *argv, Buf *out) {
   if (argc < 2) { buf_puts(out, "0"); return; }
   TyKind ot = comp_ntype(c, argv[1]);
   if (ot == TY_INT) {
-    /* a NILABLE Integer slot: `Regexp.new(s, h[:missing])` is CRuby's nil
-       options, i.e. none. The sentinel is INTPTR_MIN, whose low three bits
-       are clear, so sp_re_opts_to_flags already translates it to no flags --
-       it must reach that arm rather than be refused as a conversion (#4896). */
-    buf_puts(out, "sp_re_opts_to_flags("); emit_int_expr_nilable(c, argv[1], out); buf_puts(out, ")");
+    /* an Integer that can be nil: `Regexp.new(s, h[:missing])` is CRuby's
+       nil options, i.e. none (#4896) -- its nil read as no flags, never
+       unwrapped as a conversion */
+    if (node_has_oint_form(c, argv[1])) {
+      int to = ++g_tmp;
+      buf_printf(out, "({ sp_oint _t%d = ", to); emit_oint_expr(c, argv[1], TY_INT, out);
+      buf_printf(out, "; _t%d.nil ? 0u : sp_re_opts_to_flags(_t%d.v); })", to, to);
+    }
+    else { buf_puts(out, "sp_re_opts_to_flags("); emit_int_expr_nilable(c, argv[1], out); buf_puts(out, ")"); }
   }
   else if (ot == TY_BOOL) {
     /* internal RE_FLAG_IGNORECASE == 1 */
@@ -1639,8 +1643,18 @@ int emit_poly_cls_value_prearm(Compiler *c, int id, const char *name, int argc,
     if (tr < 0 || method_is_void(ks)) { buf_puts(b, cb.p ? cb.p : ""); pconv = PC_VOID; }
     else {
       buf_printf(b, "_t%d = ", tr);
-      if (ret == TY_POLY && kr != TY_POLY) { emit_boxed_text(c, kr, cb.p ? cb.p : "", b); pconv = PC_BOX; }
+      /* a class method answering its oint (method_ret_is_oint): boxed with
+         its nil, unwrapped into a plain slot; a plain answer is lifted into a
+         slot that holds the oint */
+      int ko = oint_kind(kr) && method_ret_is_oint(ks), so = oint_kind(ret) && node_is_oint(c, id);
+      if (ret == TY_POLY && kr != TY_POLY) {
+        if (ko) buf_printf(b, "%s(%s)", oint_box(kr), cb.p ? cb.p : "");
+        else emit_boxed_text(c, kr, cb.p ? cb.p : "", b);
+        pconv = PC_BOX;
+      }
       else if (ret != TY_POLY && kr == TY_POLY) { emit_unbox_text(c, ret, cb.p ? cb.p : "", b); pconv = PC_UNBOX; }
+      else if (ko && !so) buf_printf(b, "%s(%s)", oint_arg(kr), cb.p ? cb.p : "");
+      else if (!ko && so && oint_kind(kr)) buf_printf(b, "%s(%s)", oint_of(kr), cb.p ? cb.p : "");
       else buf_puts(b, cb.p ? cb.p : "");
     }
     buf_puts(b, "; break;");
@@ -18126,6 +18140,9 @@ int emit_unresolved_call(Compiler *c, int id, Buf *b) {
             TyKind mret = (TyKind)c->scopes[ksym].ret;
             if (apre.p && apre.p[0]) { buf_puts(b, "({ "); buf_puts(b, apre.p); }
             if (mret == TY_POLY) buf_puts(b, cb.p ? cb.p : "sp_box_nil()");
+            /* a class method answering its oint is boxed with its nil */
+            else if (oint_kind(mret) && method_ret_is_oint(&c->scopes[ksym]))
+              buf_printf(b, "%s(%s)", oint_box(mret), cb.p ? cb.p : oint_nil(mret));
             else emit_boxed_text(c, mret, cb.p ? cb.p : "0", b);
             if (g_plan_check) {
               pa_resume(pa_frame);
