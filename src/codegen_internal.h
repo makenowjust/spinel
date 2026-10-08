@@ -2146,8 +2146,6 @@ void emit_slot_ctype(Compiler *c, const LocalVar *lv, Buf *b);
 /* instance ivar iv of class cid has a bit in iv__nilbits; its bit index;
    the number of uint64_t words the class's iv__nilbits has (0: none) */
 int ivar_has_nilbit(Compiler *c, int cid, int iv);
-int class_root(Compiler *c, int cid);
-extern int g_nf_self;   /* a nil-free body: self's nil-bit tests are 0 (emit_method's versioning) */
 int ivar_nilbit_index(Compiler *c, int cid, int iv);
 int class_nilbit_words(Compiler *c, int cid);
 /* the C text of the bit: `((o)->iv__nilbits[w] & (1ULL << k))`-style

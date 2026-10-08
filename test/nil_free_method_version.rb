@@ -1,7 +1,6 @@
-# A method reading many fields that are nil until `reset` writes them runs
-# a version without the fields' nil tests while none of them is nil, and
-# its own body otherwise: before reset it raises as CRuby does, after it
-# answers the plain arithmetic.
+# A method reading many fields that are nil until `reset` writes them:
+# before reset it raises as CRuby does, after it answers the plain
+# arithmetic, and a field set back to nil raises again.
 class Osc
   def initialize(rate)
     @rate = rate
