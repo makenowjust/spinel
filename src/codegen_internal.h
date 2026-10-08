@@ -144,6 +144,30 @@ void emit_strbuf_handle_of(Compiler *c, int v, Buf *b);
    handed (`+s`, `String(s)`, `s.then { |x| x }`) hands on: 1, or 0 with
    nothing emitted */
 int emit_strbuf_route(Compiler *c, int v, Buf *b);
+/* --share-strings: does codegen hand the shared handle along flow kind
+   `kind` (ShareFlowKind) at node site, from value node v?
+   The routes codegen carries, which the seal requires of every flow into a
+   shared class (repr_share_flows_check). fm holds the answers asked once
+   per method, for one check. */
+typedef struct {
+  signed char *yield_ok;   /* per method scope: its yields carry the handle
+                              (1), do not (0), not asked yet (-1) */
+} StrbufFlowMemo;
+int strbuf_flow_carries(Compiler *c, StrbufFlowMemo *fm, int kind, int site, int v);
+int strbuf_call_picks_up(Compiler *c, int id);
+int strbuf_self_reader_handle(Compiler *c, int id);
+int strbuf_call_reads_handle(Compiler *c, int recv);
+const NativeMethod *strbuf_native_answer(Compiler *c, int n);
+int emit_bang_self_handle(Compiler *c, int v, Buf *b);
+int strbuf_chain_over_handle(Compiler *c, int v);
+int strbuf_narrowed_box_mutator(Compiler *c, int id);
+void emit_narrowed_box_mutator(Compiler *c, int id, Buf *b);
+int strbuf_opwrite_handle(Compiler *c, int v, char *out, size_t cap);
+int strbuf_poly_to_s(Compiler *c, int v);
+int strbuf_boxed_local(Compiler *c, int v);
+/* Is a variable holding the shared handle (or, --share-strings, a route or
+   a box) one of the values conditional v can hand over (codegen_stmt.c)? */
+int strbuf_cond_has_handle_leaf(Compiler *c, int v, int depth);
 /* String mutator id's receiver recv as the handle it changes: 1 a slot, 2
    a route (read once, nil raising NoMethodError for id), 0 neither
    (codegen_stmt.c) */
@@ -1916,12 +1940,13 @@ int emit_output_call(Compiler *c, int id, Buf *b, int indent);
 void system_refuse_unsupported(Compiler *c, int id, const int *argv, int argc);
 int emit_system_splat(Compiler *c, const int *argv, int argc, Buf *b);
 int int_value_plain(Compiler *c, int node);   /* an Integer that can never be the nil sentinel */
+int int_local_plain(Compiler *c, LocalVar *lv, const char *name);
 int emit_output_spilled(Compiler *c, const char *name, int argc, const int *argv, Buf *b, int indent);
 void emit_assign(Compiler *c, int id, Buf *b, int indent);
 void emit_op_assign(Compiler *c, int id, Buf *b, int indent);
 int emit_array_op_assign(Compiler *c, const char *lval, TyKind t, const char *op, int v, Buf *b);
 int emit_scalar_op_assign(Compiler *c, const char *lval, TyKind t, const char *op,
-                          int v, int capture, int lhs_nil, Buf *b);
+                          int v, int capture, int lhs_nil, int lhs_plain, Buf *b);
 const char *poly_pow_fn(TyKind rt);   /* sp_poly_pow, or sp_poly_pow_recv for a receiver that may lack `**` */
 int emit_poly_op_assign(Compiler *c, const char *lval, const char *op, int v,
                         int capture, Buf *b);

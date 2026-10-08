@@ -15338,7 +15338,8 @@ static const int *sb_store_nodes(Compiler *c, const char *nm, Scope *sc, int *n)
         const char *wn = nt_str(nt, id, "name");
         if (wn) sb_store_add(wn, comp_scope_of(c, id), id);
       }
-      else if (k == NK_CallNode) {
+      /* `(h[k] ||= []) << s` hands out the element it reads or stores */
+      else if (k == NK_CallNode || k == NK_IndexOrWriteNode) {
         int r = nt_ref(nt, id, "receiver");
         if (r < 0 || nt_kind(nt, r) != NK_LocalVariableReadNode) continue;
         const char *rn = nt_str(nt, r, "name");
@@ -15629,6 +15630,19 @@ static int strbuf_demand_container_stores_here(Compiler *c, const char *contn, S
       int nst = strbuf_container_store_values(c, sns0[si], contn, conts, 1, &stores);
       for (int e3 = 0; e3 < nst; e3++)
         changed |= strbuf_store_leaf(c, stores.v[e3], depth, mode);
+      /* the strings sit a level in (`h.each { |k, vs| vs.each(&:strip!) }`)
+         and a push lands in an element the container hands out (`h[k] <<
+         s`): the push stores into that inner container */
+      int orw = nt_kind(nt, sns0[si]) == NK_IndexOrWriteNode;
+      if (orw) changed |= strbuf_store_leaf(c, nt_ref(nt, sns0[si], "value"), depth, mode);
+      if (mode >= SB_NEST1 && nst == 0 && (orw || container_elem_read_p(nt, sns0[si]))) {
+        int p = comp_recv_parent(c, sns0[si]);
+        StoreVals inner = {0};
+        int ni = p >= 0 && nt_kind(nt, p) == NK_CallNode ? array_call_store_values(c, p, &inner) : 0;
+        for (int e3 = 0; e3 < ni; e3++)
+          changed |= strbuf_store_leaf(c, inner.v[e3], depth, mode - SB_NEST1);
+        free(inner.v);
+      }
       /* `a.insert(0, s)`: a store this walk does not take (sa_refuse) */
       for (int k = 0, e; mode == SB_DEMAND && nst == 0 && (e = sa_unseen_element(c, sns0[si], k)) != -2; k++)
         if (e >= 0) sa_refuse_element(c, e, sns0[si]);
@@ -17340,6 +17354,53 @@ static int share_ret_typed_str_literal(Compiler *c, int mi) {
 static int share_pattern_method(const Scope *m) {
   return m->class_id >= 0 && m->name && (sp_streq(m->name, "deconstruct") || sp_streq(m->name, "deconstruct_keys"));
 }
+/* A literal argument a user method's parameters name the elements of: the
+   argument itself, the operand of `*`, or that of a `**` among keyword
+   arguments. Its stores carry the handles where the rule shares them. */
+static int share_demand_literal_arg(Compiler *c, int a) {
+  const NodeTable *nt = c->nt;
+  NodeKind k = nt_kind(nt, a);
+  if (k == NK_KeywordHashNode) {
+    int changed = 0, en = 0;
+    const int *el = nt_arr(nt, a, "elements", &en);
+    for (int e = 0; e < en; e++)
+      if (nt_kind(nt, el[e]) == NK_AssocSplatNode)
+        changed |= share_demand_literal_arg(c, nt_ref(nt, el[e], "value"));
+    return changed;
+  }
+  if (k == NK_SplatNode) a = nt_ref(nt, a, "expression");
+  a = unwrap_parens(c, a);
+  if (a < 0 || (nt_kind(nt, a) != NK_ArrayNode && nt_kind(nt, a) != NK_HashNode) ||
+      !share_node_elems_share(c, a))
+    return 0;
+  return strbuf_container_source_walk(c, a, 0, SB_DEMAND);
+}
+/* A user method's rest parameter holds its callers' arguments as its
+   elements: where the rule shares them, each argument the call's layout
+   leaves to the rest (`def first(*items)`, `first(self.text)`) is stored as
+   its handle, as a literal's element is. A splat's elements are the
+   literal's (share_demand_literal_arg) or the run time's. */
+static int share_demand_rest_args(Compiler *c, int mi, const int *argv, int argc) {
+  const NodeTable *nt = c->nt;
+  Scope *m = &c->scopes[mi];
+  if (m->rest_idx < 0 || !m->pnames[m->rest_idx]) return 0;
+  LocalVar *rv = scope_local(m, m->pnames[m->rest_idx]);
+  if (!rv || !repr_str_elems_share(c, share_local_holder(c, mi, (int)(rv - m->locals)))) return 0;
+  int kwh = nt_kind(nt, argv[argc - 1]) == NK_KeywordHashNode ? argv[argc - 1] : -1;
+  int pos_argc = kwh >= 0 ? argc - 1 : argc;
+  for (int k = 0; k < pos_argc; k++)
+    if (nt_kind(nt, argv[k]) == NK_SplatNode || nt_kind(nt, argv[k]) == NK_ForwardingArgumentsNode) return 0;
+  ArgLayout L;
+  arg_layout(c, m, argv, pos_argc, kwh, 0, &L);
+  int changed = 0;
+  for (int k = 0; k < pos_argc; k++) {
+    int bound = 0;
+    for (int j = 0; j < L.n && !bound; j++) bound = L.from[j] == ARG_NODE && L.arg[j] == k;
+    if (!bound) changed |= strbuf_store_leaf(c, argv[k], 0, SB_DEMAND);
+  }
+  arg_layout_free(&L);
+  return changed;
+}
 static int share_default_apply(Compiler *c, int in_fixpoint) {
   if (!c->share_strings) return 0;
   if (in_fixpoint) {
@@ -17492,6 +17553,20 @@ static int share_default_apply(Compiler *c, int in_fixpoint) {
     }
     if (share_node_elems_share(c, r))
       changed |= strbuf_container_source_walk(c, r, 0, mode);
+  }
+  /* The same holds when a literal is passed to a user method, whole or
+     spread with `*` or `**`, and for each argument a rest parameter
+     gathers: the callee's parameters name those elements again. A literal
+     handed to a builtin (`p [a, b]`), a proc or a block's value is left as
+     before. The call's targets are the plan's, as the facts read them. */
+  NT_FOREACH_KIND(c->nt, NK_CallNode, n) {
+    int args = nt_ref(c->nt, n, "arguments"), an = 0;
+    const int *av = args >= 0 ? nt_arr(c->nt, args, "arguments", &an) : NULL;
+    if (an == 0) continue;
+    int mis[CPT_MAX], cnt = cplan_targets(c, n, mis, CPT_MAX);
+    if (cnt <= 0) continue;
+    for (int i = 0; i < an; i++) changed |= share_demand_literal_arg(c, av[i]);
+    for (int t = 0; t < cnt; t++) changed |= share_demand_rest_args(c, mis[t], av, an);
   }
   return changed;
 }
@@ -18076,11 +18151,14 @@ static void an_returns_by_scope(Compiler *c, int **start, int **list) {
 /* fresh_ok (--share-strings, the pickup's own ask): a tail answering a
    fresh String (share_node_fresh) is admitted too, counted in fresh */
 typedef struct { int reads, nils, fresh_ok, fresh; } TailCount;
-static int an_tail_is_shared_handle(Compiler *c, int node, int nil_ok, TailCount *n);
-static int an_stmts_tail_shared(Compiler *c, int st, int nil_ok, TailCount *tc) {
+typedef struct { unsigned char *st; int *ret_start, *ret_list; } RetHandles;
+static int an_tail_handle(Compiler *c, RetHandles *R, int n, TailCount *tc);
+static int an_tail_is_shared_handle(Compiler *c, int node, int nil_ok, TailCount *n, RetHandles *R);
+static int an_stmts_tail_shared(Compiler *c, int st, int nil_ok, TailCount *tc, RetHandles *R) {
   int n = 0; const int *b = st >= 0 && nt_kind(c->nt, st) == NK_StatementsNode ? nt_arr(c->nt, st, "body", &n) : NULL;
   if (st < 0) { tc->nils += nil_ok; return nil_ok; }
-  return n > 0 && an_tail_is_shared_handle(c, b[n - 1], nil_ok, tc);
+  return n > 0 && (R ? an_tail_handle(c, R, b[n - 1], tc)
+                      : an_tail_is_shared_handle(c, b[n - 1], nil_ok, tc, NULL));
 }
 /* A method tail that publishes the shared handle it answers, for the
    deep-return pickup (an_returns_shared_handles): a shared slot's read
@@ -18091,19 +18169,37 @@ static int an_stmts_tail_shared(Compiler *c, int st, int nil_ok, TailCount *tc) 
    too, and an arm that answers it, written or missing (`x if f`, `if f;
    else; x; end`, `begin; x; rescue; nil; end`), counted in tc->nils: nil
    publishes nothing, and the pickup reads the call's nil as nil whatever
-   an earlier read published (an_tail_answers_nil). */
-static int an_tail_is_shared_handle(Compiler *c, int node, int nil_ok, TailCount *tc) {
+   an earlier read published (an_tail_answers_nil). With the settled return
+   analysis, each arm asks an_tail_handle too: a call can publish the handle,
+   and its method's active-visit guard bounds recursive arms. Case/when and
+   case/in share the same arm list for the pickup and settled return walk. */
+static int an_tail_is_shared_handle(Compiler *c, int node, int nil_ok, TailCount *tc, RetHandles *R) {
   const NodeTable *nt = c->nt;
   NodeKind k = node >= 0 ? nt_kind(nt, node) : NK_NONE;
   if (c->share_strings && k == NK_NilNode) { tc->nils += nil_ok; return nil_ok; }
-  if (c->share_strings && k == NK_ParenthesesNode) return an_stmts_tail_shared(c, nt_ref(nt, node, "body"), nil_ok, tc);
+  if (c->share_strings && k == NK_ParenthesesNode) return an_stmts_tail_shared(c, nt_ref(nt, node, "body"), nil_ok, tc, R);
   if (c->share_strings && k == NK_BeginNode) {
     /* the body's value is the begin's only when no else follows it */
     int be = nt_ref(nt, node, "else_clause");
-    if (be < 0 && !an_stmts_tail_shared(c, nt_ref(nt, node, "statements"), nil_ok, tc)) return 0;
+    if (be < 0 && !an_stmts_tail_shared(c, nt_ref(nt, node, "statements"), nil_ok, tc, R)) return 0;
     for (int rc = nt_ref(nt, node, "rescue_clause"); rc >= 0; rc = nt_ref(nt, rc, "subsequent"))
-      if (!an_stmts_tail_shared(c, nt_ref(nt, rc, "statements"), nil_ok, tc)) return 0;
-    return be < 0 || an_stmts_tail_shared(c, nt_ref(nt, be, "statements"), nil_ok, tc);
+      if (!an_stmts_tail_shared(c, nt_ref(nt, rc, "statements"), nil_ok, tc, R)) return 0;
+    return be < 0 || an_stmts_tail_shared(c, nt_ref(nt, be, "statements"), nil_ok, tc, R);
+  }
+  if (c->share_strings && (k == NK_CaseNode || k == NK_CaseMatchNode)) {
+    int n = 0; const int *arms = nt_arr(nt, node, "conditions", &n);
+    for (int i = 0; i < n; i++)
+      if (!an_stmts_tail_shared(c, nt_ref(nt, arms[i], "statements"), nil_ok, tc, R)) return 0;
+    int el = nt_ref(nt, node, "else_clause");
+    /* Without an else, a failed pattern raises NoMatchingPatternError. */
+    if (el < 0 && k == NK_CaseMatchNode) return 1;
+    return an_stmts_tail_shared(c, el >= 0 ? nt_ref(nt, el, "statements") : -1, nil_ok, tc, R);
+  }
+  if (R && k == NK_ReturnNode) {
+    int args = nt_ref(nt, node, "arguments"), n = 0;
+    const int *v = args >= 0 ? nt_arr(nt, args, "arguments", &n) : NULL;
+    if (n == 0) { tc->nils += nil_ok; return nil_ok; }
+    return n == 1 && an_tail_handle(c, R, v[0], tc);
   }
   if (!c->share_strings || (k != NK_IfNode && k != NK_UnlessNode)) {
     int ok = an_arg_is_shared_handle(c, node);
@@ -18112,10 +18208,10 @@ static int an_tail_is_shared_handle(Compiler *c, int node, int nil_ok, TailCount
     return ok;
   }
   int el = nt_ref(nt, node, k == NK_IfNode ? "subsequent" : "else_clause");
-  if (!an_stmts_tail_shared(c, nt_ref(nt, node, "statements"), nil_ok, tc)) return 0;
+  if (!an_stmts_tail_shared(c, nt_ref(nt, node, "statements"), nil_ok, tc, R)) return 0;
   if (el < 0) { tc->nils += nil_ok; return nil_ok; }
-  return nt_kind(nt, el) == NK_ElseNode ? an_stmts_tail_shared(c, nt_ref(nt, el, "statements"), nil_ok, tc)
-                                        : an_tail_is_shared_handle(c, el, nil_ok, tc);
+  return nt_kind(nt, el) == NK_ElseNode ? an_stmts_tail_shared(c, nt_ref(nt, el, "statements"), nil_ok, tc, R)
+                                        : R ? an_tail_handle(c, R, el, tc) : an_tail_is_shared_handle(c, el, nil_ok, tc, NULL);
 }
 /* Can method mi answer nil, through its last statement or a `return`? The
    same walk that admitted the tail for the pickup counts its nils, so the
@@ -18124,7 +18220,7 @@ static int an_tail_is_shared_handle(Compiler *c, int node, int nil_ok, TailCount
    nils are the ones an_returns_shared_handles counted. */
 int an_tail_answers_nil(Compiler *c, int mi) {
   TailCount tc = { 0, 0 };
-  return !an_tail_is_shared_handle(c, scope_body_last(c, mi), 1, &tc) || tc.nils > 0 ||
+  return !an_tail_is_shared_handle(c, scope_body_last(c, mi), 1, &tc, NULL) || tc.nils > 0 ||
          c->scopes[mi].ret_nil_pickup;
 }
 /* Does every return tail of method mi3 (the implicit one and each `return`)
@@ -18140,7 +18236,7 @@ static int an_returns_shared_handles(Compiler *c, int mi3, const int *ret_start,
   int lastT = scope_body_last(c, mi3);
   if (lastT >= 0) {
     *saw = 1;
-    if (!an_tail_is_shared_handle(c, lastT, 1, &tc)) ok = 0;
+    if (!an_tail_is_shared_handle(c, lastT, 1, &tc, NULL)) ok = 0;
   }
   int lnils = tc.nils, rnils = 0;
   for (int r = ret_start[mi3]; ok && r < ret_start[mi3 + 1]; r++) {
@@ -18150,7 +18246,7 @@ static int an_returns_shared_handles(Compiler *c, int mi3, const int *ret_start,
     *saw = 1;
     if (rn2 > 1 || (rn2 == 0 && !c->share_strings)) ok = 0;
     else if (rn2 == 0) rnils++;
-    else if (!an_tail_is_shared_handle(c, rv2[0], c->share_strings, &tc)) ok = 0;
+    else if (!an_tail_is_shared_handle(c, rv2[0], c->share_strings, &tc, NULL)) ok = 0;
   }
   rnils += tc.nils - lnils;
   if (c->share_strings && *saw && !tc.reads) ok = 0;
@@ -18220,7 +18316,6 @@ static int an_mutated_handle_returns(Compiler *c, int **ret_start, int **ret_lis
    no handle to pick up. Each method is decided once, its tail calls'
    targets first (a cycle answers no). */
 enum { RH_UNSEEN, RH_BUSY, RH_YES, RH_NO };
-typedef struct { unsigned char *st; int *ret_start, *ret_list; } RetHandles;
 static int an_ret_handle(Compiler *c, RetHandles *R, int mi);
 /* Does tail node n answer a shared handle it publishes last: a handle's
    read, or a call or `super` whose every target method does? A nullable
@@ -18229,7 +18324,7 @@ static int an_ret_handle(Compiler *c, RetHandles *R, int mi);
 static int an_tail_handle(Compiler *c, RetHandles *R, int n, TailCount *tc) {
   const NodeTable *nt = c->nt;
   if (an_arg_is_shared_handle(c, n)) return 1;
-  if (an_tail_is_shared_handle(c, n, 1, tc)) return 1;
+  if (an_tail_is_shared_handle(c, n, 1, tc, R)) return 1;
   NodeKind k = n >= 0 ? nt_kind(nt, n) : NK_NONE;
   if (k == NK_SuperNode || k == NK_ForwardingSuperNode) {
     const CallPlan *p = cplan_user_fresh(c, n);
@@ -18241,6 +18336,14 @@ static int an_tail_handle(Compiler *c, RetHandles *R, int n, TailCount *tc) {
   if (cnt <= 0) return 0;
   for (int i = 0; i < cnt; i++) if (!an_ret_handle(c, R, mis[i])) return 0;
   return 1;
+}
+/* Is body tail n an append chain over a shared handle's read (`buf << a <<
+   b`)? The tail appends in place and answers the base's read, which
+   publishes it (emit_stmt_tail_inner's `<<` arm). */
+static int an_tail_append_chain(Compiler *c, int n) {
+  int chain[64], base = -1;
+  return n >= 0 && nt_kind(c->nt, n) == NK_CallNode && str_append_chain(c, n, chain, &base) > 0 &&
+         an_arg_is_shared_handle(c, base);
 }
 static int an_ret_handle(Compiler *c, RetHandles *R, int mi) {
   if (R->st[mi] != RH_UNSEEN) return R->st[mi] == RH_YES;
@@ -18256,7 +18359,7 @@ static int an_ret_handle(Compiler *c, RetHandles *R, int mi) {
   /* a body with its own rescue is a begin, whose arms answer */
   if (last < 0 && m->body >= 0 && nt_kind(nt, m->body) == NK_BeginNode) last = m->body;
   TailCount tc = { 0, 0 };
-  if (last >= 0) { saw = 1; ok = an_tail_handle(c, R, last, &tc); }
+  if (last >= 0) { saw = 1; ok = an_tail_handle(c, R, last, &tc) || an_tail_append_chain(c, last); }
   for (int r = R->ret_start[mi]; ok && r < R->ret_start[mi + 1]; r++) {
     int ra = nt_ref(nt, R->ret_list[r], "arguments");
     int rn = 0; const int *rv = ra >= 0 ? nt_arr(nt, ra, "arguments", &rn) : NULL;
@@ -18989,6 +19092,25 @@ static int promote_shared_stored_strings(Compiler *c) {
               nt_kind(nt, recv4) == NK_GlobalVariableReadNode
               ? gvar_array_plain_string(c, comp_resolve_gvar(c, nt_str(nt, recv4, "name") + 1)) : -1;
     if (gpl >= 0) refuse_global_array_element(c, w, recv4, gpl);
+    /* An Array read out of a boxed slot -- a Hash's value, through `h.each
+       { |k, vs| }`, `h[k]` or `vs = h[k]` -- is iterated as a boxed value,
+       so its elements bind the parameter boxed. Only a handle element takes
+       the mutation in place: demand the Strings stored there (the walk
+       follows the block parameter, the index read or the local back to the
+       stores into the Hash and on into its Arrays), as for a poly Array
+       below. Left alone, the element was a plain String and each mutation
+       changed a copy. */
+    if (!lit4 && bpv4->type == TY_POLY && infer_type(c, recv4) == TY_POLY &&
+        (nt_kind(nt, recv4) == NK_LocalVariableReadNode || nt_kind(nt, recv4) == NK_CallNode)) {
+      if (g_infer_optimistic) continue;
+      if (nt_kind(nt, recv4) == NK_LocalVariableReadNode) {
+        const char *pn4 = nt_str(nt, recv4, "name");
+        Scope *ps4 = pn4 ? comp_scope_of(c, recv4) : NULL;
+        if (ps4) changed |= strbuf_demand_container_stores(c, pn4, ps4);
+      }
+      else changed |= strbuf_container_source_walk(c, recv4, 0, SB_DEMAND);
+      continue;
+    }
     if (!lit4 && nt_kind(nt, recv4) != NK_LocalVariableReadNode) continue;
     const char *contn4 = lit4 ? NULL : nt_str(nt, recv4, "name");
     Scope *conts4 = contn4 ? comp_scope_of(c, recv4) : NULL;
@@ -20667,6 +20789,29 @@ static int poly_var_may_hold_string(Compiler *c, const HandleArgTab *hat,
   /* with `lits`, a variable no write or yielder binds is bound some other
      way */
   return lits && !lv->is_param && !seen && bound != 1;
+}
+
+/* Drop the rule's lifts of a variable that cannot hold a String: the final
+   caller table answers once for all its reads, through the existing
+   variable-site index. */
+static void strbuf_reconcile_lifted_reads(Compiler *c, const HandleArgTab *hat) {
+  const NodeTable *nt = c->nt;
+  for (int si = 0; si < c->nscopes; si++) {
+    Scope *s = &c->scopes[si];
+    for (int li = 0; li < s->nlocals; li++) {
+      const char *vn = s->locals[li].name;
+      int may_str = -1;
+      for (int e = comp_vsite_first(c, VS_READ, NK_LocalVariableReadNode, vn, si);
+           e >= 0; e = comp_vsite_next(c, e)) {
+        int r = comp_vsite_var(c, e);
+        if (nt_kind(nt, r) != NK_LocalVariableReadNode || comp_scope_of(c, r) != s ||
+            !sp_streq(nt_str(nt, r, "name"), vn) || !c->poly_strbuf_lift[r]) continue;
+        if (may_str < 0) may_str = poly_var_may_hold_string(c, hat, vn, s, 0, NULL);
+        if (may_str) break;
+        c->poly_strbuf_lift[r] = 0;
+      }
+    }
+  }
 }
 
 /* --share-strings (#6765): can receiver r, a boxed or untyped value, be a
@@ -37880,12 +38025,12 @@ static void an_phase_storage(Compiler *c) {
     if (!conv0) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
     for (int s = 0; s < c->nscopes; s++) conv0[s] = share_converted_locals(c, s);
   }
+  HandleArgTab hat;
   for (;;) {
-    HandleArgTab hat; handle_arg_tab_init(c, &hat);
+    handle_arg_tab_init(c, &hat);
     int ch = promote_params_stored_in_shared_ivars(c, &hat);
     if (convert_byref_handle_params(c, &hat)) ch = 1;
     if (lift_poly_alias_reads(c, &hat)) ch = 1;
-    handle_arg_tab_free(&hat);
     if (promote_local_alias_pairs(c)) ch = 1;
     if (promote_dyncall_string_args(c)) ch = 1;
     if (promote_spread_string_args(c)) ch = 1;
@@ -37903,6 +38048,7 @@ static void an_phase_storage(Compiler *c) {
       if (rejoin_local_writes(c)) ch = late_widened = 1;
     }
     if (!ch) break;
+    handle_arg_tab_free(&hat);
   }
   /* ... and the reads of what widened take its type, as the proc-return
      re-derivation's refresh does (an_phase_proc_returns): everywhere when a
@@ -37929,7 +38075,10 @@ static void an_phase_storage(Compiler *c) {
      x.is_a?(String)`) unboxed a copy of the String its POLY variable holds:
      one lifted into the handle for a parameter appended to keeps the box,
      so the callee appends to the variable's own String. The narrowing ran
-     before the lifts were decided. */
+     before the lifts were decided. Under the rule, a lift whose variable
+     cannot hold a String is dropped first, asking once per variable rather
+     than per read. */
+  if (c->share_strings) strbuf_reconcile_lifted_reads(c, &hat);
   NT_FOREACH_KIND(c->nt, NK_LocalVariableReadNode, r) {
     if (c->nilnarrow[r] != TY_STRING) continue;
     if (c->poly_strbuf_lift[r]) {
@@ -37945,6 +38094,7 @@ static void an_phase_storage(Compiler *c) {
       if (lv && lv->type == TY_POLY) c->nilnarrow[r] = c->ntype[r] = TY_STRBUF;
     }
   }
+  handle_arg_tab_free(&hat);
   if (!c->share_strings) mark_reader_identity_operands(c);
   mark_reader_read_only_operands(c);
 

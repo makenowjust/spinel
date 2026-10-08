@@ -250,6 +250,10 @@ static inline sp_int sp_imod(sp_int a, sp_int b) {
   if ((r != 0) && ((r ^ b) < 0)) r += b;
   return r;
 }
+/* master's _nn spellings (operands it knows are never its nil sentinel):
+   out of band no helper tests a sentinel, so each is the plain one */
+static inline sp_int sp_idiv_nn(sp_int a, sp_int b) { return sp_idiv(a, b); }
+static inline sp_int sp_imod_nn(sp_int a, sp_int b) { return sp_imod(a, b); }
 /* Float#% (and Integer % Float): floored modulo whose result takes the sign of
    the divisor, unlike C fmod which follows the dividend (-5.5 % 2 == 0.5). */
 /* float %% with an INTEGER zero divisor raises in CRuby (5.0 %% 0), while a
@@ -330,7 +334,19 @@ static inline sp_int sp_iremainder(sp_int a, sp_int b) {
 #  define sp_int_sub(a, b) ((a) - (b))
 #  define sp_int_mul(a, b) ((a) * (b))
 #  define sp_int_neg(a)    (-(a))
+#  define sp_int_add_nn(a, b) ((a) + (b))
+#  define sp_int_sub_nn(a, b) ((a) - (b))
+#  define sp_int_mul_nn(a, b) ((a) * (b))
 #else
+#  define sp_int_add_nn(a, b) ({ sp_int _sp_a = (a), _sp_b = (b), _sp_r; \
+    if (sp_int_add_overflow_p(_sp_a, _sp_b, &_sp_r)) sp_raise_cls("RangeError", "integer overflow in +"); \
+    _sp_r; })
+#  define sp_int_sub_nn(a, b) ({ sp_int _sp_a = (a), _sp_b = (b), _sp_r; \
+    if (sp_int_sub_overflow_p(_sp_a, _sp_b, &_sp_r)) sp_raise_cls("RangeError", "integer overflow in -"); \
+    _sp_r; })
+#  define sp_int_mul_nn(a, b) ({ sp_int _sp_a = (a), _sp_b = (b), _sp_r; \
+    if (sp_int_mul_overflow_p(_sp_a, _sp_b, &_sp_r)) sp_raise_cls("RangeError", "integer overflow in *"); \
+    _sp_r; })
 #  define sp_int_add(a, b) ({ sp_int _sp_a = (a), _sp_b = (b), _sp_r; \
     if (sp_int_add_overflow_p(_sp_a, _sp_b, &_sp_r)) sp_raise_cls("RangeError", "integer overflow in +"); \
     _sp_r; })
@@ -2640,6 +2656,19 @@ static inline sp_bool sp_poly_is_strbuf(sp_RbVal v) {
 static inline sp_RbVal sp_poly_strbuf_lift(sp_RbVal v) {
   if (v.tag == SP_TAG_STR && v.v.s) return sp_box_obj(sp_poly_as_strbuf(v), SP_BUILTIN_STRBUF);
   return v;
+}
+/* --share-strings: a box's to_s as a box. A String's to_s is the String
+   itself: its own box (the shared handle's, where it has one); anything
+   else answers its to_s String (sp_poly_to_s), boxed. */
+static inline sp_RbVal sp_poly_to_s_box(sp_RbVal v);
+/* --share-strings: to_s of a shared String handle that may be nil (NULL)
+   as a box: the handle's own box, or nil's "" */
+static inline sp_RbVal sp_strbuf_to_s_box(sp_String *h) {
+  return h ? sp_box_nullable_obj(h, SP_BUILTIN_STRBUF) : sp_box_str(sp_str_frozen_empty);
+}
+static inline sp_RbVal sp_poly_to_s_box(sp_RbVal v) {
+  if ((v.tag == SP_TAG_STR && v.v.s) || (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_STRBUF && v.v.p)) return v;
+  return sp_box_str(sp_poly_to_s(v));
 }
 /* A boxed value unboxed into a String slot. A mutable String's box carries
    its sp_String handle in the union, so reading `.v.s` there hands the slot

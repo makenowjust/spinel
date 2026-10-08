@@ -4,6 +4,7 @@
 
 #include <string.h>
 #include "repr.h"
+#include "analyze_internal.h"
 #include "codegen_internal.h"
 #include "share.h"
 #include "holder.h"
@@ -159,7 +160,32 @@ int repr_call_returns_handle(Compiler *c, int v) {
     return mi > 0 && c->scopes[mi].ret_handle;
   }
   int mis[CPT_MAX];
-  int n = cplan_targets(c, v, mis, CPT_MAX);
+  int n;
+  /* Kernel#String calls to_str, or to_s where the class has no to_str.
+     A fresh-answering target must keep the ordinary conversion's copy.
+     A nil to_str falls through to to_s; a nil to_s falls to fresh object
+     text in the bridge, so neither may pick up an earlier publication. */
+  if (recv < 0 && is_string_class_name(nm) && comp_method_index(c, nm) < 0 && !bare_call_class_owned(c, v)) {
+    int ac = 0;
+    const int *av = call_args(nt, v, &ac);
+    if (ac != 1 || nt_ref(nt, v, "block") >= 0 || repr_of(c, av[0]).kind != RK_BOXED) return 0;
+    const int *ks = poly_recv_classes(c, v, &n);
+    if (!ks || n <= 0 || n > CPT_MAX) return 0;
+    for (int i = 0; i < n; i++) {
+      int mi = comp_method_in_chain(c, ks[i], "to_str", NULL);
+      if (mi >= 0 && c->scopes[mi].ret_nil_pickup) {
+        int fallback = comp_method_in_chain(c, ks[i], "to_s", NULL);
+        if (fallback < 0 || !c->scopes[fallback].ret_handle || c->scopes[fallback].ret_nil_pickup) return 0;
+      }
+      if (mi < 0) {
+        mi = comp_method_in_chain(c, ks[i], "to_s", NULL);
+        if (mi >= 0 && c->scopes[mi].ret_nil_pickup) return 0;
+      }
+      if (mi < 0) return 0;
+      mis[i] = mi;
+    }
+  }
+  else n = cplan_targets(c, v, mis, CPT_MAX);
   if (n <= 0) return 0;
   for (int i = 0; i < n; i++) if (!c->scopes[mis[i]].ret_handle) return 0;
   return 1;
@@ -705,7 +731,12 @@ static int repr_share_elems_carried(Compiler *c, const ShareHolder *h) {
     return any;
   }
   if (!ty_is_array(t) && !ty_is_hash(t)) return -1;
-  return t == TY_STR_ARRAY || t == TY_STR_STR_HASH || t == TY_INT_STR_HASH ? 0 : 1;
+  return repr_typed_str_container(t) ? 0 : 1;
+}
+
+/* repr.h: a container type whose C form holds its Strings as `const char *` */
+int repr_typed_str_container(TyKind t) {
+  return t == TY_STR_ARRAY || t == TY_STR_STR_HASH || t == TY_INT_STR_HASH;
 }
 
 static const char *repr_share_kind_name(int kind) {
@@ -716,6 +747,104 @@ static const char *repr_share_kind_name(int kind) {
   case SHK_CVAR:  return "class variable";
   case SHK_CONST: return "constant";
   default:        return "value";
+  }
+}
+
+/* What a flow kind (ShareFlowKind) hands its value to, for a message. */
+static const char *repr_flow_kind_name(int kind) {
+  switch (kind) {
+  case SHFL_WRITE:  return "a variable's write";
+  case SHFL_MEMBER: return "an attribute or member store";
+  case SHFL_ARG:    return "a method's argument";
+  case SHFL_ELEM:   return "a container's element";
+  case SHFL_BLOCK:  return "a block's value a container keeps";
+  case SHFL_YIELD:  return "a yield's argument";
+  case SHFL_PARAM:  return "a block's parameter";
+  case SHFL_LEND:   return "a lent argument";
+  case SHFL_MULTI:  return "a multiple write's target";
+  case SHFL_MUTATE: return "an in-place change";
+  default:          return "a value";
+  }
+}
+
+/* The route value node v is, for a message: a call's value by its name, a
+   variable by its name, else the kind of construct. */
+static void repr_flow_route_name(const Compiler *c, int v, char *out, size_t cap) {
+  const NodeTable *nt = c->nt;
+  NodeKind k = nt_kind(nt, v);
+  const char *nm = nt_str(nt, v, "name");
+  if (k == NK_CallNode && nm) { snprintf(out, cap, "the value of `%s`", nm); return; }
+  if (holder_kind_of(k) != HK_NONE && nm) {
+    snprintf(out, cap, "%s `%s`", repr_static_read_kind(k) || k == NK_LocalVariableReadNode ||
+             k == NK_InstanceVariableReadNode ? "the variable" : "the write of", nm);
+    return;
+  }
+  switch (k) {
+  case NK_BeginNode:  snprintf(out, cap, "a begin's value"); return;
+  case NK_IfNode: case NK_UnlessNode: case NK_CaseNode: case NK_AndNode: case NK_OrNode:
+                      snprintf(out, cap, "a conditional's value"); return;
+  case NK_YieldNode:  snprintf(out, cap, "a yield's value"); return;
+  case NK_SuperNode: case NK_ForwardingSuperNode:
+                      snprintf(out, cap, "super's value"); return;
+  case NK_WhileNode: case NK_UntilNode:
+                      snprintf(out, cap, "a loop's value"); return;
+  default:            snprintf(out, cap, "this value"); return;
+  }
+}
+
+/* Does flow value node v need the route check: a String (or a box that may
+   hold one) whose class the rule shares? */
+static int repr_flow_checked(Compiler *c, int v) {
+  v = unwrap_parens(c, v);
+  if (v < 0) return 0;
+  NodeKind k = nt_kind(c->nt, v);
+  if (k == NK_NilNode || k == NK_StringNode || k == NK_InterpolatedStringNode) return 0;
+  TyKind t = c->ntype[v];
+  if (t != TY_STRING && t != TY_STRBUF && t != TY_POLY) return 0;
+  /* a container literal is no String */
+  if (k == NK_ArrayNode || k == NK_HashNode || k == NK_RangeNode) return 0;
+  return share_node_shares(c, v);
+}
+
+/* The route half of the seal: every flow the walk recorded into a class
+   the rule shares (share_flow_at) has to go along a route codegen hands
+   the shared handle on (strbuf_flow_carries), or the program is refused,
+   naming the route, rather than compiled handing on a copy. A flow kind
+   or a route codegen does not know is refused too. */
+static void repr_share_flows_check(Compiler *c, const char *stats) {
+  int nf = share_flow_count(c);
+  int bad = -1, bad_kind = 0;
+  StrbufFlowMemo fm;
+  fm.yield_ok = malloc((size_t)(c->nscopes > 0 ? c->nscopes : 1));
+  if (!fm.yield_ok) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+  memset(fm.yield_ok, -1, (size_t)(c->nscopes > 0 ? c->nscopes : 1));
+  for (int i = 0; i < nf; i++) {
+    int site, v;
+    int kind = share_flow_at(c, i, &site, &v);
+    /* a flow in an unreachable scope is never emitted (bad_lit's rule) */
+    if (v < 0 || !comp_scope_of(c, v)->reachable || !repr_flow_checked(c, v)) continue;
+    int u = unwrap_parens(c, v);
+    int ok = strbuf_flow_carries(c, &fm, kind, site, v);
+    if (stats && stats[0] == '2') {
+      char rn[160];
+      repr_flow_route_name(c, u, rn, sizeof rn);
+      const char *fp = nt_file_path(c->nt, (int)nt_int(c->nt, u, "node_file", -1));
+      fprintf(stderr, "share-flow: %s:%d node %d %s (%s) into %s carried=%d flags=%u\n", fp ? fp : "?",
+              (int)nt_int(c->nt, u, "node_line", 0), u, rn, ty_name(c->ntype[u]), repr_flow_kind_name(kind), ok,
+              share_node_flags(c, u));
+    }
+    if (!ok && bad < 0) { bad = u; bad_kind = kind; }
+  }
+  free(fm.yield_ok);
+  if (bad >= 0) {
+    int u = bad, kind = bad_kind;
+    char rn[160];
+    repr_flow_route_name(c, u, rn, sizeof rn);
+    char msg[512];
+    snprintf(msg, sizeof msg, "under --share-strings, the String %s hands on as %s is shared with another "
+             "name and changed in place, and that route cannot carry the shared handle yet: it would hand "
+             "on a copy (#6765)", rn, repr_flow_kind_name(kind));
+    unsupported_feature(c, u, msg);
   }
 }
 
@@ -775,7 +904,7 @@ static void repr_share_seal(Compiler *c) {
     /* an empty one holds no String yet: what is stored later goes through
        the holder that keeps it; one nothing can reach again once its
        expression is done (`p [a, b]`) keeps no name for its copies */
-    if (ne > 0 && (t == TY_STR_ARRAY || t == TY_STR_STR_HASH || t == TY_INT_STR_HASH) && share_node_elems_share(c, n) &&
+    if (ne > 0 && repr_typed_str_container(t) && share_node_elems_share(c, n) &&
         share_node_anchored(c, n))
       bad_lit = n;
   }
@@ -824,6 +953,7 @@ static void repr_share_seal(Compiler *c) {
                kind, nm, kind);
     unsupported_feature(c, sh->node, msg);
   }
+  repr_share_flows_check(c, stats);
 }
 
 /* ---- --dump-repr (#7501) ----
