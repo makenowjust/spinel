@@ -8444,10 +8444,13 @@ int arg_ran_first(int node, int from) {
 /* The temp an argument that ran first reads (arg_ran_first) from the
    `from`th override on, when `text` is its slot's rendering of it, the temp
    unconverted; -1 otherwise. */
-static int ran_first_temp(int node, int from, const char *text) {
+static int ran_first_temp(int node, int from, const char *text, char *is_o) {
   for (int i = from; text && i < g_n_argov; i++) {
     int t;
-    if (g_argov_node[i] == node && sp_streq(g_argov_text[i], text) && sscanf(text, "_t%d", &t) == 1) return t;
+    if (g_argov_node[i] == node && sp_streq(g_argov_text[i], text) && sscanf(text, "_t%d", &t) == 1) {
+      if (is_o) *is_o = (char)g_argov_oint[i];   /* the temp holds the value's oint */
+      return t;
+    }
   }
   return -1;
 }
@@ -11063,15 +11066,23 @@ int dispatch_impl_count(Compiler *c, int cid, const char *name) {
    type: a concrete value flowing into an sp_RbVal (untyped/poly) param is boxed,
    a poly temp flowing into a concrete param is unboxed, matching types pass raw.
    Different overrides of one method may type the same param differently (#3214). */
-static void emit_arm_arg(Compiler *c, Scope *arm, int a, int atmp_id, TyKind from, Buf *b) {
+/* from_o: the temp is the oint of `from` (the base method's parameter holds
+   its nil); an arm's parameter that holds none takes the value, nil
+   raising, and one that does takes a plain temp lifted */
+static void emit_arm_arg(Compiler *c, Scope *arm, int a, int atmp_id, TyKind from, int from_o, Buf *b) {
   char tn[24]; snprintf(tn, sizeof tn, "_t%d", atmp_id);
   TyKind pt = TY_POLY;
+  int pto = 0;
   if (arm && arm->pnames && a < arm->nparams && arm->pnames[a]) {
     LocalVar *pl = scope_local(arm, arm->pnames[a]);
     pt = (pl && pl->type != TY_UNKNOWN) ? pl->type : TY_POLY;
+    pto = pl && oint_kind(pt) && slot_is_oint(pl);
   }
   buf_puts(b, ", ");
-  if (pt == TY_POLY && from != TY_POLY && from != TY_UNKNOWN) emit_boxed_text(c, from, tn, b);
+  if (from_o && pt == TY_POLY) buf_printf(b, "%s(%s)", from == TY_FLOAT ? "sp_box_ofloat" : "sp_box_oint", tn);
+  else if (from_o && pt == from && !pto) buf_printf(b, "%s(%s)", oint_arg(pt), tn);
+  else if (!from_o && pt == from && pto) buf_printf(b, "%s(%s)", oint_of(pt), tn);
+  else if (pt == TY_POLY && from != TY_POLY && from != TY_UNKNOWN) emit_boxed_text(c, from, tn, b);
   else if (from == TY_POLY && pt != TY_POLY && pt != TY_UNKNOWN) emit_unbox_text(c, pt, tn, b);
   else buf_puts(b, tn);
 }
@@ -11700,6 +11711,8 @@ static void emit_dispatch_in(Compiler *c, int cid, const char *name,
      `(Symbol)` vs override `(untyped)` -> sp_RbVal), so each dispatch arm coerces
      the shared temp to ITS param type instead of passing it raw (#3214). */
   TyKind *atmp_ty = np ? malloc(sizeof(TyKind) * np) : NULL;
+  /* ... and whether it was declared the param's oint (its nil beside it) */
+  char *atmp_o = np ? calloc((size_t)np, 1) : NULL;
   const char *saved_self = g_self;
   /* The splat the parameters read: every positional gathered, or the one
      spread in place. A trailing one's count is measured where the array is
@@ -11916,13 +11929,13 @@ else {
       /* an argument the call ran first (emit_args_before_binding) is its
          rooted temp already, when the slot takes it unconverted */
       int ran_t = provided >= 0 && repr_of(c, provided).as_ty == att
-                    ? ran_first_temp(provided, argov_saved_d, ab.p) : -1;
+                    ? ran_first_temp(provided, argov_saved_d, ab.p, &atmp_o[k]) : -1;
       if (ran_t >= 0) atmp[k] = ran_t;
       else {
         emit_indent(g_pre, g_indent);
         /* an Integer / Float parameter holding its nil beside the value is
            bound as its oint, and the temp is declared the same */
-        if (p && oint_kind(att) && slot_is_oint(p)) buf_puts(g_pre, oint_ctype(att));
+        if (p && oint_kind(att) && slot_is_oint(p)) { buf_puts(g_pre, oint_ctype(att)); atmp_o[k] = 1; }
         else emit_ctype(c, att, g_pre);
         buf_printf(g_pre, " _t%d = ", atmp[k]);
         buf_puts(g_pre, ab.p ? ab.p : ""); buf_puts(g_pre, ";\n");
@@ -11990,13 +12003,17 @@ else {
       buf_printf(b, "sp_%s_%s(%s", c->classes[defcls].c_name, mc(mname), selfptr);
     else
       buf_printf(b, "sp_%s_%s((sp_%s *)%s", c->classes[defcls].c_name, mc(mname), c->classes[defcls].c_name, selfptr);
-    for (int k = 0; k < np; k++) buf_printf(b, ", _t%d", atmp[k]);
+    for (int k = 0; k < np; k++) {
+      /* a temp the call ran first keeps its own form: the parameter's */
+      if (m && atmp_o[k] && atmp_ty[k] != TY_POLY) emit_arm_arg(c, m, k, atmp[k], atmp_ty[k], 1, b);
+      else buf_printf(b, ", _t%d", atmp[k]);
+    }
     if (needs_blk_arg) {
       if (blk_tmp >= 0) buf_printf(b, ", _t%d", blk_tmp);
       else buf_puts(b, ", NULL");
     }
     buf_puts(b, ")");
-    free(atmp); free(atmp_ty); arg_layout_free(&L);
+    free(atmp); free(atmp_ty); free(atmp_o); arg_layout_free(&L);
     return;
   }
 
@@ -12022,7 +12039,7 @@ else {
     Buf _ac; memset(&_ac, 0, sizeof _ac);
     buf_printf(&_ac, "sp_%s_%s((sp_%s *)%s",
                c->classes[kd].c_name, kfn, c->classes[kd].c_name, selfptr);
-    for (int a = 0; a < np; a++) emit_arm_arg(c, &c->scopes[kmi], a, atmp[a], atmp_ty[a], &_ac);
+    for (int a = 0; a < np; a++) emit_arm_arg(c, &c->scopes[kmi], a, atmp[a], atmp_ty[a], atmp_o[a], &_ac);
     buf_puts(&_ac, ")");
     buf_printf(b, " case %d: { ", k);
     emit_disp_arm_assign(c, &c->scopes[kmi], _ac.p, ret, disp_ret, rtmp, b);
@@ -12036,7 +12053,7 @@ else {
   if (!m) {
     buf_printf(b, " default: _t%d = %s; break; } _t%d; })", rtmp,
                ret == TY_POLY ? "sp_box_nil()" : g_disp_ro ? oint_nil(disp_ret) : default_value_from_compiler(c, disp_ret), rtmp);
-    free(atmp); free(atmp_ty); arg_layout_free(&L);
+    free(atmp); free(atmp_ty); free(atmp_o); arg_layout_free(&L);
     return;
   }
   /* default arm uses the base-class (defcls) implementation */
@@ -12052,7 +12069,7 @@ else {
     free(_dc.p);
   }
   buf_printf(b, " } _t%d; })", rtmp);
-  free(atmp); free(atmp_ty); arg_layout_free(&L);
+  free(atmp); free(atmp_ty); free(atmp_o); arg_layout_free(&L);
 }
 
 
