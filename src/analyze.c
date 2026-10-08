@@ -25564,6 +25564,33 @@ static int reassert_rbs_param_seeds(Compiler *c) {
 
 /* Names whose miss answers nil while the type stays TY_INT (a search index, a
    pop off an empty array): the value they leave in the slot is the sentinel. */
+/* A File::Stat field on an IO (or a boxed value the call reaches one
+   through) and `File.size?` answer nil where the stat fails or the file is
+   empty: the runtime's sp_stat_field / sp_file_size_q answer an sp_oint. */
+int file_stat_nil_call(Compiler *c, int v) {
+  const NodeTable *nt = c->nt;
+  if (v < 0 || nt_kind(nt, v) != NK_CallNode || nt_ref(nt, v, "block") >= 0) return 0;
+  const char *nm = nt_str(nt, v, "name");
+  int rc = nt_ref(nt, v, "receiver");
+  if (!nm || rc < 0) return 0;
+  int args = nt_ref(nt, v, "arguments"), argc = 0;
+  if (args >= 0) nt_arr(nt, args, "arguments", &argc);
+  if (sp_streq(nm, "size?") && argc == 1 && nt_kind(nt, rc) == NK_ConstantReadNode) {
+    const char *cn = nt_str(nt, rc, "name");
+    return cn && (sp_streq(cn, "File") || sp_streq(cn, "FileTest"));
+  }
+  static const char *const F[] = { "uid", "gid", "nlink", "dev", "ino", "blksize", "blocks", "rdev", "size?", NULL };
+  if (argc != 0 || !str_in(nm, F)) return 0;
+  TyKind rt = infer_type(c, rc);
+  if (rt == TY_IO) return 1;
+  if (rt != TY_POLY) return 0;
+  /* a boxed receiver: only where no class of the program answers the name
+     (its dispatch is the IO's) */
+  for (int k = 0; k < c->nclasses; k++)
+    if (comp_method_in_chain(c, k, nm, NULL) >= 0 || comp_reader_in_chain(c, k, nm, NULL)) return 0;
+  return 1;
+}
+
 static int nullable_int_call_name(const char *nm) {
   if (!nm) return 0;
   static const char *const N[] = {
@@ -28232,6 +28259,17 @@ int nullable_int_value(Compiler *c, int v) {
       return 1;
     }
     if (nullable_int_call_name(nt_str(nt, v, "name"))) return 1;
+    if (file_stat_nil_call(c, v)) return 1;
+    /* a Range's omitted bound is nil: (1.0..).end, (..2).begin. A literal
+       with both ends has both */
+    { const char *bn = nt_str(nt, v, "name"); int br = nt_ref(nt, v, "receiver");
+      if (br >= 0 && bn && nt_ref(nt, v, "arguments") < 0 && (sp_streq(bn, "begin") || sp_streq(bn, "end"))) {
+        TyKind brt = infer_type(c, br);
+        int lit = an_unparen(nt, br);
+        int both = lit >= 0 && nt_kind(nt, lit) == NK_RangeNode && nt_ref(nt, lit, "left") >= 0 && nt_ref(nt, lit, "right") >= 0;
+        if ((brt == TY_RANGE || brt == TY_FLOAT_RANGE) && !both) return 1;
+      }
+    }
     if (nn_call_unboxes_nil(c, v)) return 1;
     /* A setter assignment answers its RHS, not the writer's return. Its
        nullable scalar must survive when the assignment itself is boxed.

@@ -6588,7 +6588,13 @@ static int iter_hash_arms(Compiler *c, Buf *b, int indent, int block, const char
         snprintf(src1, sizeof src1, "sp_%sHash_get(%s, %s->order[_t%d])", hn, rb.p, rb.p, t);
       emit_indent(b, indent + 1);
       buf_printf(b, "lv_%s = ", p1);
-      if (box1) emit_boxed_text(c, want1, src1, b); else emit_strbuf_param_bind(c, pv1, want1, src1, b);
+      /* a value parameter that holds its nil (an oint slot): the typed
+         value lifted, a boxed one unboxed with its nil */
+      if (pv1 && slot_is_oint(pv1) && oint_kind(pv1->type) && !box1) {
+        if (want1 == TY_POLY) buf_printf(b, "%s(%s)", oint_unbox(pv1->type), src1);
+        else buf_printf(b, "%s(%s)", oint_of(pv1->type), src1);
+      }
+      else if (box1) emit_boxed_text(c, want1, src1, b); else emit_strbuf_param_bind(c, pv1, want1, src1, b);
       buf_puts(b, ";\n");
     }
     emit_loop_body(c, body, b, indent + 1);

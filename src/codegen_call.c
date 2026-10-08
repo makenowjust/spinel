@@ -3345,8 +3345,16 @@ static int emit_dynamic_send(Compiler *c, int id, Buf *b) {
   buf_puts(b, "({ ");
   if (rt != TY_UNKNOWN && rt != TY_VOID && subtree_has_side_effect(c, recv) && g_n_argov < MAX_ARG_OVERRIDE) {
     int tr = ++g_tmp;
-    emit_ctype(c, rt, b); buf_printf(b, " _t%d = ", tr); emit_expr(c, recv, b); buf_puts(b, "; "); emit_gc_root_tmp(c, rt, tr, b);
-    view_bind(recv, "_t%d", tr);
+    /* a receiver that can be nil is held with its nil: an arm then raises
+       nil's NoMethodError, not the unwrap's TypeError */
+    if (oint_kind(rt) && node_is_oint(c, recv)) {
+      buf_printf(b, "%s _t%d = ", oint_ctype(rt), tr); emit_oint_expr(c, recv, rt, b); buf_puts(b, "; ");
+      view_bind_o(recv, "_t%d", tr);
+    }
+    else {
+      emit_ctype(c, rt, b); buf_printf(b, " _t%d = ", tr); emit_expr(c, recv, b); buf_puts(b, "; "); emit_gc_root_tmp(c, rt, tr, b);
+      view_bind(recv, "_t%d", tr);
+    }
   }
   buf_printf(b, "sp_sym _t%d = ", t);
   emit_dyn_name_sym(c, sym, b);
@@ -4964,21 +4972,27 @@ static int emit_poly_builtin_method(Compiler *c, int id, Buf *b) {
     /* the epoch second read off the boxed Time, the same value #to_i answers;
        there was no arm at all, so a Time read out of a container raised
        NoMethodError (#3866) */
-    int tv = ++g_tmp;
+    int tv = ++g_tmp, lift = node_is_oint(c, id);   /* an oint dispatch slot's arm */
+    if (lift) buf_puts(b, "sp_oint_of(");
     buf_printf(b, "({ sp_RbVal _t%d = ", tv); emit_expr(c, recv, b);
     buf_printf(b, "; _t%d.tag == SP_TAG_OBJ && _t%d.cls_id == SP_BUILTIN_TIME"
                   " ? (sp_int)((sp_Time *)_t%d.v.p)->tv_sec"
                   " : (sp_int)(sp_raise_nomethod(sp_nomethod_msg(\"tv_sec\", _t%d)), 0); })",
                tv, tv, tv, tv);
+    if (lift) buf_puts(b, ")");
     return 1;
   }
   if (tf) {
-    int tv = ++g_tmp;
+    /* lifted where the call answers an oint: a dispatch slot whose other
+       target (an attr reader of the same name) can be nil */
+    int tv = ++g_tmp, lift = node_is_oint(c, id);
+    if (lift) buf_puts(b, "sp_oint_of(");
     buf_printf(b, "({ sp_RbVal _t%d = ", tv); emit_expr(c, recv, b);
     buf_printf(b, "; _t%d.tag == SP_TAG_OBJ && _t%d.cls_id == SP_BUILTIN_TIME"
                   " ? sp_time_%s(*(sp_Time *)_t%d.v.p)"
                   " : (sp_int)(sp_raise_nomethod(sp_nomethod_msg(\"%s\", _t%d)), 0); })",
                tv, tv, tf, tv, name, tv);
+    if (lift) buf_puts(b, ")");
     return 1;
   }
   /* The Time methods that answer a Time. The surface had the scalar reads and
@@ -5102,10 +5116,15 @@ static int emit_poly_builtin_method(Compiler *c, int id, Buf *b) {
         buf_printf(&body, "%.*s_t%d", (int)(hit - q), q, tv);
         q = hit + 3;
       }
+      /* an Integer reader the call answers as an oint (a dispatch slot whose
+         other target can be nil) is lifted */
+      int lift = ti && node_is_oint(c, id);
+      if (lift) buf_puts(b, "sp_oint_of(");
       buf_printf(b, "({ sp_RbVal _t%d = ", tv); emit_expr(c, recv, b);
       buf_printf(b, "; _t%d.tag == SP_TAG_OBJ && _t%d.cls_id == SP_BUILTIN_TIME ? %s"
                     " : (%s)(sp_raise_nomethod(sp_nomethod_msg(\"%s\", _t%d)), %s); })",
                  tv, tv, body.p ? body.p : "0", cty, name, tv, miss);
+      if (lift) buf_puts(b, ")");
       free(body.p);
       return 1;
     }

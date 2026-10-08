@@ -5416,6 +5416,7 @@ static int dispatch_answers_nil(Compiler *c, int cid, const char *nm, int mi) {
   return overridden && any_nil;
 }
 
+int file_stat_nil_call(Compiler *c, int v);   /* analyze.c */
 int node_is_oint(Compiler *c, int node) {
   const NodeTable *nt = c->nt;
   if (node < 0) return 0;
@@ -5502,6 +5503,8 @@ int node_is_oint(Compiler *c, int node) {
     }
     const char *nm = nt_str(nt, node, "name");
     if (!nm) return 0;
+    /* a File::Stat field and File.size?: the runtime answers the oint */
+    if (file_stat_nil_call(c, node)) return 1;
     /* `o.x = v` as a value answers v, whatever the writer returns */
     if (call_is_setter_assign(nt, node)) {
       int sa = nt_ref(nt, node, "arguments"), san = 0;

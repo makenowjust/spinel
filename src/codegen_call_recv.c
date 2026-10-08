@@ -7932,6 +7932,11 @@ static int emit_scalar_recv_arms(Compiler *c, int id, Buf *b, const NodeTable *n
      copying the whole subject on every character. */
   if (rt == TY_STRING && name && str_recv_reads_only(name))
     emit_strbuf_read_ref(c, recv, &rs);
+  /* a receiver that can be nil is rendered as its unwrapped oint, never as
+     the checked plain read: the `$N` arms take the oint back out of it */
+  if (!rs.p && (rt == TY_INT || rt == TY_FLOAT) && node_is_oint(c, recv)) {
+    buf_printf(&rs, "%s(", oint_arg(rt)); emit_oint_expr(c, recv, rt, &rs); buf_puts(&rs, ")");
+  }
   if (!rs.p) emit_expr(c, recv, &rs);
   const char *r = rs.p ? rs.p : "";
   /* A Float receiver that can be nil answers a Float's methods only where

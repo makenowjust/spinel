@@ -550,7 +550,9 @@ int emit_call_poly_io_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
         int k = 0;
         while (boxed_stat_sfield[k] && !sp_streq(name, boxed_stat_sfield[k])) k++;
         emit_stat_handle_only(tio2, name, b);
-        buf_printf(b, "sp_stat_field(_t%d, %d); })", tio2, k);
+        /* the field's nil (a failed stat) beside it, in the call's form */
+        if (node_is_oint(c, id)) buf_printf(b, "sp_stat_field(_t%d, %d); })", tio2, k);
+        else buf_printf(b, "sp_oint_arg(sp_stat_field(_t%d, %d)); })", tio2, k);
       }
       else if (is_path_reader(name))
         buf_printf(b, "sp_File_path(_t%d); })", tio2);
@@ -580,6 +582,12 @@ int emit_call_poly_io_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
       else if (argc == 0 && boxed_stat_pred(name) >= 100) {
         emit_stat_handle_only(tio2, name, b);
         buf_printf(b, "sp_stat_type_pred(_t%d, %d); })", tio2, boxed_stat_pred(name) - 100);
+      }
+      /* size?: nil for a failed stat or an empty file (sp_stat_size_q) */
+      else if (argc == 0 && sp_streq(name, "size?")) {
+        emit_stat_handle_only(tio2, name, b);
+        if (node_is_oint(c, id)) buf_printf(b, "sp_stat_size_q(_t%d); })", tio2);
+        else buf_printf(b, "sp_oint_arg(sp_stat_size_q(_t%d)); })", tio2);
       }
       else if (argc == 0 && boxed_stat_pred(name) >= 0) {
         emit_stat_handle_only(tio2, name, b);
