@@ -227,8 +227,8 @@ int emit_op_hash_aref(Compiler *c, const BopCtx *x, Buf *b) {
        a string-valued one as NULL (get) */
     int oint = ty_hash_val(rt) == TY_INT;
     if (oint) oint_open(c, x->id, TY_INT, b);
-    buf_printf(b, "sp_%sHash_%s(", hn, oint ? "oget" : "get");
-    emit_expr(c, recv, b); buf_puts(b, ", "); emit_hash_key(c, argv[0], ty_hash_key(rt), b); buf_puts(b, ")");
+    buf_printf(b, "sp_%sHash_%s%s(", hn, oint ? "oget" : "get", hash_okey_sfx(c, argv[0], ty_hash_key(rt)));
+    emit_expr(c, recv, b); buf_puts(b, ", "); emit_hash_key_o(c, argv[0], ty_hash_key(rt), b); buf_puts(b, ")");
     if (oint) oint_close(c, x->id, b);
   }
   return 1;
@@ -645,17 +645,19 @@ int emit_op_hash_delete(Compiler *c, const BopCtx *x, Buf *b) {
   int th = ++g_tmp, tk = ++g_tmp, tv = ++g_tmp;
   buf_printf(b, "({ %s _t%d = ", c_type_name(rt), th); emit_expr(c, recv, b);
   buf_printf(b, "; if (sp_gc_is_frozen(_t%d)) sp_raise_frozen_hash_at(_t%d, %s);", th, th, hash_box_cls(rt));   /* (#3001) */
-  buf_printf(b, " %s _t%d = ", c_type_name(ty_hash_key(rt)), tk); emit_hash_key(c, argv[0], ty_hash_key(rt), b);
+  /* a key no entry matches (hash_okey_miss) goes through the _okey ops */
+  const char *ks = hash_okey_sfx(c, argv[0], ty_hash_key(rt));
+  buf_printf(b, " %s _t%d = ", hash_key_ctype(c, argv[0], ty_hash_key(rt)), tk); emit_hash_key_o(c, argv[0], ty_hash_key(rt), b);
   /* a miss answers nil: an Integer value's nil is out of band (an sp_oint),
      not a deleted value of zero (#4531) */
   if (vt == TY_INT)
-    buf_printf(b, "; sp_oint _t%d = sp_%sHash_has_key(_t%d, _t%d) ? sp_oint_of(sp_%sHash_get(_t%d, _t%d)) : sp_oint_nil();",
-               tv, hn, th, tk, hn, th, tk);
+    buf_printf(b, "; sp_oint _t%d = sp_%sHash_has_key%s(_t%d, _t%d) ? sp_oint_of(sp_%sHash_get%s(_t%d, _t%d)) : sp_oint_nil();",
+               tv, hn, ks, th, tk, hn, ks, th, tk);
   else
-    buf_printf(b, "; %s _t%d = sp_%sHash_has_key(_t%d, _t%d) ? sp_%sHash_get(_t%d, _t%d) : %s;",
-               c_type_name(vt), tv, hn, th, tk, hn, th, tk,
+    buf_printf(b, "; %s _t%d = sp_%sHash_has_key%s(_t%d, _t%d) ? sp_%sHash_get%s(_t%d, _t%d) : %s;",
+               c_type_name(vt), tv, hn, ks, th, tk, hn, ks, th, tk,
                vt == TY_POLY ? "sp_box_nil()" : vt == TY_STRING ? "NULL" : default_value_from_compiler(c, vt));
-  buf_printf(b, " sp_%sHash_delete(_t%d, _t%d); ", hn, th, tk);
+  buf_printf(b, " sp_%sHash_delete%s(_t%d, _t%d); ", hn, ks, th, tk);
   if (vt == TY_INT) { oint_open(c, x->id, TY_INT, b); buf_printf(b, "_t%d", tv); oint_close(c, x->id, b); buf_puts(b, "; })"); }
   else buf_printf(b, "_t%d; })", tv);
   return 1;
@@ -843,7 +845,7 @@ int emit_op_hash_assoc(Compiler *c, const BopCtx *x, Buf *b) {
   buf_printf(b, "({ sp_%sHash *_t%d = ", hn, th); emit_expr(c, recv, b); buf_puts(b, ";");
   /* store argument */
   if (!is_rassoc) {
-    buf_printf(b, " %s _t%d = ", c_type_name(kt), ta); emit_hash_key(c, argv[0], kt, b); buf_puts(b, ";");
+    buf_printf(b, " %s _t%d = ", hash_key_ctype(c, argv[0], kt), ta); emit_hash_key_o(c, argv[0], kt, b); buf_puts(b, ";");
   }
   else {
     /* rassoc: arg has value type */
@@ -859,6 +861,9 @@ int emit_op_hash_assoc(Compiler *c, const BopCtx *x, Buf *b) {
       /* sp_str_eq, not strcmp: a key of a class the table cannot hold
          reaches here as the NULL miss sentinel emit_hash_key answers */
       buf_printf(b, " if (sp_str_eq(_t%d->order[_t%d], _t%d)) {", th, ti, ta);
+    /* a key no entry matches (hash_okey_miss) is a nil sp_oint */
+    else if (!is_rassoc && hash_okey_miss(c, argv[0], kt))
+      buf_printf(b, " if (!_t%d.nil && _t%d->order[_t%d] == _t%d.v) {", ta, th, ti, ta);
     else
       buf_printf(b, " if (_t%d->order[_t%d] == _t%d) {", th, ti, ta);
   }

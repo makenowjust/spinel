@@ -5644,11 +5644,13 @@ else {
               (ty_hash_key(rt) != TY_STRING || comp_ntype(c, argv[0]) == TY_STRING) &&
               !(vt == TY_POLY && dt != TY_POLY)))
           buf_printf(b, "; SP_GC_ROOT(_t%d)", th);
-        buf_printf(b, "; %s _t%d = ", c_type_name(ty_hash_key(rt)), tk); emit_hash_key(c, argv[0], ty_hash_key(rt), b);
+        /* a key no entry matches (hash_okey_miss) goes through the _okey ops */
+        const char *ks = hash_okey_sfx(c, argv[0], ty_hash_key(rt));
+        buf_printf(b, "; %s _t%d = ", hash_key_ctype(c, argv[0], ty_hash_key(rt)), tk); emit_hash_key_o(c, argv[0], ty_hash_key(rt), b);
         if (needs_box) {
-          buf_printf(b, "; sp_%sHash_has_key(_t%d, _t%d) ? ", hn, th, tk);
+          buf_printf(b, "; sp_%sHash_has_key%s(_t%d, _t%d) ? ", hn, ks, th, tk);
           Buf _bx; memset(&_bx, 0, sizeof _bx);
-          buf_printf(&_bx, "sp_%sHash_get(_t%d, _t%d)", hn, th, tk);
+          buf_printf(&_bx, "sp_%sHash_get%s(_t%d, _t%d)", hn, ks, th, tk);
           emit_boxed_text(c, vt, _bx.p, b);
           free(_bx.p);
           buf_puts(b, " : "); emit_boxed(c, argv[1], b);
@@ -5659,12 +5661,12 @@ else {
              the default travels with its nil (fetch_or takes an sp_oint)
              and the answer is unwrapped where the consumer wants it plain */
           buf_puts(b, "; "); oint_open(c, id, TY_INT, b);
-          buf_printf(b, "sp_%sHash_fetch_or(_t%d, _t%d, ", hn, th, tk);
+          buf_printf(b, "sp_%sHash_fetch_or%s(_t%d, _t%d, ", hn, ks, th, tk);
           emit_oint_expr(c, argv[1], TY_INT, b);
           buf_puts(b, ")"); oint_close(c, id, b);
         }
         else {
-          buf_printf(b, "; sp_%sHash_has_key(_t%d, _t%d) ? sp_%sHash_get(_t%d, _t%d) : ", hn, th, tk, hn, th, tk);
+          buf_printf(b, "; sp_%sHash_has_key%s(_t%d, _t%d) ? sp_%sHash_get%s(_t%d, _t%d) : ", hn, ks, th, tk, hn, ks, th, tk);
           if (vt == TY_POLY && dt != TY_POLY) emit_boxed(c, argv[1], b);
           else emit_expr(c, argv[1], b);
         }
@@ -6188,6 +6190,12 @@ else {
             continue;
           }
           int tk = ++g_tmp;
+          /* a key no entry matches (hash_okey_miss) slices nothing: the key
+             is evaluated for its effects */
+          if (rt != TY_POLY_POLY_HASH && hash_okey_miss(c, argv[i], skt)) {
+            buf_puts(b, " (void)("); emit_expr(c, argv[i], b); buf_puts(b, ");");
+            continue;
+          }
           if (rt == TY_POLY_POLY_HASH) {
             buf_printf(b, " { sp_RbVal _t%d = ", tk); emit_boxed(c, argv[i], b);
           }
@@ -6243,8 +6251,10 @@ else {
             buf_puts(b, ");");
             continue;
           }
-          buf_printf(b, " sp_%sHash_delete(_t%d, ", hn, t);
-          if (rt == TY_POLY_POLY_HASH) emit_boxed(c, argv[i], b); else emit_hash_key(c, argv[i], ty_hash_key(rt), b);
+          /* a key no entry matches (hash_okey_miss) deletes nothing (_okey) */
+          buf_printf(b, " sp_%sHash_delete%s(_t%d, ", hn,
+                     rt == TY_POLY_POLY_HASH ? "" : hash_okey_sfx(c, argv[i], ty_hash_key(rt)), t);
+          if (rt == TY_POLY_POLY_HASH) emit_boxed(c, argv[i], b); else emit_hash_key_o(c, argv[i], ty_hash_key(rt), b);
           buf_puts(b, ");");
         }
         buf_printf(b, " _t%d; })", t);

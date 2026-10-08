@@ -3996,17 +3996,48 @@ int hash_nil_key_stored(Compiler *c, int key, TyKind kt) {
   return 0;   /* an Integer key has no nil word any more (A5) */
 }
 
+/* An Integer-keyed table looked up with a key of another class
+   (hash_key_misses): no sp_int names a key no entry has, so the lookup takes
+   the table's _okey entry point with a nil sp_oint key, which matches no
+   entry (the miss answers as each op does for a missing key). */
+int hash_okey_miss(Compiler *c, int key, TyKind kt) {
+  return kt == TY_INT && hash_key_misses(c, key, kt);
+}
+/* that key: evaluated for its effects, then the nil no entry matches */
+void emit_hash_okey(Compiler *c, int key, Buf *b) {
+  buf_puts(b, "({ (void)("); emit_expr(c, key, b); buf_puts(b, "); sp_oint_nil(); })");
+}
+
+/* a lookup site's three parts for such a key: the key temp's C type, the
+   op's name suffix, and the key itself */
+const char *hash_key_ctype(Compiler *c, int key, TyKind kt) {
+  return hash_okey_miss(c, key, kt) ? "sp_oint" : c_type_name(kt);
+}
+const char *hash_okey_sfx(Compiler *c, int key, TyKind kt) {
+  return hash_okey_miss(c, key, kt) ? "_okey" : "";
+}
+void emit_hash_key_o(Compiler *c, int key, TyKind kt, Buf *b) {
+  if (hash_okey_miss(c, key, kt)) emit_hash_okey(c, key, b);
+  else emit_hash_key(c, key, kt, b);
+}
+
 void emit_hash_key(Compiler *c, int key, TyKind kt, Buf *b) {
   int kboxed = repr_of(c, key).kind == RK_BOXED;
   if (hash_key_misses(c, key, kt)) {
+    /* an Integer key no entry equals goes through the _okey entry points
+       (hash_okey_miss), which each caller asks first: one that reaches here
+       has none, and refuses at compile time rather than raise a TypeError
+       CRuby would not */
+    if (kt == TY_INT) {
+      unsupported_feature(c, key, "a key of another class on an Integer-keyed Hash in this method");
+      buf_puts(b, "0");
+      return;
+    }
     /* evaluate the key for its effects, then answer the value no key equals */
     buf_puts(b, "({ (void)(");
     emit_expr(c, key, b);
     if (kt == TY_STRING)      buf_puts(b, "); (const char *)0; })");
-    else if (kt == TY_SYMBOL) buf_puts(b, "); (sp_sym)-1; })");
-    /* an Integer key no key equals does not exist: a nil key is refused
-       where it is read (the runtime raises for one stored, A5) */
-    else                      buf_puts(b, "); sp_oint_arg(sp_oint_nil()); })");
+    else                      buf_puts(b, "); (sp_sym)-1; })");
     return;
   }
   /* A Symbol key on a String-keyed hash used to coerce to its name, a
