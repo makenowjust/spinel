@@ -5155,11 +5155,17 @@ static int sp_poly_coerce_binop(const char *op, sp_RbVal a, sp_RbVal b, sp_RbVal
 #define SP_POLY_COERCE_CMP(OP) do { sp_RbVal _u; if (sp_poly_coerce_binop(OP, a, b, &_u)) return sp_poly_truthy(_u); } while (0)
 /* the same guard for a method whose answer is the boxed value itself */
 #define SP_POLY_COERCE_NUM(OP) do { sp_RbVal _u; if (sp_poly_coerce_binop(OP, a, b, &_u)) return _u; } while (0)
-static sp_oint sp_poly_spaceship(sp_RbVal a, sp_RbVal b) {
+/* A user's or a coerce's `<=>` answer as an Integer or nil: out of line, so
+   sp_poly_spaceship keeps the size that lets a sort's comparator inline it
+   (the unbox's error arm in its body did not) */
+static SP_NOINLINE SP_COLD sp_oint sp_spaceship_answer(sp_RbVal u) { return sp_unbox_oint(u); }
+/* The body, inlined where a hot loop compares (a sort's comparator); the
+   function below is the one every other caller shares */
+static SP_INLINE sp_oint sp_poly_spaceship_body(sp_RbVal a, sp_RbVal b) {
   { sp_RbVal _u; if (sp_poly_user_cmp("<=>", a, b, &_u))
-      return sp_unbox_oint(_u); }
+      return sp_spaceship_answer(_u); }
   { sp_RbVal _u; if (sp_poly_coerce_binop("<=>", a, b, &_u))
-      return sp_unbox_oint(_u); }
+      return sp_spaceship_answer(_u); }
   sp_bool comparable; sp_int cmp = sp_poly_cmp(a, b, &comparable);
   if (comparable) return sp_oint_of(cmp);
   if (a.tag == b.tag &&
@@ -5170,6 +5176,7 @@ static sp_oint sp_poly_spaceship(sp_RbVal a, sp_RbVal b) {
   if (sp_poly_rb_equal(a, b)) return sp_oint_of(0);
   return sp_oint_nil();
 }
+static sp_oint sp_poly_spaceship(sp_RbVal a, sp_RbVal b) { return sp_poly_spaceship_body(a, b); }
 /* String#<=> alone falls back to rb_invcmp: an operand that is neither a
    string nor convertible by #to_str is asked to compare itself AGAINST the
    string and its answer is negated, giving nil when the operand's class has
@@ -5427,7 +5434,7 @@ static sp_oint sp_sort_key_cmp(sp_RbVal a, sp_RbVal b) {
      but read by its sign */
   if (sp_poly_user_cmp("<=>", a, b, &u) || sp_poly_coerce_binop("<=>", a, b, &u))
     return sp_sort_cmpint(u);
-  return sp_poly_spaceship(a, b);
+  return sp_poly_spaceship_body(a, b);
 }
 /* sp_sort_idx_by_poly for keys that need not compare (sort_by over keys of
    more than one kind, a nil, a Float): a pair whose `<=>` is nil raises
@@ -5435,6 +5442,13 @@ static sp_oint sp_sort_key_cmp(sp_RbVal a, sp_RbVal b) {
    A copy of that loop rather than a flag on it: this header's changes are
    additive only (CONTRIBUTING.md). */
 static void sp_sort_idx_by_poly_ck(sp_int *idx, const sp_RbVal *keys, sp_int n) SP_UNUSED;
+/* a pair of keys whose `<=>` is nil: CRuby's ArgumentError, out of line so
+   the merge loop stays small enough to inline its comparator */
+static SP_NOINLINE SP_COLD SP_NORETURN void sp_sort_cmp_failed(sp_int *tmp, sp_RbVal ka, sp_RbVal kb) {
+  free(tmp);
+  sp_raise_cls("ArgumentError", sp_sprintf("comparison of %s with %s failed", sp_poly_class_name(ka), sp_cmperr_desc(kb)));
+  for (;;) {}
+}
 static void sp_sort_idx_by_poly_ck(sp_int *idx, const sp_RbVal *keys, sp_int n) {
   if (n < 2) return;
   sp_int *tmp = (sp_int *)malloc(sizeof(sp_int) * (size_t)n);
@@ -5447,11 +5461,7 @@ static void sp_sort_idx_by_poly_ck(sp_int *idx, const sp_RbVal *keys, sp_int n) 
       sp_int i = lo, j = mid, k = lo;
       while (i < mid && j < hi) {
         sp_oint c = sp_sort_key_cmp(keys[src[i]], keys[src[j]]);
-        if (c.nil) {
-          sp_RbVal ka = keys[src[i]], kb = keys[src[j]];
-          free(tmp);
-          sp_raise_cls("ArgumentError", sp_sprintf("comparison of %s with %s failed", sp_poly_class_name(ka), sp_cmperr_desc(kb)));
-        }
+        if (SP_UNLIKELY(c.nil)) sp_sort_cmp_failed(tmp, keys[src[i]], keys[src[j]]);
         if (c.v <= 0) dst[k++] = src[i++];   /* left wins ties -> stable */
         else dst[k++] = src[j++];
       }
