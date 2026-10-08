@@ -223,11 +223,24 @@ void emit_method_call(Compiler *c, int id, Buf *b) {
   buf_puts(b, ")");
 }
 
+/* The walk being bound reads a typed Integer-valued hash whose values may
+   be nil (hash_vals_nullable of its receiver, DESIGN.md D3b-ii): its values
+   are read with their nil (_vget) and handed on as the slot takes them.
+   Set by each walk's entry point before it binds. */
+static int g_hash_vnil = 0;
+#define HASH_VNIL_OF(c, id) (g_hash_vnil = hash_vals_nullable((c), nt_ref((c)->nt, (id), "receiver")))
+/* entry `ti`'s value of `_t<tr>` read with its nil, handed to a slot that
+   is an oint as is, boxed as boxed, else unwrapped (a param the analysis
+   did not mark fails loudly) */
+static void hash_vnil_val(Buf *o, const char *hn, int tr, int ti, int slot_o, int boxed) {
+  buf_printf(o, "%ssp_%sHash_vget(_t%d, _t%d->order[_t%d])%s",
+             slot_o ? "" : boxed ? "sp_box_oint(" : "sp_oint_arg(", hn, tr, tr, ti, slot_o ? "" : ")");
+}
 /* Emit, into g_pre after the caller's `<lhs> = `, the rest of the statement
    binding a hash block's first parameter to entry `ti` of `_t<trecv>`: the
    boxed [k, v] pair when `pair`, else the key or the value per `is_key`. */
 static void emit_hash_p0_rhs(Compiler *c, Repr hr, const char *hn,
-                             int trecv, int ti, int pair, int is_key) {
+                             int trecv, int ti, int pair, int is_key, int slot_o) {
   TyKind kt = hr.key, vt = hr.val;
   if (pair) {
     int tpp = ++g_tmp;
@@ -241,7 +254,9 @@ static void emit_hash_p0_rhs(Compiler *c, Repr hr, const char *hn,
       snprintf(kx, sizeof kx, "_t%d->order[_t%d]", trecv, ti);
       snprintf(vx, sizeof vx, "sp_%sHash_get(_t%d, _t%d->order[_t%d])", hn, trecv, trecv, ti);
       Buf bk; memset(&bk, 0, sizeof bk); emit_boxed_text(c, kt, kx, &bk);
-      Buf bv; memset(&bv, 0, sizeof bv); emit_boxed_text(c, vt, vx, &bv);
+      Buf bv; memset(&bv, 0, sizeof bv);
+      if (g_hash_vnil && oint_kind(vt)) hash_vnil_val(&bv, hn, trecv, ti, 0, 1);
+      else emit_boxed_text(c, vt, vx, &bv);
       buf_printf(g_pre, "sp_PolyArray_push(_t%d, %s); sp_PolyArray_push(_t%d, %s); ",
                  tpp, bk.p ? bk.p : "sp_box_nil()", tpp, bv.p ? bv.p : "sp_box_nil()");
       free(bk.p); free(bv.p);
@@ -257,6 +272,7 @@ static void emit_hash_p0_rhs(Compiler *c, Repr hr, const char *hn,
   else {
     if (repr_hash_is(hr, TY_POLY, TY_POLY))
       buf_printf(g_pre, "_t%d->vals[_t%d->order[_t%d]];\n", trecv, trecv, ti);
+    else if (g_hash_vnil && oint_kind(vt)) { hash_vnil_val(g_pre, hn, trecv, ti, slot_o, 0); buf_puts(g_pre, ";\n"); }
     else
       buf_printf(g_pre, "sp_%sHash_get(_t%d, _t%d->order[_t%d]);\n", hn, trecv, trecv, ti);
   }
@@ -321,7 +337,7 @@ static char *emit_hash_block_eval(Compiler *c, int block, Repr hr, const char *h
     if (ns0) {
       st0 = ++g_tmp; emit_ctype(c, p0_actual, g_pre);
       buf_printf(g_pre, " lv__bp%d = ", st0);
-      emit_hash_p0_rhs(c, hr, hn, trecv, ti, !p1_orig && p0_solo_is_value == 2, p0_is_key);
+      emit_hash_p0_rhs(c, hr, hn, trecv, ti, !p1_orig && p0_solo_is_value == 2, p0_is_key, 0);
       for (int ri = 0; ri < g_nren; ri++) {
         if (sp_streq(g_ren_from[ri], p0_orig)) {
           sri0 = ri; strncpy(sro0, g_ren_to[ri], sizeof sro0 - 1);
@@ -343,7 +359,7 @@ static char *emit_hash_block_eval(Compiler *c, int block, Repr hr, const char *h
     }
     else {
       buf_printf(g_pre, "lv_%s = ", p0);
-      emit_hash_p0_rhs(c, hr, hn, trecv, ti, !p1_orig && p0_solo_is_value == 2, p0_is_key);
+      emit_hash_p0_rhs(c, hr, hn, trecv, ti, !p1_orig && p0_solo_is_value == 2, p0_is_key, p0_lv && slot_is_oint(p0_lv));
     }
   }
   if (p1_orig) {
@@ -377,6 +393,11 @@ static char *emit_hash_block_eval(Compiler *c, int block, Repr hr, const char *h
         buf_printf(g_pre, "lv_%s = _t%d->vals[_t%d->order[_t%d]];\n", p1, trecv, trecv, ti);
       /* a value param whose slot holds its nil (another site binds it a
          nil) takes the value lifted */
+      else if (g_hash_vnil && oint_kind(vt)) {
+        buf_printf(g_pre, "lv_%s = ", p1);
+        hash_vnil_val(g_pre, hn, trecv, ti, p1_lv && slot_is_oint(p1_lv), 0);
+        buf_puts(g_pre, ";\n");
+      }
       else if (p1_lv && slot_is_oint(p1_lv) && oint_kind(vt))
         buf_printf(g_pre, "lv_%s = %s(sp_%sHash_get(_t%d, _t%d->order[_t%d]));\n", p1, oint_of(vt), hn, trecv, trecv, ti);
       else
@@ -469,6 +490,7 @@ int emit_hash_collect_expr(Compiler *c, int id, Buf *b) {
        or boxed when a `next` or `break` in the block widens it */
     TyKind bvt2 = TY_UNKNOWN;
     g_hbe_want_oint = 1;
+    HASH_VNIL_OF(c, id);
     char *vb = emit_hash_block_eval(c, block, rr, hn, trecv, ti, 0, &bvt2);
     g_hbe_want_oint = 0;
     int vb_o = g_hbe_oint; g_hbe_oint = 0;
@@ -505,8 +527,9 @@ int emit_hash_collect_expr(Compiler *c, int id, Buf *b) {
                  hn, tres, trecv, trecv, ti, trecv, trecv, ti);
     }
     else {
-      buf_printf(g_pre, "sp_%sHash_set(_t%d, _t%d->order[_t%d], sp_%sHash_%s(_t%d, _t%d->order[_t%d])); }",
-                 hn, tres, trecv, ti, hn, "get", trecv, trecv, ti);   /* a key the walk is on is present */
+      int cvn = oint_kind(rr.val) && hash_vals_nullable(c, recv);   /* the value with its nil (D3b-ii) */
+      buf_printf(g_pre, "sp_%sHash_%s(_t%d, _t%d->order[_t%d], sp_%sHash_%s(_t%d, _t%d->order[_t%d])); }",
+                 hn, cvn ? "oset" : "set", tres, trecv, ti, hn, cvn ? "vget" : "get", trecv, trecv, ti);   /* a key the walk is on is present */
     }
     buf_puts(g_pre, "\n");
     emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n");
@@ -523,11 +546,18 @@ int emit_hash_collect_expr(Compiler *c, int id, Buf *b) {
     emit_indent(g_pre, g_indent);
     buf_printf(g_pre, "for (sp_int _t%d = 0; _t%d < _t%d->len; _t%d++) {\n", ti, ti, trecv, ti);
     TyKind bret;
-    char *vb = emit_hash_block_eval(c, block, rr, hn, trecv, ti, block_param_name(c, block, 1) ? 1 : 2, &bret);
-    emit_indent(g_pre, g_indent + 1);
+    HASH_VNIL_OF(c, id);
     const char *sfx = nil_store_sfx(c, rk, NIL_STORE_BOXED);
+    /* a value that can be nil, read from a hash whose values may be (D3b-ii),
+       is collected as its oint into an array that takes nils */
+    g_hbe_want_oint = sfx[0] && g_hash_vnil;
+    char *vb = emit_hash_block_eval(c, block, rr, hn, trecv, ti, block_param_name(c, block, 1) ? 1 : 2, &bret);
+    g_hbe_want_oint = 0;
+    int vb_o = g_hbe_oint; g_hbe_oint = 0;
+    emit_indent(g_pre, g_indent + 1);
     buf_printf(g_pre, "sp_%sArray_push%s(_t%d, ", rk, sfx, tres);
-    if (res_poly && bret != TY_POLY) {
+    if (vb_o) buf_puts(g_pre, vb);
+    else if (res_poly && bret != TY_POLY) {
       Buf bx; memset(&bx, 0, sizeof bx);
       emit_boxed_text(c, bret, vb ? vb : "", &bx);
       buf_puts(g_pre, bx.p ? bx.p : ""); free(bx.p);
@@ -562,7 +592,8 @@ static void emit_hash_pair_at(Repr hr, const char *hn,
   else if (vt == TY_POLY)
     buf_printf(g_pre, " sp_PolyArray_push(_t%d, sp_%sHash_get(_t%d, _t%d->order[_t%d]));", dest, hn, trecv, trecv, ti);
   else if (vt == TY_INT)
-    buf_printf(g_pre, " sp_PolyArray_push(_t%d, sp_box_int(sp_%sHash_get(_t%d, _t%d->order[_t%d])));", dest, hn, trecv, trecv, ti);
+    buf_printf(g_pre, " sp_PolyArray_push(_t%d, %s(sp_%sHash_%s(_t%d, _t%d->order[_t%d])));", dest,
+               g_hash_vnil ? "sp_box_oint" : "sp_box_int", hn, g_hash_vnil ? "vget" : "get", trecv, trecv, ti);
   else
     buf_printf(g_pre, " sp_PolyArray_push(_t%d, sp_box_str(sp_%sHash_get(_t%d, _t%d->order[_t%d])));", dest, hn, trecv, trecv, ti);
   buf_puts(g_pre, "\n");
@@ -607,6 +638,7 @@ int emit_hash_reduce_search_expr(Compiler *c, int id, Buf *b) {
   emit_indent(g_pre, g_indent);
   buf_printf(g_pre, "for (sp_int _t%d = 0; _t%d < _t%d->len; _t%d++) {\n", ti, ti, trecv, ti);
   TyKind bret;
+  HASH_VNIL_OF(c, id);
   char *vb = emit_hash_block_eval(c, block, rr, hn, trecv, ti, block_param_name(c, block, 1) ? 0 : 2, &bret);
   if (is_find) {
     emit_indent(g_pre, g_indent + 1);
@@ -640,6 +672,7 @@ int emit_hash_reduce_search_expr(Compiler *c, int id, Buf *b) {
   free(vb);
   emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n");
   emit_indent(g_pre, g_indent); buf_printf(g_pre, "if (_t%d >= 0) {\n", twin);
+  HASH_VNIL_OF(c, id);
   emit_hash_pair_at(rr, hn, trecv, twin, tres, g_indent + 1);
   emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n");
   buf_printf(b, "_t%d", tres);
@@ -682,6 +715,7 @@ int emit_hash_sort_by_expr(Compiler *c, int id, Buf *b) {
   emit_indent(g_pre, g_indent);
   buf_printf(g_pre, "for (sp_int _t%d = 0; _t%d < _t%d->len; _t%d++) {\n", ti, ti, trecv, ti);
   TyKind bret;
+  HASH_VNIL_OF(c, id);
   char *vb = emit_hash_block_eval(c, block, rr, hn, trecv, ti, block_param_name(c, block, 1) ? 0 : 2, &bret);
   emit_indent(g_pre, g_indent + 1);
   buf_printf(g_pre, "sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d);\n", tup, tup);
@@ -694,6 +728,7 @@ int emit_hash_sort_by_expr(Compiler *c, int id, Buf *b) {
   free(vb);
   emit_indent(g_pre, g_indent + 1);
   buf_printf(g_pre, "sp_PolyArray *_t%d = NULL; SP_GC_ROOT(_t%d);\n", tpair, tpair);
+  HASH_VNIL_OF(c, id);
   emit_hash_pair_at(rr, hn, trecv, ti, tpair, g_indent + 1);
   emit_indent(g_pre, g_indent + 1);
   buf_printf(g_pre, "sp_PolyArray_push(_t%d, sp_box_poly_array(_t%d));\n", tup, tpair);
@@ -765,6 +800,7 @@ int emit_hash_reduce_scalar_expr(Compiler *c, int id, Buf *b) {
   emit_indent(g_pre, g_indent);
   buf_printf(g_pre, "for (sp_int _t%d = 0; _t%d < _t%d->len; _t%d++) {\n", ti, ti, trecv, ti);
   TyKind bret;
+  HASH_VNIL_OF(c, id);
   char *vb = emit_hash_block_eval(c, block, rr, hn, trecv, ti, block_param_name(c, block, 1) ? 0 : 2, &bret);
   if (is_sum) {
     emit_indent(g_pre, g_indent + 1);
@@ -868,7 +904,9 @@ int emit_transform_hash_expr(Compiler *c, int id, Buf *b) {
     { TyKind vt2 = rr.val;
       const char *nil_v = (vt2 == TY_INT) ? "sp_oint_arg(sp_oint_nil())" :
                           (vt2 == TY_POLY) ? "sp_box_nil()" : "NULL";
-      buf_printf(g_pre, "sp_%sHash_set(_t%d, _t%d, %s);\n", shn, td2, tk2, nil_v); }
+      /* a result whose values may be nil keeps them (DESIGN.md D3b-ii) */
+      if (vt2 == TY_INT && hash_vals_nullable(c, id)) buf_printf(g_pre, "sp_%sHash_set_nil(_t%d, _t%d);\n", shn, td2, tk2);
+      else buf_printf(g_pre, "sp_%sHash_set(_t%d, _t%d, %s);\n", shn, td2, tk2, nil_v); }
     emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n");
     buf_printf(b, "_t%d", td2);
     return 1;
@@ -882,6 +920,10 @@ int emit_transform_hash_expr(Compiler *c, int id, Buf *b) {
   TyKind p0_scope_ty = p0_lv_tv ? p0_lv_tv->type : TY_UNKNOWN;
   int needs_box_assign = (p0_scope_ty == TY_POLY && (!keys ? svt != TY_POLY : skt != TY_POLY));
   int ts = ++g_tmp, td = ++g_tmp, ti = ++g_tmp, tk = ++g_tmp;
+  /* DESIGN.md D3b-ii: the source's values may be nil (svn), the result's may
+     be nil (dvn): the values are read and stored with their nil */
+  int svn = oint_kind(svt) && hash_vals_nullable(c, recv);
+  int dvn = oint_kind(dr.val) && hash_vals_nullable(c, id);
   emit_pre_rooted_recv(c, recv, rt, ts);  /* recv preludes flush to g_pre first */
   emit_indent(g_pre, g_indent); emit_ctype(c, dt, g_pre); buf_printf(g_pre, " _t%d = sp_%sHash_new(); SP_GC_ROOT(_t%d);\n", td, dhn, td);
   emit_indent(g_pre, g_indent); buf_printf(g_pre, "for (sp_int _t%d = 0; _t%d < _t%d->len; _t%d++) {\n", ti, ti, ts, ti);
@@ -901,7 +943,13 @@ int emit_transform_hash_expr(Compiler *c, int id, Buf *b) {
       else buf_printf(g_pre, "lv_%s = _t%d;\n", p0, tk);
     }
     else {
-      if (needs_box_assign) {
+      if (svn) {
+        /* the value with its nil, as the param's slot takes it */
+        int so = p0_lv_tv && slot_is_oint(p0_lv_tv);
+        buf_printf(g_pre, "lv_%s = %ssp_%sHash_vget(_t%d, _t%d)%s;\n", p0,
+                   so ? "" : needs_box_assign ? "sp_box_oint(" : "sp_oint_arg(", shn, ts, tk, so ? "" : ")");
+      }
+      else if (needs_box_assign) {
         char gv[128]; snprintf(gv, sizeof gv, "sp_%sHash_get(_t%d, _t%d)", shn, ts, tk);
         Buf bx; memset(&bx, 0, sizeof bx);
         emit_boxed_text(c, svt, gv, &bx);
@@ -912,6 +960,11 @@ int emit_transform_hash_expr(Compiler *c, int id, Buf *b) {
   }
   TyKind bret = repr_of(c, bb[bn - 1]).as_ty;
   Buf vb; memset(&vb, 0, sizeof vb);
+  /* the block's value carries its nil into a result whose values may be nil:
+     an oint-formed value is emitted as its oint, a boxed one unboxed with it */
+  int lastv = bb[bn - 1];
+  int oset_v = !keys && dvn && dr.val == TY_INT && !fold_body_has_next(c, body) &&
+               (bret == TY_POLY || bret == TY_UNKNOWN || node_has_oint_form(c, lastv));
   /* a `next <v>` answers for this pair: the body writes a slot and the
      set below reads it, where the bare `continue` of a tail read skipped
      the set and dropped the pair */
@@ -926,10 +979,15 @@ int emit_transform_hash_expr(Compiler *c, int id, Buf *b) {
   else {
     for (int j = 0; j < bn - 1; j++) emit_stmt(c, bb[j], g_pre, g_indent + 1);
     int save = g_indent; g_indent++;
-    emit_expr(c, bb[bn - 1], &vb); g_indent = save;
+    if (oset_v && bret == TY_INT) emit_oint_expr(c, lastv, TY_INT, &vb);
+    else emit_expr(c, bb[bn - 1], &vb);
+    g_indent = save;
   }
   TyKind dkt = dr.key;
-  emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "sp_%sHash_set(_t%d, ", dhn, td);
+  /* the value stored carries its nil: the source's (transform_keys) or the
+     block's (an oint-formed or boxed result, transform_values) */
+  int oset_k = keys && svn && dvn && dr.val == svt;
+  emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "sp_%sHash_%s(_t%d, ", dhn, oset_k || oset_v ? "oset" : "set", td);
   if (keys) {
     /* new key = block result; unbox if block returned poly but key type is typed */
     const char *vbp = vb.p ? vb.p : "0";
@@ -947,7 +1005,9 @@ int emit_transform_hash_expr(Compiler *c, int id, Buf *b) {
     buf_puts(g_pre, ", ");
     if (repr_hash_is(rr, TY_POLY, TY_POLY))
       buf_printf(g_pre, "_t%d->vals[_t%d->order[_t%d]]", ts, ts, ti);
+    else if (dvt == TY_POLY && svt != TY_POLY && svn) buf_printf(g_pre, "sp_box_oint(sp_%sHash_vget(_t%d, _t%d))", shn, ts, tk);
     else if (dvt == TY_POLY && svt != TY_POLY) { Buf bx; memset(&bx, 0, sizeof bx); char g[64]; snprintf(g, sizeof g, "sp_%sHash_get(_t%d, _t%d)", shn, ts, tk); emit_boxed_text(c, svt, g, &bx); buf_puts(g_pre, bx.p ? bx.p : ""); free(bx.p); }
+    else if (oset_k) buf_printf(g_pre, "sp_%sHash_vget(_t%d, _t%d)", shn, ts, tk);
     else buf_printf(g_pre, "sp_%sHash_get(_t%d, _t%d)", shn, ts, tk);
   }
   else {
@@ -969,7 +1029,7 @@ int emit_transform_hash_expr(Compiler *c, int id, Buf *b) {
       buf_printf(g_pre, "sp_poly_to_s(%s)", vb.p ? vb.p : "sp_box_nil()");
     }
     else if (dvt == TY_INT && (bret == TY_POLY || bret == TY_UNKNOWN)) {
-      buf_printf(g_pre, "sp_poly_hval_i(%s)", vb.p ? vb.p : "sp_box_nil()");
+      buf_printf(g_pre, "%s(%s)", oset_v ? "sp_poly_hval_oi" : "sp_poly_hval_i", vb.p ? vb.p : "sp_box_nil()");
     }
     else buf_puts(g_pre, vb.p ? vb.p : "0");
   }

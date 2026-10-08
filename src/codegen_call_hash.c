@@ -357,6 +357,10 @@ int emit_op_hash_fetch(Compiler *c, const BopCtx *x, Buf *b) {
   int argc;
   const int *argv = call_args(c->nt, x->id, &argc);
   TyKind vt = ty_hash_val(rt);
+  /* a hash whose values may be nil (DESIGN.md D3b-ii) answers the hit with
+     its nil, as an oint */
+  int vo = oint_kind(vt) && node_is_oint(c, x->id);
+  const char *miss_v = vo ? "sp_oint_nil()" : vt == TY_POLY ? "sp_box_nil()" : default_value_from_compiler(c, vt);
   int th = ++g_tmp, tk = ++g_tmp;
   char keytmp[32], htmp[32];
   snprintf(keytmp, sizeof keytmp, "_t%d", tk);
@@ -369,18 +373,17 @@ int emit_op_hash_fetch(Compiler *c, const BopCtx *x, Buf *b) {
     buf_printf(b, "; sp_RbVal _t%d = ", tk); emit_boxed(c, argv[0], b);
     buf_puts(b, "; sp_exc_stage_recv(");
     emit_boxed_text(c, rt, htmp, b);
-    buf_printf(b, "); sp_raise_key_not_found(_t%d); %s; })", tk,
-               vt == TY_POLY ? "sp_box_nil()" : default_value_from_compiler(c, vt));
+    buf_printf(b, "); sp_raise_key_not_found(_t%d); %s; })", tk, miss_v);
     return 1;
   }
   buf_printf(b, "; %s _t%d = ", c_type_name(ty_hash_key(rt)), tk); emit_hash_key(c, argv[0], ty_hash_key(rt), b);
-  buf_printf(b, "; sp_%sHash_has_key(_t%d, _t%d) ? sp_%sHash_get(_t%d, _t%d) : (",
-             hn, th, tk, hn, th, tk);
+  buf_printf(b, "; sp_%sHash_has_key(_t%d, _t%d) ? sp_%sHash_%s(_t%d, _t%d) : (",
+             hn, th, tk, hn, vo ? "vget" : "get", th, tk);
   buf_puts(b, "sp_exc_stage_recv(");
   emit_boxed_text(c, rt, htmp, b);
   buf_puts(b, "), sp_raise_key_not_found(");
   emit_boxed_text(c, ty_hash_key(rt), keytmp, b);
-  buf_printf(b, "), %s); })", vt == TY_POLY ? "sp_box_nil()" : default_value_from_compiler(c, vt));
+  buf_printf(b, "), %s); })", miss_v);
   return 1;
 }
 
@@ -593,7 +596,8 @@ int emit_op_hash_merge_bang_many(Compiler *c, const BopCtx *x, Buf *b) {
     buf_printf(b, " %s _t%d = ", c_type_name(rt), to); emit_expr(c, argv[ai], b); buf_puts(b, ";");
     buf_printf(b, " for (sp_int _t%d = 0; _t%d < _t%d->len; _t%d++) {", ti, ti, to, ti);
     buf_printf(b, " %s _t%d = _t%d->order[_t%d];", c_type_name(kt), tk, to, ti);
-    buf_printf(b, " sp_%sHash_set(_t%d, _t%d, sp_%sHash_get(_t%d, _t%d)); }", hn, tr, tk, hn, to, tk);
+    int mvn = ty_hash_val(rt) == TY_INT && hash_vals_nullable(c, recv);   /* with its nil (D3b-ii) */
+    buf_printf(b, " sp_%sHash_%s(_t%d, _t%d, sp_%sHash_%s(_t%d, _t%d)); }", hn, mvn ? "oset" : "set", tr, tk, hn, mvn ? "vget" : "get", to, tk);
   }
   buf_printf(b, " _t%d; })", tr);
   return 1;
@@ -627,6 +631,7 @@ int emit_op_hash_shift(Compiler *c, const BopCtx *x, Buf *b) {
   else buf_printf(b, " sp_PolyArray_push(_t%d, sp_box_int(_t%d));", tp, tk);
   if (rt == TY_POLY_POLY_HASH) buf_printf(b, " sp_PolyArray_push(_t%d, _t%d->vals[_t%d->order[0]]);", tp, th, th);
   else if (vt == TY_POLY) buf_printf(b, " sp_PolyArray_push(_t%d, sp_%sHash_get(_t%d, _t%d));", tp, hn, th, tk);
+  else if (vt == TY_INT && hash_vals_nullable(c, recv)) buf_printf(b, " sp_PolyArray_push(_t%d, sp_box_oint(sp_%sHash_vget(_t%d, _t%d)));", tp, hn, th, tk);
   else if (vt == TY_INT) buf_printf(b, " sp_PolyArray_push(_t%d, sp_box_int(sp_%sHash_get(_t%d, _t%d)));", tp, hn, th, tk);
   else buf_printf(b, " sp_PolyArray_push(_t%d, sp_box_str(sp_%sHash_get(_t%d, _t%d)));", tp, hn, th, tk);
   buf_printf(b, " _t%d = sp_box_poly_array(_t%d);", tr, tp);
@@ -706,6 +711,8 @@ int emit_op_hash_invert(Compiler *c, const BopCtx *x, Buf *b) {
       buf_printf(b, " sp_RbVal _v%d = _t%d->vals[_t%d->order[_t%d]];", ti, th, th, ti);
     else if (vt == TY_POLY)
       buf_printf(b, " sp_RbVal _v%d = sp_%sHash_get(_t%d, _t%d->order[_t%d]);", ti, hn, th, th, ti);
+    else if (vt == TY_INT && hash_vals_nullable(c, recv))   /* a nil value becomes a nil key (D3b-ii) */
+      buf_printf(b, " sp_RbVal _v%d = sp_box_oint(sp_%sHash_vget(_t%d, _t%d->order[_t%d]));", ti, hn, th, th, ti);
     else if (vt == TY_INT) {
       buf_printf(b, " sp_RbVal _v%d = sp_box_int(sp_%sHash_get(_t%d, _t%d->order[_t%d]));", ti, hn, th, th, ti);
     }
@@ -751,6 +758,8 @@ int emit_op_hash_flatten(Compiler *c, const BopCtx *x, Buf *b) {
     buf_printf(b, " sp_PolyArray_push(_t%d, _t%d->vals[_t%d->order[_t%d]]);", tr, th, th, ti);
   else if (vt == TY_POLY)
     buf_printf(b, " sp_PolyArray_push(_t%d, sp_%sHash_get(_t%d, _t%d->order[_t%d]));", tr, hn, th, th, ti);
+  else if (vt == TY_INT && hash_vals_nullable(c, recv))
+    buf_printf(b, " sp_PolyArray_push(_t%d, sp_box_oint(sp_%sHash_vget(_t%d, _t%d->order[_t%d])));", tr, hn, th, th, ti);
   else if (vt == TY_INT)
     buf_printf(b, " sp_PolyArray_push(_t%d, sp_box_int(sp_%sHash_get(_t%d, _t%d->order[_t%d])));", tr, hn, th, th, ti);
   else
@@ -842,10 +851,13 @@ int emit_op_hash_assoc(Compiler *c, const BopCtx *x, Buf *b) {
      The other variants store the KEY in order[] and read values through
      sp_<hn>Hash_get(key). Build the value-read expression accordingly. */
   char vget[96];
+  /* a value that may be nil is read and boxed with its nil (D3b-ii) */
+  int avn = vt == TY_INT && hash_vals_nullable(c, recv);
+  const char *ibox = avn ? "sp_box_oint" : "sp_box_int";
   if (rt == TY_POLY_POLY_HASH)
     snprintf(vget, sizeof vget, "_t%d->vals[_t%d->order[_t%d]]", th, th, ti);
   else
-    snprintf(vget, sizeof vget, "sp_%sHash_get(_t%d, _t%d->order[_t%d])", hn, th, th, ti);
+    snprintf(vget, sizeof vget, "sp_%sHash_%s(_t%d, _t%d->order[_t%d])", hn, avn ? "vget" : "get", th, th, ti);
   buf_printf(b, "({ sp_%sHash *_t%d = ", hn, th); emit_expr(c, recv, b); buf_puts(b, ";");
   /* store argument */
   if (!is_rassoc) {
@@ -875,7 +887,7 @@ int emit_op_hash_assoc(Compiler *c, const BopCtx *x, Buf *b) {
     /* rassoc: compare value (boxed) */
     buf_printf(b, " sp_RbVal _rv%d = ", ti);
     if (vt == TY_POLY) buf_printf(b, "%s;", vget);
-    else if (vt == TY_INT) buf_printf(b, "sp_box_int(%s);", vget);
+    else if (vt == TY_INT) buf_printf(b, "%s(%s);", ibox, vget);
     else buf_printf(b, "sp_box_str(%s);", vget);
     buf_printf(b, " if (sp_poly_rb_equal(_rv%d, _t%d)) {", ti, ta);
   }
@@ -885,7 +897,7 @@ int emit_op_hash_assoc(Compiler *c, const BopCtx *x, Buf *b) {
   if (vt == TY_POLY)
     buf_printf(b, " sp_PolyArray_push(_t%d, %s);", tr, vget);
   else if (vt == TY_INT)
-    buf_printf(b, " sp_PolyArray_push(_t%d, sp_box_int(%s));", tr, vget);
+    buf_printf(b, " sp_PolyArray_push(_t%d, %s(%s));", tr, ibox, vget);
   else
     buf_printf(b, " sp_PolyArray_push(_t%d, sp_box_str(%s));", tr, vget);
   buf_printf(b, " break; } } _t%d; })", tr);  /* NULL = nil in poly context */

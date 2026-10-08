@@ -778,12 +778,15 @@ static void emit_fetch_blk_param(Compiler *c, int id, int blk, TyKind kt, int tk
    (hash_okey_form): a key no entry matches slices nothing (evaluated for
    its effects); a boxed key, or an Integer that can be nil, is copied only
    when it is an Integer the table holds. 0 for any other key. */
-static int emit_slice_okey_key(Compiler *c, int key, TyKind kt, const char *hn, int th, int tr, int tk, Buf *b) {
+static int emit_slice_okey_key(Compiler *c, int key, TyKind kt, const char *hn, int th, int tr, int tk, int vn, Buf *b) {
   if (!hash_okey_form(c, key, kt)) return 0;
   if (hash_okey_miss(c, key, kt)) { buf_puts(b, " (void)("); emit_expr(c, key, b); buf_puts(b, ");"); return 1; }
   buf_printf(b, " { sp_oint _t%d = ", tk); emit_hash_key_o(c, key, kt, b);
-  buf_printf(b, "; if (sp_%sHash_has_key_okey(_t%d, _t%d)) sp_%sHash_set(_t%d, _t%d.v, sp_%sHash_get_okey(_t%d, _t%d)); }",
-             hn, th, tk, hn, tr, tk, hn, th, tk);
+  /* vn: the values may be nil, copied with it (DESIGN.md D3b-ii) */
+  if (vn) buf_printf(b, "; if (sp_%sHash_has_key_okey(_t%d, _t%d)) sp_%sHash_oset(_t%d, _t%d.v, sp_%sHash_vget(_t%d, _t%d.v)); }",
+                     hn, th, tk, hn, tr, tk, hn, th, tk);
+  else buf_printf(b, "; if (sp_%sHash_has_key_okey(_t%d, _t%d)) sp_%sHash_set(_t%d, _t%d.v, sp_%sHash_get_okey(_t%d, _t%d)); }",
+                  hn, th, tk, hn, tr, tk, hn, th, tk);
   return 1;
 }
 
@@ -829,12 +832,19 @@ static void emit_fetch_blk_okey_param(Compiler *c, int blk, int tb, int tk, Buf 
    type `vt`: boxed on the way in when the parameter's slot is boxed, as it
    is in a block handed through a method's `&blk` (emit_fetch_blk_param's
    rule). */
-static void emit_merge_blk_param(Compiler *c, int blk, const char *pn, TyKind vt, const char *text, Buf *b) {
+/* `otext`, when given, is the value with its nil (an sp_oint, read from a
+   hash whose values may be nil, DESIGN.md D3b-ii): handed to an oint slot as
+   is, boxed into a boxed one, else unwrapped. */
+static void emit_merge_blk_param(Compiler *c, int blk, const char *pn, TyKind vt, const char *text, const char *otext, Buf *b) {
   if (!pn) return;
   Scope *bs = comp_scope_of(c, blk);
   LocalVar *lv = bs ? scope_local(bs, pn) : NULL;
   buf_printf(b, " lv_%s = ", rename_local(pn));
-  if (lv && lv->type == TY_POLY && vt != TY_POLY) emit_boxed_text(c, vt, text, b);
+  if (otext) {
+    if (lv && slot_is_oint(lv)) buf_puts(b, otext);
+    else buf_printf(b, "%s(%s)", lv && lv->type == TY_POLY ? "sp_box_oint" : "sp_oint_arg", otext);
+  }
+  else if (lv && lv->type == TY_POLY && vt != TY_POLY) emit_boxed_text(c, vt, text, b);
   else buf_puts(b, text);
   buf_puts(b, ";");
 }
@@ -5031,6 +5041,15 @@ void emit_push_hash_key(TyKind kt, int dest, int th, int ti, Buf *b) {
     buf_printf(b, " sp_PolyArray_push(_t%d, _t%d->keys[_t%d->order[_t%d]]);", dest, th, th, ti);
 }
 
+/* The value at key text `k` of the typed hash text `h` (receiver node
+   `recv`, of kind name hn and value kind vt), boxed: with its nil when the
+   hash's values may be nil (DESIGN.md D3b-ii) */
+static void emit_hash_val_boxed(Compiler *c, int recv, TyKind vt, const char *hn, const char *h, const char *k, Buf *b) {
+  if (oint_kind(vt) && hash_vals_nullable(c, recv)) { buf_printf(b, "sp_box_oint(sp_%sHash_vget(%s, %s))", hn, h, k); return; }
+  char g[160]; snprintf(g, sizeof g, "sp_%sHash_get(%s, %s)", hn, h, k);
+  emit_boxed_text(c, vt, g, b);
+}
+
 /* Emit a statement-expression materializing a hash's entries as a PolyArray of
    [key, value] poly pairs in insertion order. The source hash is GC-rooted
    because each pair allocates inside the walk. Shared by Hash#to_a/#entries and
@@ -5048,8 +5067,10 @@ void emit_hash_pairs_expr(Compiler *c, int recv, TyKind rt, const char *hn, Buf 
     buf_printf(b, " sp_PolyArray_push(_t%d, _t%d->vals[_t%d->order[_t%d]]);", tp, th, th, ti);
   else if (vt == TY_POLY)
     buf_printf(b, " sp_PolyArray_push(_t%d, sp_%sHash_get(_t%d, _t%d->order[_t%d]));", tp, hn, th, th, ti);
-  else if (vt == TY_INT)
-    buf_printf(b, " sp_PolyArray_push(_t%d, sp_box_int(sp_%sHash_get(_t%d, _t%d->order[_t%d])));", tp, hn, th, th, ti);
+  else if (vt == TY_INT) {
+    char hs[24], ks[48]; snprintf(hs, sizeof hs, "_t%d", th); snprintf(ks, sizeof ks, "_t%d->order[_t%d]", th, ti);
+    buf_printf(b, " sp_PolyArray_push(_t%d, ", tp); emit_hash_val_boxed(c, recv, vt, hn, hs, ks, b); buf_puts(b, ");");
+  }
   else
     buf_printf(b, " sp_PolyArray_push(_t%d, sp_box_str(sp_%sHash_get(_t%d, _t%d->order[_t%d])));", tp, hn, th, th, ti);
   buf_printf(b, " sp_PolyArray_push(_t%d, sp_box_poly_array(_t%d));", tr, tp);
@@ -5375,6 +5396,56 @@ static int emit_hash_nilkey_read(Compiler *c, int id, const char *name, int recv
   return 1;
 }
 
+/* merge(other) { |k, v1, v2| } typed as the receiver's own variant (an
+   emit_hash_call arm, kept out of that function's length) */
+static int emit_merge_block_same_variant(Compiler *c, int id, int recv, int arg, TyKind rt, const char *hn, Buf *b) {
+  const NodeTable *nt = c->nt;
+  /* merge(other) { |k, v1, v2| } -- conflict-resolution block. The
+     result starts as a copy of the receiver, then each key of `other`
+     is inserted; on a collision the block picks the value. */
+  int blk = nt_ref(nt, id, "block");
+  const char *bp0 = block_param_name(c, blk, 0);
+  const char *bp1 = block_param_name(c, blk, 1);
+  const char *bp2 = block_param_name(c, blk, 2);
+  TyKind kt = ty_hash_key(rt), vt = ty_hash_val(rt);
+  /* values that may be nil are read and stored with their nil (D3b-ii) */
+  int mvn = oint_kind(vt) && hash_vals_nullable(c, recv);
+  const char *mset = mvn ? "oset" : "set", *mget = mvn ? "vget" : "get";
+  int tr = ++g_tmp, to = ++g_tmp, ti = ++g_tmp, tk = ++g_tmp, tc = ++g_tmp, tj = ++g_tmp;
+  buf_printf(b, "({ %s _t%d = sp_%sHash_new(); SP_GC_ROOT(_t%d);", c_type_name(rt), tr, hn, tr);
+  /* copy the receiver into the fresh result */
+  buf_printf(b, " %s _t%d = ", c_type_name(rt), tc); emit_expr(c, recv, b); buf_puts(b, ";");
+  buf_printf(b, " _t%d->default_v = _t%d->default_v;", tr, tc);
+  if (rt == TY_STR_INT_HASH || rt == TY_INT_INT_HASH)
+    buf_printf(b, " _t%d->default_nil = _t%d->default_nil;", tr, tc);
+  if (vt == TY_POLY)
+    buf_printf(b, " _t%d->dproc = _t%d->dproc; _t%d->dproc_self = _t%d->dproc_self;", tr, tc, tr, tc);
+  buf_printf(b, " for (sp_int _t%d = 0; _t%d < _t%d->len; _t%d++)"
+                " sp_%sHash_%s(_t%d, _t%d->order[_t%d], sp_%sHash_%s(_t%d, _t%d->order[_t%d]));",
+             tj, tj, tc, tj, hn, mset, tr, tc, tj, hn, mget, tc, tc, tj);
+  buf_printf(b, " %s _t%d = ", c_type_name(rt), to); emit_expr(c, arg, b); buf_puts(b, ";");
+  buf_printf(b, " for (sp_int _t%d = 0; _t%d < _t%d->len; _t%d++) {", ti, ti, to, ti);
+  buf_printf(b, " %s _t%d = _t%d->order[_t%d];", c_type_name(kt), tk, to, ti);
+  buf_printf(b, " if (sp_%sHash_has_key(_t%d, _t%d)) {", hn, tr, tk);
+  if (bp0) buf_printf(b, " lv_%s = _t%d;", rename_local(bp0), tk);
+  if (mvn) {
+    char v1[96], v2[96];
+    snprintf(v1, sizeof v1, "sp_%sHash_vget(_t%d, _t%d)", hn, tr, tk);
+    snprintf(v2, sizeof v2, "sp_%sHash_vget(_t%d, _t%d)", hn, to, tk);
+    emit_merge_blk_param(c, blk, bp1, vt, v1, v1, b);
+    emit_merge_blk_param(c, blk, bp2, vt, v2, v2, b);
+  }
+  else {
+    if (bp1) buf_printf(b, " lv_%s = sp_%sHash_get(_t%d, _t%d);", rename_local(bp1), hn, tr, tk);
+    if (bp2) buf_printf(b, " lv_%s = sp_%sHash_get(_t%d, _t%d);", rename_local(bp2), hn, to, tk);
+  }
+  buf_printf(b, " sp_%sHash_%s(_t%d, _t%d, ", hn, mset, tr, tk);
+  if (mvn) emit_blk_value_as_o(c, blk, vt, b); else emit_blk_value_as(c, blk, vt, b);
+  buf_printf(b, "); }\nelse { sp_%sHash_%s(_t%d, _t%d, sp_%sHash_%s(_t%d, _t%d)); } }", hn, mset, tr, tk, hn, mget, to, tk);
+  buf_printf(b, " _t%d; })", tr);
+  return 1;
+}
+
 int emit_hash_call(Compiler *c, int id, Buf *b) {
   const NodeTable *nt = c->nt;
   const char *name = nt_str(nt, id, "name");
@@ -5584,7 +5655,7 @@ int emit_hash_call(Compiler *c, int id, Buf *b) {
           buf_printf(b, " sp_PolyArray_push(_t%d, ", tr);
           char getexpr[128]; snprintf(getexpr, sizeof getexpr, "sp_%sHash_get(_t%d, _t%d)", hn, th, tk);
           if (vt == TY_POLY) buf_puts(b, getexpr);
-          else emit_boxed_text(c, vt, getexpr, b);
+          else { char hs[24], ks[24]; snprintf(hs, sizeof hs, "_t%d", th); snprintf(ks, sizeof ks, "_t%d", tk); emit_hash_val_boxed(c, recv, vt, hn, hs, ks, b); }
           buf_puts(b, ");");
           int fv_blk = nt_ref(nt, id, "block");
           if (is_fetch && fv_blk >= 0 && nt_type(nt, fv_blk) &&
@@ -5662,11 +5733,20 @@ int emit_hash_call(Compiler *c, int id, Buf *b) {
           /* When the block's return type differs from the hash value type,
              box both arms so the ternary produces a consistent sp_RbVal. */
           int mismatch = vt != TY_POLY && bvt != vt;
+          /* a hash whose values may be nil answers an oint (the node's form) */
+          int fvo = !mismatch && oint_kind(vt) && node_is_oint(c, id);
           if (mismatch) {
             buf_printf(b, "; sp_%sHash_has_key%s(_t%d, _t%d) ? ", hn, ks, th, tk);
             char getexpr[128]; snprintf(getexpr, sizeof getexpr, "sp_%sHash_get%s(_t%d, _t%d)", hn, ks, th, tk);
             emit_boxed_text(c, vt, getexpr, b);
             buf_puts(b, " : ");
+          }
+else if (fvo) {
+            /* the hit with its nil (DESIGN.md D3b-ii); the block's value lifted */
+            if (okf) buf_printf(b, "; sp_%sHash_has_key%s(_t%d, _t%d) ? sp_oint_of(sp_%sHash_get%s(_t%d, _t%d)) : sp_oint_of(",
+                                hn, ks, th, tk, hn, ks, th, tk);
+            else buf_printf(b, "; sp_%sHash_has_key%s(_t%d, _t%d) ? sp_%sHash_vget(_t%d, _t%d) : sp_oint_of(",
+                            hn, ks, th, tk, hn, th, tk);
           }
 else {
             buf_printf(b, "; sp_%sHash_has_key%s(_t%d, _t%d) ? sp_%sHash_get%s(_t%d, _t%d) : ",
@@ -5685,7 +5765,7 @@ else {
               buf_puts(b, fv.p ? fv.p : "");
               buf_puts(b, "; })");
               free(fv.p); free(fbind.p);
-              buf_puts(b, "; })");
+              buf_puts(b, fvo ? "); })" : "; })");
               return 1;
             }
             free(fv.p);
@@ -5694,7 +5774,7 @@ else {
                                     (vt == TY_POLY || mismatch) && bvt != TY_POLY,
                                     (vt == TY_POLY || mismatch) ? "sp_box_nil()" : default_value_from_compiler(c, vt), 1, b);
           free(fbind.p);
-          buf_puts(b, "; })");
+          buf_puts(b, fvo ? "); })" : "; })");
           return 1;
         }
       }
@@ -5739,6 +5819,13 @@ else {
           buf_printf(b, "sp_%sHash_fetch_or%s(_t%d, _t%d, ", hn, ks, th, tk);
           emit_oint_expr(c, argv[1], TY_INT, b);
           buf_puts(b, ")"); oint_close(c, id, b);
+        }
+        else if (oint_kind(vt) && node_is_oint(c, id)) {
+          /* a hash whose values may be nil: the hit with its nil, the default
+             in its oint form (DESIGN.md D3b-ii) */
+          if (ks[0]) buf_printf(b, "; sp_%sHash_has_key%s(_t%d, _t%d) ? sp_oint_of(sp_%sHash_get%s(_t%d, _t%d)) : ", hn, ks, th, tk, hn, ks, th, tk);
+          else buf_printf(b, "; sp_%sHash_has_key(_t%d, _t%d) ? sp_%sHash_vget(_t%d, _t%d) : ", hn, th, tk, hn, th, tk);
+          emit_oint_expr(c, argv[1], vt, b);
         }
         else {
           buf_printf(b, "; sp_%sHash_has_key%s(_t%d, _t%d) ? sp_%sHash_get%s(_t%d, _t%d) : ", hn, ks, th, tk, hn, ks, th, tk);
@@ -5944,8 +6031,8 @@ else {
             char k1[24], v1[96];
             snprintf(k1, sizeof k1, "_t%d", trk);
             snprintf(v1, sizeof v1, "sp_%sHash_get(_t%d, _t%d)", hn, tr, trk);
-            emit_merge_blk_param(c, blk, bp0, kt, k1, b);
-            emit_merge_blk_param(c, blk, bp1, vt, v1, b);
+            emit_merge_blk_param(c, blk, bp0, kt, k1, NULL, b);
+            emit_merge_blk_param(c, blk, bp1, vt, v1, NULL, b);
             if (bp2) {
               buf_printf(b, " lv_%s = ", rename_local(bp2));
               emit_boxed_text(c, avt, aval, b);
@@ -5961,6 +6048,9 @@ else {
           return 1;
         }
         if (at != rt) return 0;
+        /* values that may be nil are read and stored with their nil (D3b-ii) */
+        int mvn = oint_kind(vt) && hash_vals_nullable(c, recv);
+        const char *mset = mvn ? "oset" : "set", *mget = mvn ? "vget" : "get";
         int tr = ++g_tmp, to = ++g_tmp, ti = ++g_tmp, tk = ++g_tmp;
         buf_printf(b, "({ %s _t%d = ", c_type_name(rt), tr); emit_expr(c, recv, b); buf_puts(b, ";");
         buf_printf(b, " if (sp_gc_is_frozen(_t%d)) sp_raise_frozen_hash_at(_t%d, %s);", tr, tr, hash_box_cls(rt));   /* (#3001) */
@@ -5978,17 +6068,17 @@ else {
           buf_printf(b, " if (sp_%sHash_has_key(_t%d, _t%d)) {", hn, tr, tk);
           char k2[24], v2[96], w2[96];
           snprintf(k2, sizeof k2, "_t%d", tk);
-          snprintf(v2, sizeof v2, "sp_%sHash_get(_t%d, _t%d)", hn, tr, tk);
-          snprintf(w2, sizeof w2, "sp_%sHash_get(_t%d, _t%d)", hn, to, tk);
-          emit_merge_blk_param(c, blk, bp0, kt, k2, b);
-          emit_merge_blk_param(c, blk, bp1, vt, v2, b);
-          emit_merge_blk_param(c, blk, bp2, vt, w2, b);
-          buf_printf(b, " sp_%sHash_set(_t%d, _t%d, ", hn, tr, tk);
-          emit_blk_value_as(c, blk, vt, b);
-          buf_printf(b, "); }\nelse { sp_%sHash_set(_t%d, _t%d, sp_%sHash_get(_t%d, _t%d)); }", hn, tr, tk, hn, to, tk);
+          snprintf(v2, sizeof v2, "sp_%sHash_%s(_t%d, _t%d)", hn, mget, tr, tk);
+          snprintf(w2, sizeof w2, "sp_%sHash_%s(_t%d, _t%d)", hn, mget, to, tk);
+          emit_merge_blk_param(c, blk, bp0, kt, k2, NULL, b);
+          emit_merge_blk_param(c, blk, bp1, vt, v2, mvn ? v2 : NULL, b);
+          emit_merge_blk_param(c, blk, bp2, vt, w2, mvn ? w2 : NULL, b);
+          buf_printf(b, " sp_%sHash_%s(_t%d, _t%d, ", hn, mset, tr, tk);
+          if (mvn) emit_blk_value_as_o(c, blk, vt, b); else emit_blk_value_as(c, blk, vt, b);
+          buf_printf(b, "); }\nelse { sp_%sHash_%s(_t%d, _t%d, sp_%sHash_%s(_t%d, _t%d)); }", hn, mset, tr, tk, hn, mget, to, tk);
         }
         else {
-          buf_printf(b, " sp_%sHash_set(_t%d, _t%d, sp_%sHash_get(_t%d, _t%d));", hn, tr, tk, hn, to, tk);
+          buf_printf(b, " sp_%sHash_%s(_t%d, _t%d, sp_%sHash_%s(_t%d, _t%d));", hn, mset, tr, tk, hn, mget, to, tk);
         }
         buf_printf(b, " } _t%d; })", tr);
         return 1;
@@ -6069,38 +6159,7 @@ else {
       /* merge with a block, typed as the receiver's own variant */
       if (sp_streq(name, "merge") && argc == 1 && nt_ref(nt, id, "block") >= 0 &&
           repr_hash_is(repr_of(c, id), ty_hash_key(rt), ty_hash_val(rt))) {
-        /* merge(other) { |k, v1, v2| } -- conflict-resolution block. The
-           result starts as a copy of the receiver, then each key of `other`
-           is inserted; on a collision the block picks the value. */
-        int blk = nt_ref(nt, id, "block");
-        const char *bp0 = block_param_name(c, blk, 0);
-        const char *bp1 = block_param_name(c, blk, 1);
-        const char *bp2 = block_param_name(c, blk, 2);
-        TyKind kt = ty_hash_key(rt), vt = ty_hash_val(rt);
-        int tr = ++g_tmp, to = ++g_tmp, ti = ++g_tmp, tk = ++g_tmp, tc = ++g_tmp, tj = ++g_tmp;
-        buf_printf(b, "({ %s _t%d = sp_%sHash_new(); SP_GC_ROOT(_t%d);", c_type_name(rt), tr, hn, tr);
-        /* copy the receiver into the fresh result */
-        buf_printf(b, " %s _t%d = ", c_type_name(rt), tc); emit_expr(c, recv, b); buf_puts(b, ";");
-        buf_printf(b, " _t%d->default_v = _t%d->default_v;", tr, tc);
-        if (rt == TY_STR_INT_HASH || rt == TY_INT_INT_HASH)
-          buf_printf(b, " _t%d->default_nil = _t%d->default_nil;", tr, tc);
-        if (vt == TY_POLY)
-          buf_printf(b, " _t%d->dproc = _t%d->dproc; _t%d->dproc_self = _t%d->dproc_self;", tr, tc, tr, tc);
-        buf_printf(b, " for (sp_int _t%d = 0; _t%d < _t%d->len; _t%d++)"
-                      " sp_%sHash_set(_t%d, _t%d->order[_t%d], sp_%sHash_get(_t%d, _t%d->order[_t%d]));",
-                   tj, tj, tc, tj, hn, tr, tc, tj, hn, tc, tc, tj);
-        buf_printf(b, " %s _t%d = ", c_type_name(rt), to); emit_expr(c, argv[0], b); buf_puts(b, ";");
-        buf_printf(b, " for (sp_int _t%d = 0; _t%d < _t%d->len; _t%d++) {", ti, ti, to, ti);
-        buf_printf(b, " %s _t%d = _t%d->order[_t%d];", c_type_name(kt), tk, to, ti);
-        buf_printf(b, " if (sp_%sHash_has_key(_t%d, _t%d)) {", hn, tr, tk);
-        if (bp0) buf_printf(b, " lv_%s = _t%d;", rename_local(bp0), tk);
-        if (bp1) buf_printf(b, " lv_%s = sp_%sHash_get(_t%d, _t%d);", rename_local(bp1), hn, tr, tk);
-        if (bp2) buf_printf(b, " lv_%s = sp_%sHash_get(_t%d, _t%d);", rename_local(bp2), hn, to, tk);
-        buf_printf(b, " sp_%sHash_set(_t%d, _t%d, ", hn, tr, tk);
-        emit_blk_value_as(c, blk, vt, b);
-        buf_printf(b, "); }\nelse { sp_%sHash_set(_t%d, _t%d, sp_%sHash_get(_t%d, _t%d)); } }", hn, tr, tk, hn, to, tk);
-        buf_printf(b, " _t%d; })", tr);
-        return 1;
+        return emit_merge_block_same_variant(c, id, recv, argv[0], rt, hn, b);
       }
       /* merge(*hashes): fold each member of the splatted list in, through the
          universal boxed merge (#3561) */
@@ -6239,6 +6298,7 @@ else {
         emit_expr(c, recv, b);
         buf_printf(b, "; SP_GC_ROOT(_t%d); sp_%sHash *_t%d = sp_%sHash_new(); SP_GC_ROOT(_t%d);", th, hn, tr, hn, tr);
         TyKind skt = ty_hash_key(rt);
+        int svn = ty_hash_val(rt) == TY_INT && hash_vals_nullable(c, recv);   /* values copied with their nil (D3b-ii) */
         for (int i = 0; i < argc; i++) {
           /* A splatted key list contributes each of its members, not one key.
              `except` has had this arm since #3561; `slice` never did, so
@@ -6259,13 +6319,13 @@ else {
               else if (skt == TY_SYMBOL) buf_printf(b, " sp_sym _t%d = (sp_sym)sp_poly_to_i(%s);", tsk, el);
               else if (skt == TY_INT) buf_printf(b, " sp_int _t%d = sp_poly_to_i(%s);", tsk, el);
               else buf_printf(b, " const char *_t%d = sp_poly_to_s(%s);", tsk, el);
-              buf_printf(b, " if (sp_%sHash_has_key(_t%d, _t%d)) sp_%sHash_set(_t%d, _t%d, sp_%sHash_get(_t%d, _t%d)); }",
-                         hn, th, tsk, hn, tr, tsk, hn, th, tsk);
+              buf_printf(b, " if (sp_%sHash_has_key(_t%d, _t%d)) sp_%sHash_%s(_t%d, _t%d, sp_%sHash_%s(_t%d, _t%d)); }",
+                         hn, th, tsk, hn, svn ? "oset" : "set", tr, tsk, hn, svn ? "vget" : "get", th, tsk);
             }
             continue;
           }
           int tk = ++g_tmp;
-          if (rt != TY_POLY_POLY_HASH && emit_slice_okey_key(c, argv[i], skt, hn, th, tr, tk, b)) continue;
+          if (rt != TY_POLY_POLY_HASH && emit_slice_okey_key(c, argv[i], skt, hn, th, tr, tk, svn, b)) continue;
           if (rt == TY_POLY_POLY_HASH) {
             buf_printf(b, " { sp_RbVal _t%d = ", tk); emit_boxed(c, argv[i], b);
           }
@@ -6278,8 +6338,8 @@ else {
           else {
             buf_printf(b, " { const char *_t%d = ", tk); emit_hash_key(c, argv[i], skt, b);
           }
-          buf_printf(b, "; if (sp_%sHash_has_key(_t%d, _t%d)) sp_%sHash_set(_t%d, _t%d, sp_%sHash_get(_t%d, _t%d)); }",
-                     hn, th, tk, hn, tr, tk, hn, th, tk);
+          buf_printf(b, "; if (sp_%sHash_has_key(_t%d, _t%d)) sp_%sHash_%s(_t%d, _t%d, sp_%sHash_%s(_t%d, _t%d)); }",
+                     hn, th, tk, hn, svn ? "oset" : "set", tr, tk, hn, svn ? "vget" : "get", th, tk);
         }
         buf_printf(b, " _t%d; })", tr);
         return 1;
@@ -6357,7 +6417,7 @@ else {
                    tvv, hn, th, tk, tvv);
         { char getx[96]; snprintf(getx, sizeof getx, "sp_%sHash_get(_t%d, _t%d)", hn, th, tk);
           if (vt == TY_POLY) buf_puts(b, getx);
-          else emit_boxed_text(c, vt, getx, b); }
+          else { char hs[24], ks[24]; snprintf(hs, sizeof hs, "_t%d", th); snprintf(ks, sizeof ks, "_t%d", tk); emit_hash_val_boxed(c, recv, vt, hn, hs, ks, b); } }
         buf_printf(b, "; sp_%sHash_delete(_t%d, _t%d); }\nelse {", hn, th, tk);
         Buf dbind; memset(&dbind, 0, sizeof dbind);
         if (dp0) {
