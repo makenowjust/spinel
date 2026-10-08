@@ -5155,7 +5155,8 @@ static int emit_iteration_stmt_sn(Compiler *c, int id, Buf *b, int indent) {
   int t = ++g_tmp;
   Buf gb; memset(&gb, 0, sizeof gb);
   Buf rb; memset(&rb, 0, sizeof rb);
-  if (boxed) emit_boxed(c, recv, &rb); else emit_expr(c, recv, &rb);
+  /* an Integer / Float receiver is held as its oint, the nil the guard tests */
+  if (boxed) emit_boxed(c, recv, &rb); else if (oint_kind(rt)) emit_oint_expr(c, recv, rt, &rb); else emit_expr(c, recv, &rb);
   emit_indent(&gb, indent);
   buf_puts(&gb, "{ ");
   if (boxed) buf_puts(&gb, "sp_RbVal"); else emit_res_ctype(c, rt, oint_kind(rt), &gb);

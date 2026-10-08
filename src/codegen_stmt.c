@@ -15174,7 +15174,12 @@ void emit_stmt_tail_inner(Compiler *c, int id, Buf *b, int indent) {
              comp_ntype(c, id) != TY_VOID && comp_ntype(c, id) != TY_UNKNOWN) {
       emit_indent(b, indent);
       emit_tail_lead(b);
-      emit_tail_recv_value(c, id, _rr, b);
+      /* a slot holding its nil (`def c(v) = v&.upto(3) { }`) takes the
+         receiver's oint */
+      TyKind tct = comp_ntype(c, id);
+      if (oint_kind(tct) && (g_result_var ? g_result_oint : g_ret_oint) && repr_of(c, _rr).kind != RK_BOXED)
+        emit_oint_expr(c, _rr, tct, b);
+      else emit_tail_recv_value(c, id, _rr, b);
       buf_puts(b, ";\n");
     }
     else if (_named) {
