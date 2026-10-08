@@ -4385,10 +4385,15 @@ int emit_sortby_expr(Compiler *c, int id, Buf *b) {
   IterStep st; emit_iter_step_open(c, block, 0, g_indent + 1, &st);
   int save = g_indent; g_indent += 1;
   Buf kb; memset(&kb, 0, sizeof kb);
-  if (emit_iter_step_tail(c, &st, &kb) == TY_POLY) kt = TY_POLY;
+  /* an Integer or Float key that can be nil is boxed with its nil: the
+     comparison then raises CRuby's ArgumentError for it */
+  TyKind kot = iter_step_tail_ty(c, &st);
+  int ko = oint_kind(kot) && emit_iter_step_tail_o(c, &st, kot, &kb);
+  if (!ko && emit_iter_step_tail(c, &st, &kb) == TY_POLY) kt = TY_POLY;
   g_indent = save;
   emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "sp_PolyArray_push(_t%d, ", tkeys);
-  if (kt == TY_POLY) buf_puts(g_pre, kb.p ? kb.p : "sp_box_nil()");
+  if (ko) buf_printf(g_pre, "%s(%s)", oint_box(kot), kb.p ? kb.p : oint_nil(kot));
+  else if (kt == TY_POLY) buf_puts(g_pre, kb.p ? kb.p : "sp_box_nil()");
   else { Buf bx; memset(&bx, 0, sizeof bx); emit_boxed_text(c, kt, kb.p ? kb.p : "0", &bx); buf_puts(g_pre, bx.p ? bx.p : ""); free(bx.p); }
   buf_puts(g_pre, ");\n"); free(kb.p);
   emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "sp_IntArray_push(_t%d, _t%d);\n", tidx, ti);
