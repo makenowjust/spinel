@@ -1355,20 +1355,21 @@ static int emit_poly_array_call(Compiler *c, int id, Buf *b, const NodeTable *nt
                   " (long long)_t%d, (long long)_n%d)); }",
                tp, tp, tp, ti, tp, tp, tp, ti, tp);
     buf_printf(b, " sp_%sHash_set(_t%d, ", hn, th);
-    /* an Integer key or an Integer or Float value reads a boxed nil as
-       the slot's nil, as every Integer and Float unbox does */
+    /* an Integer key or an Integer or Float value is read with the typed
+       hash's own check: a typed key or value has no nil (a hash that
+       stores one is widened), so another kind -- nil too -- raises */
     char kexpr[128];
     if (kty == TY_SYMBOL)      snprintf(kexpr, sizeof kexpr, "(sp_sym)sp_poly_arr_get(_t%d, 0).v.i", tp);
     else if (kty == TY_STRING) snprintf(kexpr, sizeof kexpr, "sp_poly_arr_get(_t%d, 0).v.s", tp);
     else if (kty == TY_POLY)   snprintf(kexpr, sizeof kexpr, "sp_poly_arr_get(_t%d, 0)", tp);
-    else if (kty == TY_INT)    snprintf(kexpr, sizeof kexpr, "sp_poly_as_int_or_nil(sp_poly_arr_get(_t%d, 0))", tp);
+    else if (kty == TY_INT)    snprintf(kexpr, sizeof kexpr, "sp_poly_hkey_i(sp_poly_arr_get(_t%d, 0))", tp);
     else                       snprintf(kexpr, sizeof kexpr, "sp_poly_arr_get(_t%d, 0).v.i", tp);
     buf_puts(b, kexpr); buf_puts(b, ", ");
     /* value extraction */
     if (vty == TY_POLY)        buf_printf(b, "sp_poly_arr_get(_t%d, 1)", tp);
-    else if (vty == TY_INT)    buf_printf(b, "sp_poly_as_int_or_nil(sp_poly_arr_get(_t%d, 1))", tp);
+    else if (vty == TY_INT)    buf_printf(b, "sp_poly_hval_i(sp_poly_arr_get(_t%d, 1))", tp);
     else if (vty == TY_STRING) buf_printf(b, "sp_poly_arr_get(_t%d, 1).v.s", tp);
-    else if (vty == TY_FLOAT)  buf_printf(b, "sp_poly_as_float_or_nil(sp_poly_arr_get(_t%d, 1))", tp);
+    else if (vty == TY_FLOAT)  buf_printf(b, "sp_poly_hval_f(sp_poly_arr_get(_t%d, 1))", tp);
     else                       buf_printf(b, "sp_poly_arr_get(_t%d, 1)", tp);
     buf_printf(b, "); } _t%d; })", th);
     { *out = 1; return 1; }
