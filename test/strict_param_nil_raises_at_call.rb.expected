@@ -18,3 +18,7 @@ NoMethodError: undefined method '-' for nil
 NoMethodError: undefined method '-' for nil
 TypeError: nil can't be coerced into Integer
 7
+NoMethodError: undefined method '+' for nil
+TypeError: nil can't be coerced into Integer
+3
+NoMethodError: undefined method '+' for nil

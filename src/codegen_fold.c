@@ -11871,6 +11871,10 @@ static void emit_dispatch_in(Compiler *c, int cid, const char *name,
   int pd_ren_base = g_nren, pd_uid = 0;
   int pd_active = pm && (splat_tmp_d < 0 || L.gather) && default_refs_earlier_param(c, pm);
   if (pd_active) pd_uid = ++g_tmp;
+  /* a strict parameter's argument that can be nil (param_strict): held as
+     its oint here, checked once every argument has run (below) */
+  int pmi = pm ? (int)(pm - c->scopes) : -1;
+  char strict_pend[16] = {0};
   for (int k = 0; k < np; k++) {
     atmp[k] = ++g_tmp;
     Buf ab; memset(&ab, 0, sizeof ab);
@@ -12011,6 +12015,11 @@ else {
            or a coercion from, so the argument is the caller's expression as
            written (#4514) */
         if (!pm) { if (provided >= 0) emit_expr(c, provided, &ab); else buf_puts(&ab, "0"); }
+        else if (provided >= 0 && k < 16 && p && oint_kind(p->type) && param_strict(c, pmi, k, NULL, NULL) &&
+                 (node_may_be_nil(c, provided) || repr_of(c, provided).kind == RK_BOXED)) {
+          emit_oint_expr(c, provided, p->type, &ab);
+          strict_pend[k] = 1;
+        }
         else emit_arg_or_default(c, pm, k, provided, &ab);
         g_nren = pd_nren_sv;
         g_self = saved_self;
@@ -12049,6 +12058,7 @@ else {
         /* an Integer / Float parameter holding its nil beside the value is
            bound as its oint, and the temp is declared the same */
         if (p && oint_kind(att) && slot_is_oint(p)) { buf_puts(g_pre, oint_ctype(att)); atmp_o[k] = 1; }
+        else if (k < 16 && strict_pend[k]) buf_puts(g_pre, oint_ctype(att));
         else emit_ctype(c, att, g_pre);
         buf_printf(g_pre, " _t%d = ", atmp[k]);
         buf_puts(g_pre, ab.p ? ab.p : ""); buf_puts(g_pre, ";\n");
@@ -12083,6 +12093,23 @@ else {
   }
   g_nren = pd_ren_base;   /* the renames served the defaults only */
   view_unbind(argov_saved_d);
+  /* the strict parameters' checks, in the callee's order: each nil raises
+     the error the callee's first use would have, and the parameter takes
+     the plain value */
+  for (int pass = 0; pass < 16; pass++)
+    for (int k = 0; k < np && k < 16; k++) {
+      int ord = -1;
+      if (!strict_pend[k] || !param_strict(c, pmi, k, NULL, &ord) || ord != pass) continue;
+      const char *what = NULL;
+      int kd = param_strict(c, pmi, k, &what, NULL);
+      TyKind pt = atmp_ty[k];
+      const char *fn = kd == 1 ? (pt == TY_FLOAT ? "sp_ofloat_val" : "sp_oint_val")
+                               : (pt == TY_FLOAT ? "sp_ofloat_opnd_in" : "sp_oint_opnd_in");
+      int tv = ++g_tmp;
+      emit_indent(g_pre, g_indent);
+      buf_printf(g_pre, "%s _t%d = %s(_t%d, \"%s\");\n", c_type_name(pt), tv, fn, atmp[k], what ? what : "");
+      atmp[k] = tv;
+    }
 
   /* a trailing splat's count, refused once every argument has run */
   if (given_d >= 0) {

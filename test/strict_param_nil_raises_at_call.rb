@@ -60,3 +60,14 @@ show { G.orig(n, 1) }
 show { G.aliased(n, 1) }
 show { G.redef(2, n) }
 show { G.redef(2, 3) }
+# a literal nil, and an instance method's own call with an element of an
+# ivar table that can be nil
+show { F.add(nil, 1) }
+show { F.add(2, nil) }
+class Banks
+  def initialize = @banks = [[1, 2], [3]]
+  def take(x) = x + 1
+  def pass(i) = take(@banks[i][1])
+end
+show { Banks.new.pass(0) }
+show { Banks.new.pass(1) }
