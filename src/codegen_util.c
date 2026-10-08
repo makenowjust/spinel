@@ -5824,6 +5824,12 @@ int node_is_oint(Compiler *c, int node) {
     int cid = ty_object_class(rt), rmi = -1;
     int rk = comp_resolve_member(c, cid, nm, 0, NULL, &rmi);
     if (rk == SP_MEMBER_METHOD && rmi >= 0) return method_ret_is_oint(&c->scopes[rmi]);
+    /* an attr's `||=` stores a nil field's replacement and answers it: nil
+       only where the value can be */
+    if (rk == SP_MEMBER_ATTR && k == NK_CallOrWriteNode) {
+      int v = nt_ref(nt, node, "value");
+      return v >= 0 && (nt_kind(nt, v) == NK_NilNode || node_has_oint_form(c, v));
+    }
     if (rk == SP_MEMBER_ATTR) return reader_ivar_has_nilbit(c, cid, nm);
     return nullable_int_value(c, node);
   }

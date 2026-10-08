@@ -29176,6 +29176,12 @@ int nullable_int_value(Compiler *c, int v) {
      answers v when it assigns */
   if (nt_kind(nt, v) == NK_IndexAndWriteNode) return 1;
   if (nt_kind(nt, v) == NK_IndexOrWriteNode) return nullable_int_value(c, nt_ref(nt, v, "value"));
+  /* ... and `o.x &&= v` / `o.x ||= v` the same of the attribute */
+  if (nt_kind(nt, v) == NK_CallAndWriteNode) return 1;
+  if (nt_kind(nt, v) == NK_CallOrWriteNode) {
+    int ov = nt_ref(nt, v, "value");
+    return ov < 0 || nt_kind(nt, ov) == NK_NilNode || nullable_int_value(c, ov);
+  }
   /* `x = v` answers v: `s0 = s1 = nil` hands s0 the inner write's nil */
   if (nt_kind(nt, v) == NK_LocalVariableWriteNode)
     return nullable_int_value(c, nt_ref(nt, v, "value"));

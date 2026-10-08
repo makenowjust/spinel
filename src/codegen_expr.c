@@ -5056,7 +5056,15 @@ static void emit_expr_node(Compiler *c, int id, Buf *b) {
       emit_ctype(c, rt, b); buf_printf(b, " _t%d = ", tr); emit_expr(c, recv, b); buf_puts(b, "; ");
       char lhs[300]; snprintf(lhs, sizeof lhs, "_t%d->iv_%s", tr, iv_c(attr));
       char apfx[32]; snprintf(apfx, sizeof apfx, "_t%d->", tr);
+      /* a field with a nil bit read as the node's oint (node_is_oint):
+         after the write, nil exactly when the bit says so (`&&=` over nil) */
+      int ao = oint_kind(ivt) && iidx >= 0 && ivar_has_nilbit(c, class_id, iidx) && node_is_oint(c, id);
+      if (ao) buf_puts(b, "(void)");
       emit_attr_orw_value(c, class_id, iidx, apfx, ivt, iidx >= 0 && repr_of_ivar(c, class_id, iidx).elems_handle, lhs, v, is_or, b);
+      if (ao) {
+        char ant[300]; ivar_nilbit_test(c, class_id, iidx, apfx, ant, sizeof ant);
+        buf_printf(b, "; %s ? %s : %s(%s)", ant, oint_nil(ivt), oint_of(ivt), lhs);
+      }
       buf_puts(b, "; })");
       return;
     }
