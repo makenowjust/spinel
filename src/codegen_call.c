@@ -22243,7 +22243,10 @@ static void emit_call_held(Compiler *c, int id, Buf *b) {
       int vw = view_push(c, id, TY_POLY);
       Buf ib = expr_buf(c, id);
       view_pop(c, vw);
-      emit_unbox_text(c, et, ib.p ? ib.p : "sp_box_nil()", b);
+      /* an element that can be nil is the oint (the dispatcher unwraps it
+         for a plain reader) */
+      if (oint_kind(et) && node_is_oint(c, id)) buf_printf(b, "%s(%s)", oint_unbox(et), ib.p ? ib.p : "sp_box_nil()");
+      else emit_unbox_text(c, et, ib.p ? ib.p : "sp_box_nil()", b);
       free(ib.p);
       return;
     } }
