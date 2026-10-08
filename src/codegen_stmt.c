@@ -17214,6 +17214,18 @@ static char *iow_rhs(Compiler *c, int v, int mode, Buf *pre) {
   return rb.p ? rb.p : strdup("");
 }
 
+/* `slot op rv` for an Integer / Float element: the scalar fold or the C
+   operator. `seq` reads the slot into a temp first, so a nil element's
+   NoMethodError comes before a nil right operand's TypeError (C leaves the
+   order of the two operands open) */
+static int iow_scalar_fold(Compiler *c, TyKind et, const char *op, TyKind vt, int v, const char *slot, const char *rhs, Buf *b);
+static void iow_combine(Compiler *c, TyKind et, const char *op, TyKind vt, int v, const char *slot, const char *rv, int seq, Buf *b) {
+  char ls[24];
+  if (seq) { int tl = ++g_tmp; buf_printf(b, "({ %s _t%d = %s; ", c_type_name(et), tl, slot); snprintf(ls, sizeof ls, "_t%d", tl); slot = ls; }
+  if (!iow_scalar_fold(c, et, op, vt, v, slot, rv, b)) buf_printf(b, "%s %s (%s)", slot, op, rv);
+  if (seq) buf_puts(b, "; })");
+}
+
 /* Read the slot `slot` names into a rooted temp of type `t` and point `slot`
    at the temp: Ruby reads the slot before an effectful right-hand side runs,
    and that right-hand side can replace the slot's value (#4875). */
@@ -17395,12 +17407,32 @@ void emit_index_op_write(Compiler *c, int id, Buf *b, int indent) {
        one pays nothing; any other the marks call nilable, tested in each arm
        below (iow_nil_rhs_ck). */
     Buf nfb; memset(&nfb, 0, sizeof nfb);
-    char *rhs = fnil && fuse && vt == TY_FLOAT && emit_nilfree_operand(c, v, op, 0, slot, &nfb)
+    /* a right operand that can be nil is held as its oint and unwrapped at
+       the operator: "nil can't be coerced into <the element's class>", after
+       a nil element's NoMethodError */
+    TyKind et0 = ty_array_elem(rt);
+    int ro = (rt == TY_FLOAT_ARRAY || rt == TY_INT_ARRAY) && is_arith_op(op) && mode == IOW_RHS_EXPR &&
+             oint_kind(vt) && (vt == et0 || (et0 == TY_FLOAT && vt == TY_INT)) && node_has_oint_form(c, v);
+    char *rhs;
+    if (ro) {
+      int tro = ++g_tmp;
+      Buf ob; memset(&ob, 0, sizeof ob);
+      Buf *sv_pre = g_pre; if (eff) g_pre = b;
+      emit_oint_expr(c, v, vt, &ob);
+      g_pre = sv_pre;
+      buf_printf(b, "%s _t%d = %s; ", oint_ctype(vt), tro, ob.p ? ob.p : oint_nil(vt));
+      free(ob.p);
+      char rb[96];
+      snprintf(rb, sizeof rb, "%s%s(_t%d, \"%s\")", et0 == TY_FLOAT && vt == TY_INT ? "(sp_float)" : "",
+               vt == TY_FLOAT ? "sp_ofloat_opnd_in" : "sp_oint_opnd_in", tro, et0 == TY_FLOAT ? "Float" : "Integer");
+      rhs = strdup(rb);
+    }
+    else rhs = fnil && fuse && vt == TY_FLOAT && emit_nilfree_operand(c, v, op, 0, slot, &nfb)
               ? nfb.p : iow_rhs(c, v, mode, eff ? b : NULL);
     /* the captured slot unwraps at the operator: the right-hand side with
        an effect runs ahead of it, into its own temp (C leaves the operand
        order of `x + f()` open) */
-    if (eff && rhs && (!strncmp(slot, "sp_ofloat_val(", 14) || !strncmp(slot, "sp_oint_val(", 12))) {
+    if (eff && rhs && !ro && (!strncmp(slot, "sp_ofloat_val(", 14) || !strncmp(slot, "sp_oint_val(", 12))) {
       int trh = ++g_tmp;
       buf_printf(b, "__typeof__(%s) _t%d = %s; ", rhs, trh, rhs);
       free(rhs);
@@ -17417,10 +17449,12 @@ void emit_index_op_write(Compiler *c, int id, Buf *b, int indent) {
     if (fuse) {
       TyKind et = ty_array_elem(rt);
       int tv = ++g_tmp, tp = ++g_tmp;
-      char fslot[32], rv[32];
+      char fslot[32], rv[96];
       snprintf(fslot, sizeof fslot, "(*_t%d)", tp);
       snprintf(rv, sizeof rv, "_t%d", tv);
-      buf_printf(b, "__typeof__(%s) _t%d = %s; ", rhs, tv, rhs);
+      /* (the held oint is already the temp: unwrapped in each arm) */
+      if (ro) snprintf(rv, sizeof rv, "%s", rhs);
+      else buf_printf(b, "__typeof__(%s) _t%d = %s; ", rhs, tv, rhs);
       /* a header the loop being emitted holds (hc_array) is the one read:
          the receiver's own would be read again at every iteration */
       char hd[48], hl[48], hw[48], hn[48], may_nil_ck[48];
@@ -17445,7 +17479,7 @@ void emit_index_op_write(Compiler *c, int id, Buf *b, int indent) {
       if (!iow_scalar_fold(c, et, op, vt, v, fslot, rv, b)) buf_printf(b, "%s %s (%s)", fslot, op, rv);
       buf_printf(b, "; } else ");
       buf_printf(b, "sp_%sArray_set(_t%d, _t%d, ", k, ta, tb);
-      if (!iow_scalar_fold(c, et, op, vt, v, slot, rv, b)) buf_printf(b, "%s %s (%s)", slot, op, rv);
+      iow_combine(c, et, op, vt, v, slot, rv, ro, b);
       free(rhs);
       buf_printf(b, ")%s; }\n", hc_mark());
       return;
@@ -17468,8 +17502,7 @@ void emit_index_op_write(Compiler *c, int id, Buf *b, int indent) {
     }
     /* shift/bitwise on an int slot with a poly RHS: unbox the RHS */
     else if (vt == TY_POLY) buf_printf(b, "%s %s %s%s)", slot, op, op_assign_int_conv(TY_INT, op), rhs);
-    else if (iow_scalar_fold(c, ty_array_elem(rt), op, vt, v, slot, rhs, b)) { }
-    else buf_printf(b, "%s %s (%s)", slot, op, rhs);
+    else iow_combine(c, ty_array_elem(rt), op, vt, v, slot, rhs, ro, b);
     free(rhs);
     buf_printf(b, ")%s; }\n", hc_mark());
     return;
