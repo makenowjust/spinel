@@ -4319,6 +4319,9 @@ static int emit_complex_rational_call(Compiler *c, int id, Buf *b) {
            An int-typed count validates directly; a nil-typed or boxed one is
            decided at run time, exactly as CRuby's proc_curry reads it. */
         TyKind cty = comp_ntype(c, argv[0]);
+        /* an Integer count that can be nil goes boxed, nil included: the
+           boxed constructor reads nil as no count */
+        if (cty == TY_INT && node_has_oint_form(c, argv[0])) cty = TY_POLY;
         int tcn = ++g_tmp;
         buf_printf(b, "({ sp_Proc *_t%d = ", tcn); emit_expr(c, recv, b);
         buf_printf(b, "; SP_GC_ROOT(_t%d); sp_curry_new_%s(_t%d, ", tcn,
