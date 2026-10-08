@@ -8279,6 +8279,26 @@ static int str_arms_poly_pattern(Compiler *c, int id, Buf *b, const NodeTable *n
 }
 
 /* A String, Integer or Float receiver, evaluated once into rs and spliced into each arm (emit_scalar_call_arms's arms, in their order) */
+/* Does the prelude text added since `mark` name the temp `_t<id>` (a whole
+   token, not a prefix of a longer one)? */
+static int pre_names_tmp(const Buf *pre, size_t mark, int id) {
+  if (!pre->p || pre->len <= mark) return 0;
+  char nm[24]; int n = snprintf(nm, sizeof nm, "_t%d", id);
+  for (const char *q = pre->p + mark; (q = strstr(q, nm)) != NULL; q += n) {
+    char after = q[n];
+    if (!((after >= '0' && after <= '9') || after == '_' || (after >= 'a' && after <= 'z') || (after >= 'A' && after <= 'Z'))) return 1;
+  }
+  return 0;
+}
+/* insert `text` into `b` at byte offset `at` */
+static void buf_insert_at(Buf *b, size_t at, const char *text) {
+  size_t tl = strlen(text);
+  Buf nb; memset(&nb, 0, sizeof nb);
+  if (b->p && at) { char save = b->p[at]; b->p[at] = 0; buf_puts(&nb, b->p); b->p[at] = save; }
+  buf_puts(&nb, text);
+  if (b->p) buf_puts(&nb, b->p + at);
+  free(b->p); *b = nb; (void)tl;
+}
 static int emit_scalar_recv_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv, int argc, const int *argv, TyKind rt, TyKind a0, int *out) {
   /* scalar receiver methods: evaluate the receiver once into rs, then
      splice its text (so a literal/complex receiver isn't rebuilt). */
@@ -8360,6 +8380,10 @@ static int emit_scalar_recv_arms(Compiler *c, int id, Buf *b, const NodeTable *n
      nil arm is the point. */
   Buf gbody; memset(&gbody, 0, sizeof gbody);
   Buf *g_outer_b = NULL; int g_tmpid = 0; char g_rname[24];
+  /* where the statement prelude stood when the call's body began: an arm
+     that hoists a loop (a block call) binds the receiver there, so the held
+     temp is declared at that point rather than inside the expression */
+  size_t g_pre_mark = g_pre ? g_pre->len : 0;
   /* A String receiver that is a fresh copy (a shared slot's reader) and is
      never nil still needs the bound, rooted temp when an argument may
      allocate: the guard below is the only path that holds it (g_noguard:
@@ -8857,7 +8881,17 @@ static int emit_scalar_recv_arms(Compiler *c, int id, Buf *b, const NodeTable *n
       int g_root = 0;
       if (rt == TY_STRING)
         for (int ai = 0; ai < argc && !g_root; ai++) g_root = operand_may_allocate(c, argv[ai]);
-      if (rt == TY_STRING) {
+      if (rt == TY_STRING && g_pre && pre_names_tmp(g_pre, g_pre_mark, g_tmpid)) {
+        /* the body's prelude reads the held temp: declare it there */
+        Buf hd; memset(&hd, 0, sizeof hd);
+        buf_printf(&hd, "const char *_t%d = (%s); SP_GC_ROOT(_t%d);", g_tmpid, rs.p ? rs.p : "", g_tmpid);
+        if (!g_noguard) buf_printf(&hd, " if (!_t%d) sp_raise_nomethod(sp_nomethod_msg(\"%s\", sp_box_nil()));", g_tmpid, name);
+        buf_puts(&hd, "\n");
+        buf_insert_at(g_pre, g_pre_mark, hd.p);
+        free(hd.p);
+        buf_puts(b, "({ ");
+      }
+      else if (rt == TY_STRING) {
         buf_printf(b, "({ const char *_t%d = (%s); ", g_tmpid, rs.p ? rs.p : "");
         if (g_root) buf_printf(b, "SP_GC_ROOT(_t%d); ", g_tmpid);
         if (!g_noguard) buf_printf(b, "if (!_t%d) sp_raise_nomethod(sp_nomethod_msg(\"%s\", sp_box_nil())); ", g_tmpid, name);
