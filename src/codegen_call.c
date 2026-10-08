@@ -6343,10 +6343,23 @@ static int emit_poly_str_prearm(Compiler *c, int id, int recv, const char *name,
   size_t sv_pre = g_pre ? g_pre->len : 0;
   int vw = view_push(c, id, bt);
   Buf ib; memset(&ib, 0, sizeof ib);
-  if (ret == TY_POLY && bt != TY_POLY) {
+  /* `to_i(base)`: String's own, read off the tagged receiver -- the call
+     re-read over the still-boxed receiver reaches the program's to_i, not
+     String's */
+  if (argc == 1 && sp_streq(name, "to_i") && bt == TY_INT) {
+    Buf nb; memset(&nb, 0, sizeof nb);
+    buf_printf(&nb, "sp_str_to_i_base(sp_poly_recv_s(_t%d, \"to_i\"), ", tv);
+    emit_int_expr(c, argv[0], &nb); buf_puts(&nb, ")");
+    if (ret == TY_POLY) emit_boxed_text(c, bt, nb.p, &ib); else buf_puts(&ib, nb.p);
+    free(nb.p);
+  }
+  else if (ret == TY_POLY && bt != TY_POLY) {
     Buf nb; memset(&nb, 0, sizeof nb);
     emit_expr(c, id, &nb);
-    emit_boxed_text(c, bt, nb.p ? nb.p : "0", &ib);
+    /* a raise token stays bare, for the test below */
+    if (nb.p && (strncmp(nb.p, "sp_raise_nomethod(", 18) == 0 || strncmp(nb.p, "sp_raise_poly_nomethod(", 23) == 0))
+      buf_puts(&ib, nb.p);
+    else emit_boxed_text(c, bt, nb.p ? nb.p : "0", &ib);
     free(nb.p);
   }
   else emit_expr(c, id, &ib);
@@ -6578,7 +6591,11 @@ static int emit_poly_builtin_default_at(Compiler *c, int id, int recv, const cha
      emitter answers boxed and the arm boxes it again */
   int sv_pin = an_pin_node(id);
   if (setjmp(g_unsup_recover) == 0) {
-    if (slot_o) emit_oint_expr(c, id, ret, nb);
+    /* `to_i(base)` on a kind other than String (whose pre-arm answers it):
+       every builtin to_i takes no radix, as the boxed fold answers */
+    if (argc == 1 && sp_streq(name, "to_i") && bt == TY_INT)
+      buf_puts(nb, "(sp_raise_cls(\"ArgumentError\", \"wrong number of arguments (given 1, expected 0)\"), (sp_int)0)");
+    else if (slot_o) emit_oint_expr(c, id, ret, nb);
     else if (box_o) emit_oint_expr(c, id, bt, nb);
     else emit_expr(c, id, nb);
   }
