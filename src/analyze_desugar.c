@@ -14895,6 +14895,8 @@ int desugar_ffi_library_functions(Compiler *c) {
  *   Mod.Name(args)  ->  Mod.__ffi_call(:Name, [args])        (block kept)
  *   Name(args)      ->  FFI__Registry.__ffi_dispatch([:Mod, ...], :Name, [args])
  *                                                           (block kept)
+ * The bare form also carries self: Fiddle's module functions read the
+ * invoking receiver's function table, not the declaring module's.
  *
  * The receiver form applies to a module that extends FFI::Library and has
  * no class method of the name; the bare form to a call no method in the
@@ -14977,12 +14979,19 @@ static int ffi_args_array(NodeTable *nt, int call) {
 }
 
 /* Stamp every node of a class body with the class, stopping at method
-   bodies and nested classes (which have a self of their own). */
+   bodies and nested classes (which have a self of their own).
+   Receiver-changing blocks carry -2, even inside a singleton method. */
 static void ffi_mark_body(const NodeTable *nt, int node, int ci, int *out, int n0) {
   if (node < 0 || node >= n0) return;
   NodeKind k = nt_kind(nt, node);
   if (k == NK_DefNode || k == NK_ClassNode || k == NK_ModuleNode || k == NK_SingletonClassNode) return;
   out[node] = ci;
+  if (k == NK_CallNode && cbi_self_changing_block(nt, node)) {
+    ffi_mark_body(nt, nt_ref(nt, node, "receiver"), ci, out, n0);
+    ffi_mark_body(nt, nt_ref(nt, node, "arguments"), ci, out, n0);
+    ffi_mark_body(nt, nt_ref(nt, node, "block"), -2, out, n0);
+    return;
+  }
   int nr = nt_num_refs(nt, node);
   for (int i = 0; i < nr; i++) ffi_mark_body(nt, nt_ref_at(nt, node, i), ci, out, n0);
   int na = nt_num_arrs(nt, node);
@@ -15050,6 +15059,10 @@ int rewrite_ffi_dynamic_calls(Compiler *c) {
     for (int i = 0; i < n0; i++) body_cls[i] = -1;
     for (int m = 0; m < n0; m++) {
       NodeKind mk = nt_kind(nt, m);
+      if (mk == NK_DefNode) {
+        ffi_mark_body(nt, nt_ref(nt, m, "body"), -1, body_cls, n0);
+        continue;
+      }
       if (mk != NK_ClassNode && mk != NK_ModuleNode) continue;
       int cp = nt_ref(nt, m, "constant_path");
       int ci = cp >= 0 ? comp_class_index(c, nt_str(nt, cp, "name")) : -1;
@@ -15067,10 +15080,17 @@ int rewrite_ffi_dynamic_calls(Compiler *c) {
     int recv = nt_ref(nt, id, "receiver");
     int sc = id < c->node_cap ? c->nscope[id] : 0;
     Scope *s = (sc >= 0 && sc < c->nscopes) ? &c->scopes[sc] : NULL;
+    int self_ci = body_cls && body_cls[id] >= 0 ? body_cls[id]
+                  : s && s->is_cmethod ? s->class_id : -1;
+    if (body_cls && body_cls[id] == -2) self_ci = -1;
     if (recv >= 0) {
       NodeKind rk = nt_kind(nt, recv);
-      if (rk != NK_ConstantReadNode && rk != NK_ConstantPathNode) continue;
-      int ci = comp_class_index(c, nt_str(nt, recv, "name"));
+      int ci;
+      if (rk == NK_ConstantReadNode || rk == NK_ConstantPathNode)
+        ci = comp_class_index(c, nt_str(nt, recv, "name"));
+      else if (rk == NK_SelfNode)
+        ci = self_ci;
+      else continue;
       if (!ffi_cls_is_lib(c, ci)) continue;
       if (comp_cmethod_in_chain(c, ci, name, NULL) >= 0) continue;
       if (ffi_sclass_defines(c, ci, name)) continue;
@@ -15106,10 +15126,24 @@ int rewrite_ffi_dynamic_calls(Compiler *c) {
       if (obj >= 0 && comp_method_in_chain(c, obj, name, NULL) >= 0) continue;
       Scope *reach_s = s;
       Scope body_s;
-      if (bk >= 0) { memset(&body_s, 0, sizeof body_s); body_s.class_id = bk; reach_s = &body_s; }
+      int reach_ci = bk == -2 && (!s || s->class_id < 0) ? c->node_cbody[id] : bk;
+      if (reach_ci >= 0) { memset(&body_s, 0, sizeof body_s); body_s.class_id = reach_ci; reach_s = &body_s; }
       int libs[32];
       int nlibs = ffi_bare_reach(c, reach_s, libs, 32);
       if (nlibs == 0) continue;
+      /* In a library's own singleton context, use its function table. */
+      if (self_ci >= 0 && libs[0] == self_ci) {
+        int arr = ffi_args_array(nt, id);
+        int sym = ffi_symbol(nt, id, name);
+        int args = fwd_new_node_like(nt, id, "ArgumentsNode");
+        if (arr < 0 || sym < 0 || args < 0) continue;
+        int av[2] = { sym, arr };
+        nt_node_set_arr(nt, args, "arguments", av, 2);
+        nt_node_set_ref(nt, id, "arguments", args);
+        nt_node_set_str(nt, id, "name", "__ffi_call");
+        changed = 1;
+        continue;
+      }
       /* a bare word could be a local only the parser knew about; those are
          LocalVariableReadNodes already, so a CallNode here is a call */
       int owners = fwd_new_node_like(nt, id, "ArrayNode");
@@ -15125,10 +15159,11 @@ int rewrite_ffi_dynamic_calls(Compiler *c) {
       int sym = ffi_symbol(nt, id, name);
       int args = fwd_new_node_like(nt, id, "ArgumentsNode");
       int reg = fwd_new_node_like(nt, id, "ConstantReadNode");
-      if (arr < 0 || sym < 0 || args < 0 || reg < 0) continue;
+      int self = fwd_new_node_like(nt, id, "SelfNode");
+      if (arr < 0 || sym < 0 || args < 0 || reg < 0 || self < 0) continue;
       nt_node_set_str(nt, reg, "name", "FFI__Registry");
-      int av[3] = { owners, sym, arr };
-      nt_node_set_arr(nt, args, "arguments", av, 3);
+      int av[4] = { owners, sym, arr, self };
+      nt_node_set_arr(nt, args, "arguments", av, 4);
       nt_node_set_ref(nt, id, "arguments", args);
       nt_node_set_ref(nt, id, "receiver", reg);
       nt_node_set_str(nt, id, "name", "__ffi_dispatch");

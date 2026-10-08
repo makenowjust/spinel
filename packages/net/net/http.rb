@@ -141,7 +141,9 @@ module Net
   # The response family. CRuby's success test is `res.is_a?(Net::HTTPSuccess)`
   # rather than a predicate on the code, so the classes have to exist for that
   # line to compile. The families are all here; of the per-code classes only
-  # the ones a client actually names are, which is the usual subset rule.
+  # the ones a client actually names are, which is the usual subset rule:
+  # the common ones, and those an API client branches on (202, 304, the
+  # 307/308 redirects, 405, 409, 410, 422, 429, 502, 503, 504).
   class HTTPInformation < HTTPResponse; end
   class HTTPSuccess < HTTPResponse; end
 
@@ -159,14 +161,26 @@ module Net
 
   class HTTPOK < HTTPSuccess; end
   class HTTPCreated < HTTPSuccess; end
+  class HTTPAccepted < HTTPSuccess; end
   class HTTPNoContent < HTTPSuccess; end
   class HTTPMovedPermanently < HTTPRedirection; end
   class HTTPFound < HTTPRedirection; end
+  class HTTPNotModified < HTTPRedirection; end
+  class HTTPTemporaryRedirect < HTTPRedirection; end
+  class HTTPPermanentRedirect < HTTPRedirection; end
   class HTTPBadRequest < HTTPClientError; end
   class HTTPUnauthorized < HTTPClientError; end
   class HTTPForbidden < HTTPClientError; end
   class HTTPNotFound < HTTPClientError; end
+  class HTTPMethodNotAllowed < HTTPClientError; end
+  class HTTPConflict < HTTPClientError; end
+  class HTTPGone < HTTPClientError; end
+  class HTTPUnprocessableEntity < HTTPClientError; end
+  class HTTPTooManyRequests < HTTPClientError; end
   class HTTPInternalServerError < HTTPServerError; end
+  class HTTPBadGateway < HTTPServerError; end
+  class HTTPServiceUnavailable < HTTPServerError; end
+  class HTTPGatewayTimeout < HTTPServerError; end
 
   # A request. CRuby builds these as Net::HTTP::Get.new(path) and friends;
   # the same shape is here so the same code compiles.
@@ -209,6 +223,11 @@ module Net
           self[k] = v
         end
       end
+      # The two headers CRuby's request carries unless the caller set them.
+      # CRuby also asks for gzip; this package does not decode a compressed
+      # body (see the top of the file), so it does not ask.
+      self["Accept"] = "*/*" unless key?("accept")
+      self["User-Agent"] = "Ruby" unless key?("user-agent")
     end
 
     # Header names are case-insensitive on the wire, and CRuby's
@@ -267,7 +286,7 @@ module Net
     # Decided by the method rather than per class, since `Net::HTTP#post` and
     # `Net::HTTP.post_form` build a plain HTTPRequest with the method name.
     def request_body_permitted?
-      @method == "POST" || @method == "PUT"
+      @method == "POST" || @method == "PUT" || @method == "PATCH"
     end
 
     # Yields the spelling the caller wrote, not the downcased key: for a
@@ -317,6 +336,12 @@ module Net
     class Put < HTTPRequest
       def initialize(path, initheader = nil)
         super("PUT", path, initheader)
+      end
+    end
+
+    class Patch < HTTPRequest
+      def initialize(path, initheader = nil)
+        super("PATCH", path, initheader)
       end
     end
 
@@ -396,12 +421,7 @@ module Net
       http.ipaddr = ipaddr.to_s
       http.open_timeout = open_timeout
       http.read_timeout = read_timeout
-      http.start
-      begin
-        yield http
-      ensure
-        http.finish
-      end
+      http.start { |h| yield h }
     end
 
     # Net::HTTP.get(uri) -> the body String.
@@ -415,12 +435,7 @@ module Net
       https = u.scheme == "https"
       http = HTTP.new(u.host, u.port)
       http.use_ssl = https
-      http.start
-      begin
-        http.request(HTTPRequest.new("GET", u.request_uri))
-      ensure
-        http.finish
-      end
+      http.start { |h| h.request(HTTPRequest.new("GET", u.request_uri)) }
     end
 
     def self.post_form(uri, params)
@@ -429,12 +444,7 @@ module Net
       req.set_form_data(params)
       http = HTTP.new(u.host, u.port)
       http.use_ssl = (u.scheme == "https")
-      http.start
-      begin
-        http.request(req)
-      ensure
-        http.finish
-      end
+      http.start { |h| h.request(req) }
     end
 
     # With a block, the session lasts for the block: CRuby opens it, yields
@@ -447,7 +457,7 @@ module Net
           @started = true
           yield self
         ensure
-          finish
+          do_finish
         end
       else
         open_connection
@@ -472,7 +482,16 @@ module Net
       nil
     end
 
+    # Closes the session, and raises IOError when none is open, as CRuby's
+    # does. The package's own teardown goes through do_finish instead, which
+    # is silent: a start whose connect failed has nothing open, and a block
+    # given to Net::HTTP.start may have finished the session itself.
     def finish
+      raise IOError, "HTTP session not yet started" unless started?
+      do_finish
+    end
+
+    def do_finish
       @tls.sysclose unless @tls.nil?
       @socket.close unless @socket.nil?
       @tls = nil
@@ -481,6 +500,7 @@ module Net
       @started = false
       nil
     end
+    private :do_finish
 
     # open_timeout, honoured rather than stored: a non-blocking connect and a
     # bounded wait for writability. A timeout of 0 or less means "no limit",
@@ -542,6 +562,23 @@ module Net
       request(req)
     end
 
+    def put(path, body, headers = nil)
+      req = Put.new(path, headers)
+      req.body = body
+      request(req)
+    end
+
+    def patch(path, body, headers = nil)
+      req = Patch.new(path, headers)
+      req.body = body
+      request(req)
+    end
+
+    # Sends Depth: Infinity unless headers are given, as in CRuby.
+    def delete(path, headers = { "Depth" => "Infinity" })
+      request(Delete.new(path, headers))
+    end
+
     # A block gets the response, as CRuby's does. CRuby streams the body to it;
     # this reads the body whole first, so the block sees a complete response --
     # the difference is when the bytes arrive, not what the block is handed.
@@ -568,13 +605,14 @@ module Net
       unless @started
         # `start` is INSIDE the begin: `open_connection` assigns @socket and
         # only then completes the TLS handshake, so a handshake failure raises
-        # with a live socket that nothing else will close. `finish` is a no-op
-        # when there is nothing open, which is the other way start can fail.
+        # with a live socket that nothing else will close. `do_finish` is a
+        # no-op when there is nothing open, which is the other way start can
+        # fail.
         begin
           start
           return perform(req)
         ensure
-          finish
+          do_finish
         end
       end
       # Every request goes out with `Connection: close`, so the server hangs
@@ -703,14 +741,26 @@ module Net
       case code
       when "200" then return HTTPOK.new(version, code, message, headers, body)
       when "201" then return HTTPCreated.new(version, code, message, headers, body)
+      when "202" then return HTTPAccepted.new(version, code, message, headers, body)
       when "204" then return HTTPNoContent.new(version, code, message, headers, body)
       when "301" then return HTTPMovedPermanently.new(version, code, message, headers, body)
       when "302" then return HTTPFound.new(version, code, message, headers, body)
+      when "304" then return HTTPNotModified.new(version, code, message, headers, body)
+      when "307" then return HTTPTemporaryRedirect.new(version, code, message, headers, body)
+      when "308" then return HTTPPermanentRedirect.new(version, code, message, headers, body)
       when "400" then return HTTPBadRequest.new(version, code, message, headers, body)
       when "401" then return HTTPUnauthorized.new(version, code, message, headers, body)
       when "403" then return HTTPForbidden.new(version, code, message, headers, body)
       when "404" then return HTTPNotFound.new(version, code, message, headers, body)
+      when "405" then return HTTPMethodNotAllowed.new(version, code, message, headers, body)
+      when "409" then return HTTPConflict.new(version, code, message, headers, body)
+      when "410" then return HTTPGone.new(version, code, message, headers, body)
+      when "422" then return HTTPUnprocessableEntity.new(version, code, message, headers, body)
+      when "429" then return HTTPTooManyRequests.new(version, code, message, headers, body)
       when "500" then return HTTPInternalServerError.new(version, code, message, headers, body)
+      when "502" then return HTTPBadGateway.new(version, code, message, headers, body)
+      when "503" then return HTTPServiceUnavailable.new(version, code, message, headers, body)
+      when "504" then return HTTPGatewayTimeout.new(version, code, message, headers, body)
       end
       case code[0, 1]
       when "1" then HTTPInformation.new(version, code, message, headers, body)

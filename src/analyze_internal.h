@@ -141,6 +141,7 @@ int an_poly_raw_argc(const char *name);
    `want`: the poly dispatch accumulates its arm beside the builtin ones in one
    C temp, so the call must be typed for what both can hold. */
 int an_user_ret_disagrees(Compiler *c, const char *name, TyKind want);
+TyKind an_class_concrete(Compiler *c, int id, const char *name, TyKind t);
 int an_ty_holds_nil(TyKind t);
 int gvar_seeded_before_read(Compiler *c, const char *gname);
 int an_empty_container_kind(Compiler *c, int b);
@@ -333,7 +334,6 @@ void rewrite_attr_supers(Compiler *c);
 void unmark_referenced_module_sources(Compiler *c);
 void register_extends(Compiler *c);
 int cmethod_needs_specialization(Compiler *c, int mi, int ci, int def_cls, int *has_new);
-int class_value_escapes(Compiler *c, int cid);
 void specialize_inherited_cls_new(Compiler *c);
 void register_prepends(Compiler *c);
 void inherit_members(Compiler *c);

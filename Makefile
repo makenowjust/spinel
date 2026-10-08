@@ -1042,16 +1042,34 @@ share-strings-test: $(SPINEL) $(SP_RT_LIB) $(SP_RT_MT_LIB) $(BUNDLED_NATIVE_OBJS
 	for t in $(SHARE_TESTS) test/share_strings_*.rb test/nullable_string_identity.rb test/widened_param_reaches_its_callee.rb test/reader_or_assign_frozen.rb \
 	  test/string_freeze_value_shared_handle.rb test/string_unary_plus_frozen_receiver.rb \
 	  test/builtins_inject.rb test/issue_3174.rb test/set_string_member_frozen.rb \
-	  test/dynamic_new_post_params_reach.rb test/block_forward_proc_param_type.rb \
+	  test/string_lent_global_slot.rb \
+	  test/concat_self_alias_snapshot.rb test/string_concat_value_snapshot.rb \
+	  test/string_concat_rebound_receiver.rb \
+	  test/pattern_methodobj_kwsplat_undersupply.rb \
+	  test/io_captured_buffer_rebind.rb test/io_read_nonblock_buffer.rb test/io_read_outbuf_eof.rb \
+	  test/dynamic_new_post_params_reach.rb test/block_forward_proc_param_type.rb test/proc_form_yield_block_arg.rb \
 	  test/builtins_partition_group_by.rb test/forwarded_block_tail_return.rb \
-	  test/boxed_scan_capture_params.rb test/fold_receiver_root.rb \
-	  packages/shellwords/test/shellwords_split_unmatched_quote.rb $$(cat test/share/reject.list); do \
+	  test/poly_string_iter_user_owns_name.rb test/string_handle_initialize.rb \
+	  test/string_alias_routes_unobserved.rb test/yield_string_param_block_append.rb \
+	  test/string_reader_store_routes_unaffected.rb \
+	  test/string_mutator_arg_rebinds_receiver.rb \
+	  test/boxed_scan_capture_params.rb test/fold_receiver_root.rb test/string_reopen_block_returns.rb \
+	  test/fresh_string_array_element_mutation.rb \
+	  packages/shellwords/test/shellwords_split_unmatched_quote.rb \
+	  test/bundle_classd_27.rb test/masgn_str_array_strbuf_local.rb test/poly_aset_nullable_string_value.rb \
+	  $$(cat test/share/reject.list); do \
 	  e="$$t.expected"; case "$$t" in test/reject/*) e="test/share/reject/$${t##*/}.expected";; esac; \
 	  if $(SPINEL) --share-strings "$$t" -o "$$tmp/b" >"$$tmp/out" 2>&1; then \
 	    ! grep -q 'did not converge' "$$tmp/out" || { echo "share-strings-test: FAIL $$t (the inference fixpoint ran to its round cap)"; ok=0; }; \
 	    "$$tmp/b" 2>&1 | cmp -s - "$$e" || { echo "share-strings-test: FAIL $$t"; ok=0; }; \
 	    SPINEL_GC_STRESS=1 "$$tmp/b" 2>&1 | cmp -s - "$$e" || { echo "share-strings-test: FAIL $$t (GC stress)"; ok=0; }; \
 	  else echo "share-strings-test: FAIL $$t (refused)"; cat "$$tmp/out"; ok=0; fi; \
+	done; \
+	for flags in '' '--share-strings'; do \
+	  if ! $(SPINEL) $$flags test/share_strings_class_value_stat_fields.rb -c --no-line-map -o "$$tmp/stat.c" >"$$tmp/out" 2>&1 || \
+	     grep -q 'sp_pd_[0-9]' "$$tmp/stat.c"; then \
+	    echo "share-strings-test: FAIL (Class calls of Stat field names add a dispatch)"; ok=0; \
+	  fi; \
 	done; \
 	if ! $(SPINEL) --share-strings test/share/share_strings_open_targets.rb -c --no-line-map -o "$$tmp/open.c" >"$$tmp/out" 2>&1 || \
 	   ! grep -q 'const char \* lv_path = NULL;' "$$tmp/open.c" || \
@@ -1065,6 +1083,18 @@ share-strings-test: $(SPINEL) $(SP_RT_LIB) $(SP_RT_MT_LIB) $(BUNDLED_NATIVE_OBJS
 	if ! $(SPINEL) --share-strings test/share/share_strings_narrow_reads.rb -c --no-line-map -o "$$tmp/reads.c" >"$$tmp/out" 2>&1 || \
 	   grep -q 'sp_poly_as_strbuf' "$$tmp/reads.c"; then \
 	  echo "share-strings-test: FAIL (a narrowed byte read allocates a handle)"; ok=0; \
+	fi; \
+	if ! $(SPINEL) --share-strings test/share/share_strings_self.rb -c --no-line-map -o "$$tmp/self.c" >"$$tmp/out" 2>&1 || \
+	   ! grep -q 'sp_String_receiver_return(sp_String \*self)' "$$tmp/self.c" || \
+	   ! grep -q 'sp_String_receiver_bytes(const char \*self)' "$$tmp/self.c"; then \
+	  echo "share-strings-test: FAIL (String self does not select its receiver ABI)"; ok=0; \
+	fi; \
+	if ! $(SPINEL) --share-strings test/share/share_strings_self_forwarding.rb -c --no-line-map -o "$$tmp/forward.c" >"$$tmp/out" 2>&1 || \
+	   grep -q 'sp_String_self_bytes_[a-z_]*(sp_String \*self' "$$tmp/forward.c" || \
+	   grep -q 'sp_String_self_handle_[a-z_]*(const char \*self' "$$tmp/forward.c" || \
+	   ! grep -q 'sp_String_self_bytes_argument(const char \*self)' "$$tmp/forward.c" || \
+	   ! grep -q 'sp_String_self_handle_argument(sp_String \*self)' "$$tmp/forward.c"; then \
+	  echo "share-strings-test: FAIL (String self forwarding does not select the callee ABI)"; ok=0; \
 	fi; \
 	for t in test/share/refuse/*.rb; do \
 	  if $(SPINEL) --share-strings "$$t" -c -o "$$tmp/r.c" >"$$tmp/out" 2>&1; then \
@@ -1431,6 +1461,12 @@ link-names-test: $(SPINEL) $(SP_RT_LIB) $(SP_RT_MT_LIB)
 
 reject-test: $(SPINEL)
 	@ok=1; tmp=$$(mktemp -d /tmp/spinel-reject.XXXXXX); \
+	for t in test/reject/string_reopen_yield_self_mutation.rb test/reject/string_reopen_proc_self_mutation.rb; do \
+	  if $(SPINEL) "$$t" -c --no-line-map -o "$$tmp/sk.c" >"$$tmp/sk.out" 2>&1; then \
+	    echo "reject-test: FAIL ($$t compiled)"; ok=0; \
+	  else grep -q 'String self is not yet shared by reference.*Build with --share-strings' "$$tmp/sk.out" || \
+	    { echo "reject-test: FAIL ($$t refused without saying why)"; cat "$$tmp/sk.out"; ok=0; }; fi; \
+	done; \
 	for t in test/reject/string_thread_arg.rb test/reject/string_fiber_arg.rb test/reject/string_thread_global_arg.rb test/reject/string_global_hash_element_mutation.rb test/reject/string_thread_ivar_arg.rb test/reject/string_thread_method_param_arg.rb test/reject/string_fiber_method_param_arg.rb test/reject/string_thread_block_param_arg.rb test/reject/string_thread_arg_in_loop.rb test/reject/string_split_local_each_mutation.rb test/reject/string_split_select_mutation.rb test/reject/string_split_map_bang_read_before.rb; do \
 	  if $(SPINEL) "$$t" -c --no-line-map -o "$$tmp/sk.c" >"$$tmp/sk.out" 2>&1; then \
 	    echo "reject-test: FAIL ($$t compiled)"; ok=0; \
@@ -1953,14 +1989,20 @@ gc-phases-test: $(SPINEL) $(SP_RT_LIB) $(SP_RT_MT_LIB) $(SPINEL_TIMEOUT)
 # other half of the contract: programs that root what they use answer the same
 # at level 2, alone and beside the full verifier, on both runtimes.
 GC_STRESS_TESTS := test/gc_root_frame_slots.rb \
+                   test/symbol_intern_fresh_string_root.rb \
                    test/gc_minor_byref_lent_slot.rb \
+                   test/string_range_walk_answer.rb \
                    test/struct_values_fresh_receiver_root.rb \
                    test/hash_splat_to_a.rb \
                    test/proc_cell_capture_marked.rb \
                    test/poly_array_intersect.rb \
+                   test/exception_class_raised_again.rb \
                    test/thread_new_args_rooted_across_fiber_alloc.rb \
+                   test/nomethod_holds_receiver_and_args.rb \
                    test/gc_root_volatile_string_slot.rb \
                    test/gc_root_gathered_handle_param.rb \
+                   test/ffi_str_borrow.rb \
+                   test/ffi_str_arg_beside_alloc.rb \
                    test/dispatch_arm_roots_operands.rb \
                    test/exception_message_nul.rb \
                    test/string_aset_value_runs_first.rb \
@@ -2271,13 +2313,32 @@ threaded-render-test: $(SPINEL) $(SP_RT_LIB) $(SP_RT_MT_LIB) $(SPINEL_TIMEOUT)
 	rm -rf "$$tmp"; \
 	if [ $$ok -eq 1 ]; then echo "threaded-render-test: pass"; else exit 1; fi
 
-GC_MINOR_TESTS := test/boxed_scan_capture_params.rb \
+GC_MINOR_TESTS := test/io_read_outbuf_eof.rb \
+                  test/boxed_scan_capture_params.rb \
+	test/share_strings_boxed_class_include_reader.rb \
+	test/share_strings_builtin_fallback_arguments.rb \
+	test/share_strings_builtin_fallback_reads.rb \
+                  test/share_strings_class_value_parameter.rb \
+                  test/string_reopen_block_returns.rb \
+                  test/share_strings_transform_argument_order.rb \
+                  test/share_strings_fresh_element_conditional.rb \
+                  test/share_strings_class_value_builtin_names.rb \
+                  test/share_strings_class_value_builtin_io.rb \
+                  test/share_strings_class_value_mutating_read.rb \
+	  test/string_reopen_block_handle_receiver.rb \
                   test/share_strings_hash_transform_params.rb \
+                  test/string_concat_value_snapshot.rb \
+                  test/string_concat_rebound_receiver.rb \
+                  test/share/share_strings_transform_operands.rb \
+                  test/share/share_strings_captured_bytes.rb \
+                  test/share/share_strings_boxed_io_rows.rb \
+                  test/share/share_strings_find_pathname.rb \
                   test/reopened_builtin_kwrest_keys.rb \
                   test/string_unary_plus_frozen_receiver.rb \
                   test/share_strings_boxed_hash_key.rb \
                   test/string_append_chain_prepend.rb \
                   test/share_strings_prepend_override.rb \
+                  test/share_strings_bang_override.rb \
                   test/share_strings_argument_conversion_root.rb \
                   test/share_strings_inherited_ivar.rb \
                   test/reader_or_assign_frozen.rb \
@@ -2293,6 +2354,7 @@ GC_MINOR_TESTS := test/boxed_scan_capture_params.rb \
                   test/kind_query_computed_nil.rb \
                   test/nil_string_slot_reads.rb test/nil_scalar_slot_widen.rb \
                   test/nullable_string_identity.rb \
+                  test/share_strings_nil_self_route.rb \
                   test/string_nil_conditional_assignment.rb \
                   test/yield_proc_arg_in_blocked_method.rb \
                   test/kind_query_nested_nil.rb \
@@ -2413,11 +2475,14 @@ gc-minor-test: $(GC_MINOR_RESULTS)
 	if [ $$ok -eq 1 ]; then echo "gc-minor-test: pass"; else exit 1; fi
 # One program per job, in its own temp dir; its FAIL lines print in one piece
 # when it is done and its result file records 1 (pass) or 0.
+# The sharing fixtures must exercise their handle and snapshot roots here too.
+build/gc-minor-results/share/%.res: GC_MINOR_FLAGS = --share-strings
+build/gc-minor-results/share_strings_transform_argument_order.res: GC_MINOR_FLAGS = --share-strings
 build/gc-minor-results/%.res: test/%.rb FORCE | $(SPINEL) $(SP_RT_LIB) $(SP_RT_MT_LIB) $(SPINEL_TIMEOUT)
 	@mkdir -p $(@D); tmp=$$(mktemp -d /tmp/spinel-gcminor.XXXXXX); ok=1; src=$<; \
 	{ \
 	  bn=$$(basename "$$src" .rb); \
-	  if ! $(SPINEL) "$$src" -o "$$tmp/$$bn" >/dev/null 2>&1; then \
+	  if ! $(SPINEL) $(GC_MINOR_FLAGS) "$$src" -o "$$tmp/$$bn" >/dev/null 2>&1; then \
 	    echo "gc-minor-test: FAIL ($$bn: compile)"; ok=0; \
 	  else \
 	  for mode in 0 1; do \
@@ -2568,7 +2633,7 @@ rbs-seed-test:
 	@echo "rbs-seed-test: skipped (vendor/rbs not fetched; run 'make deps')"
 else
 RBS_SEED_CHECKS := seed_decl_conflict seed_contradiction_kwarg attr_writer_poly_value dyn_send_arm_seed_contradiction seed_ret_instance_for_class seed_ret_singleton_union hash_or_write_index_setter poly_aset_strbuf_int_arm bare_call_override_unify declared_param_reassigned_poly kw_nil_from_poly_hash inherited_class_keeps_narrowed_ivar nested_ivar nested_array_ivar nested_array_empty_rows nested_array_seed_conflict boundary module_clone_divergent nilable_return byref_string_param shared_handle_nonunique_callee colliding_class_pin return_hash_variant writer_poly_narrowing nilable_scalar_hash_key void_block_tail map_untyped_poly nilable_elem_array_return int_grows_bignum capture_civ_array memo_civ_hash block_param_hash_widen hash_kind_arg_boundary strbuf_ivar_write_value poly_array_ivar pinned_container nilable_arg_group_by inherited_pin_conflict override_family_ret untyped_array_ret yield_union_hash_obj nilable_scalar_ivar nilable_scalar_ret nilable_scalar_arg subclass_into_ancestor_slot ancestor_into_subclass_ret seed_check seed_check_bad seed_contradiction seed_contradiction_arg contradicted_returns implicit_conv_no_method typed_slot_block_key typed_slot_compare_obj seeded_param_typed_array_mutation seeded_param_converted_arg_rooted shared_rbs_string_param
-RBS_SEED_RUN_CHECKS := hash_kind_widened_return hash_store_pinned_return module_typed_seed poly_dispatch_arm_arg_type nilable_scalar_yield_key nilable_scalar_deep_chain nilable_scalar_paths poly_index_hash_dispatch yield_site_scalar_tail poly_container_op_result untyped_param_two_shapes untyped_recv_string_surface seeded_hash_boundary_values seed_hash_value_kind seed_ret_replaced_def seed_ret_empty_literal untyped_array_ret_from_call nilable_ret_begin_rescue seeded_caller_binds_callee unrelated_setter_seed unrelated_merge_seed seeded_array_store_kind seeded_array_replace_kind seeded_param_poly_array_arg seeded_param_splat_elem seeded_param_nested_call_arg seeded_param_typed_array_arg array_transpose_nil nil_builtin_recv str_gsub_bang_enum_pattern
+RBS_SEED_RUN_CHECKS := hash_kind_widened_return hash_store_pinned_return module_typed_seed poly_dispatch_arm_arg_type nilable_scalar_yield_key nilable_scalar_deep_chain nilable_scalar_paths poly_index_hash_dispatch yield_site_scalar_tail poly_container_op_result untyped_param_two_shapes untyped_recv_string_surface seeded_hash_boundary_values seed_hash_value_kind seed_ret_replaced_def seed_ret_empty_literal untyped_array_ret_from_call nilable_ret_begin_rescue seeded_caller_binds_callee unrelated_setter_seed unrelated_merge_seed seeded_array_store_kind seeded_array_replace_kind seeded_param_poly_array_arg seeded_param_splat_elem seeded_param_nested_call_arg seeded_param_typed_array_arg array_transpose_nil nil_builtin_recv str_gsub_bang_enum_pattern tail_write_poly_slot_ret
 RBS_SEED_RESULTS := $(patsubst %,build/rbs-seed-results/%.res,$(RBS_SEED_CHECKS)) \
                     $(patsubst %,build/rbs-seed-results/%.run,$(RBS_SEED_RUN_CHECKS))
 rbs-seed-test: $(RBS_SEED_RESULTS)
@@ -3486,6 +3551,10 @@ infer-test: $(SPINEL) $(SP_RT_LIB)
 	for flags in '' --share-strings; do \
 	  $(SPINEL) $$flags test/hash_store_boxed_unbounded.rb -c --no-line-map -o "$$tmp/hbu.c" >/dev/null 2>&1 || { echo "infer-test: FAIL (hash_store_boxed_unbounded: -c)"; ok=0; }; \
 	  ! grep -q 'sp_PolyPolyHash_new' "$$tmp/hbu.c" || { echo "infer-test: FAIL (an unbounded boxed store widened a known Hash)"; ok=0; }; \
+	  for t in instance_variable_get_poly_recv poly_ivar_get_nil_bool; do \
+	    $(SPINEL) $$flags test/$$t.rb -c --no-line-map -o "$$tmp/ivg.c" >/dev/null 2>&1 || { echo "infer-test: FAIL ($$t: -c)"; ok=0; }; \
+	    ! grep -Eq 'else if \(_t[0-9]+.tag == SP_TAG_CLASS\)' "$$tmp/ivg.c" || { echo "infer-test: FAIL ($$t: an instance-only getter boxes class ivars)"; ok=0; }; \
+	  done; \
 	done; \
 	$(SPINEL) test/byref_string_selective_volatile.rb -c --no-line-map -o "$$tmp/bsv.c" >/dev/null 2>&1 || { echo "infer-test: FAIL (byref_string_selective_volatile: -c)"; ok=0; }; \
 	for m in rb_plain_append unrelated_begin; do \
@@ -3786,6 +3855,15 @@ infer-test: $(SPINEL) $(SP_RT_LIB)
 	$(SPINEL) test/gc_root_hoisted_arg_once.rb -c --no-line-map -o "$$tmp/rha.c" >/dev/null 2>&1 || { echo "infer-test: FAIL (gc_root_hoisted_arg_once: -c)"; ok=0; }; \
 	awk '/ sp_make_tree\(sp_int lv_depth\) \{/,/^}/' "$$tmp/rha.c" > "$$tmp/rha_mt.c"; \
 	grep -q 'sp_make_tree(' "$$tmp/rha_mt.c" && ! grep -Eq '_gcf\.v\[[0-9]+\] = _gcf\.v\[[0-9]+\];|_t[0-9]+ = _t[0-9]+;' "$$tmp/rha_mt.c" || { echo "infer-test: FAIL (an argument the call hoisted into a rooted temp is copied into a second rooted one)"; ok=0; }; \
+	if [ "$(FFI_AVAILABLE)" = yes ]; then \
+	  for flags in '' --share-strings; do \
+	    $(SPINEL) $$flags --dump-repr packages/fiddle/test/fiddle_importer.rb > "$$tmp/fi.repr" 2>/dev/null || { echo "infer-test: FAIL (fiddle_importer $$flags)"; ok=0; }; \
+	    for cls in Importer LibC Bad; do \
+	      grep -Fq "ivar $$cls @func_map: ptr ty=str_poly_hash" "$$tmp/fi.repr" || { echo "infer-test: FAIL (Fiddle $$cls function table lost its String-keyed Hash $$flags)"; ok=0; }; \
+	    done; \
+	    grep -Fq 'local LibC.__ffi_call(extend) fns: ptr ty=str_poly_hash' "$$tmp/fi.repr" || { echo "infer-test: FAIL (Fiddle function-table read became boxed $$flags)"; ok=0; }; \
+	  done; \
+	fi; \
 	rm -rf "$$tmp"; \
 	if [ $$ok -eq 1 ]; then echo "infer-test: pass"; else exit 1; fi
 

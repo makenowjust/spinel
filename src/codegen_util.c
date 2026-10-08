@@ -625,6 +625,7 @@ int operand_may_allocate(Compiler *c, int id) {
   id = unwrap_parens(c, id);
   if (id < 0 || repr_of(c, id).handle) return 0;
   if (strbuf_local_name(c, id)) return 1;
+  if (repr_self_shared(c, id)) return 1;
   if (nt_kind(c->nt, id) != NK_InstanceVariableReadNode) return 0;
   const char *nm = nt_str(c->nt, id, "name");
   int cid = nm ? strbuf_ivar_owner(c, id) : -1;
@@ -1493,6 +1494,7 @@ int g_emit_class_names = 0;
 int g_emit_obj_dispatch = 0;
 int g_uses_program_name = 0;
 int g_reads_match_regs = 0;
+int g_sub_bang_id = -1, g_sub_bang_tm = 0;
 int g_gen_obj_hash = 0;
 int g_gen_obj_to_json = 0;
 int g_gen_obj_to_h = 0;
@@ -2038,6 +2040,17 @@ static int ivs_never_nil(Compiler *c, int v) {
       return 0;
   }
 }
+/* May a value stored where a String handle is wanted be nil? Not one the list
+   above proves never is. nil.dup is nil, so a dup is proven only with its
+   receiver. */
+int stored_value_may_be_nil(Compiler *c, int v) {
+  v = unwrap_parens(c, v);
+  if (!node_may_be_null_nil(c, v)) return 0;
+  if (nt_kind(c->nt, v) == NK_ParenthesesNode || !ivs_never_nil(c, v)) return 1;
+  if (nt_kind(c->nt, v) == NK_CallNode && sp_streq(nt_str(c->nt, v, "name"), "dup"))
+    return stored_value_may_be_nil(c, nt_ref(c->nt, v, "receiver"));
+  return 0;
+}
 /* Does the subtree under `n` write ivar `ivn`? Past the depth it follows,
    it answers that it may. */
 static int ivs_subtree_writes(const NodeTable *nt, int n, const char *ivn, int depth) {
@@ -2496,8 +2509,22 @@ int strbuf_object_ref(Compiler *c, int recv, Buf *b) {
   /* A receiver-returning route has the same identity as its slot. */
   char ref[1024];
   int up = 0;
-  if (strbuf_self_route_slot(c, recv, &up, ref, sizeof ref) && !up) {
-    buf_printf(b, "((sp_int)(uintptr_t)(%s))", ref);
+  int route = strbuf_self_route_slot(c, recv, &up, ref, sizeof ref);
+  if (route && !up) {
+    if (repr_of(c, route - 1).may_nil) {
+      int t = ++g_tmp;
+      buf_printf(b, "({ sp_String *_t%d = %s; _t%d ? (sp_int)(uintptr_t)_t%d : %s; })",
+                 t, ref, t, t, repr_of(c, recv).may_nil ? "SP_NIL_OBJECT_ID" : "(sp_int)(uintptr_t)sp_str_frozen_empty");
+    }
+    else buf_printf(b, "((sp_int)(uintptr_t)(%s))", ref);
+    return 1;
+  }
+  if (repr_of(c, recv).may_nil) {
+    Buf rb; memset(&rb, 0, sizeof rb);
+    if (!strbuf_box_ref_as(c, recv, "%s", &rb)) return 0;
+    int t = ++g_tmp;
+    buf_printf(b, "({ sp_String *_t%d = %s; _t%d ? (sp_int)(uintptr_t)_t%d : SP_NIL_OBJECT_ID; })", t, rb.p, t, t);
+    free(rb.p);
     return 1;
   }
   /* The box's payload is already its identity, with or without a handle. */
@@ -2627,6 +2654,14 @@ int strbuf_marked_yields_handle(Compiler *c, int v) {
   if (nt_kind(nt, v) != NK_CallNode) return 0;
   int r = nt_ref(nt, v, "receiver");
   TyKind rt = r >= 0 ? comp_ntype(c, r) : TY_UNKNOWN;
+  /* A fresh object-method result is bytes to wrap, not a reader's handle. */
+  if (repr_share_rule(c) && ty_is_object(rt) && share_value_fresh(c, v, 0)) return 0;
+  /* Without the flag, a native String return uses its declared byte ABI;
+     there is no native shared-answer route to yield a handle. */
+  if (!repr_share_rule(c) && ty_is_object(rt)) {
+    int nm = comp_native_method_find(c, ty_object_class(rt), nt_str(nt, v, "name"), call_plain_argc(c, v), 0);
+    if (nm >= 0 && native_spec_to_ty(c->native_methods[nm].ret) == TY_STRING) return 0;
+  }
   if (rt != TY_STRING && rt != TY_STRBUF) return 1;
   const char *nm = nt_str(nt, v, "name");
   return nm && (is_append_concat(nm) || str_self_call(nt, v));
@@ -2643,22 +2678,25 @@ int strbuf_bang_self_local(const Compiler *c, int v) {
   int self_ans = bop_share_self_answer(nt_str(nt, v, "name"), nt_ref(nt, v, "block") >= 0);
   if (!self_ans && !repr_share_rule(c)) return 0;
   int r = nt_ref(nt, v, "receiver");
-  if (self_ans && r >= 0 && nt_kind(nt, r) == NK_LocalVariableReadNode && repr_of(c, r).kind == RK_STRBUF) return 1;
-  /* (--share-strings: a String method that answers its receiver always,
-     `insert`, too) */
-  if (!repr_share_rule(c) || r < 0) return 0;
-  char ref[1024];
-  NodeKind rk = nt_kind(nt, r);
+  if (r < 0) return 0;
   if (!self_ans && !(nt_str(nt, v, "name") && (comp_ntype((Compiler *)c, r) == TY_STRING || comp_ntype((Compiler *)c, r) == TY_STRBUF) &&
                      bop_share_named(TY_STRING, nt_str(nt, v, "name")) == BSH_RECV))
     return 0;
+  /* The builtin's receiver answer does not describe a user override. */
+  int targets[CPT_MAX];
+  if (cplan_targets((Compiler *)c, v, targets, CPT_MAX) != 0) return 0;
+  if (self_ans && nt_kind(nt, r) == NK_LocalVariableReadNode && repr_of(c, r).kind == RK_STRBUF) return 1;
+  /* (--share-strings: a String method that answers its receiver always,
+     `insert`, too) */
+  if (!repr_share_rule(c)) return 0;
+  char ref[1024];
+  NodeKind rk = nt_kind(nt, r);
   if (!self_ans) {
-    int argc, targets[CPT_MAX];
+    int argc;
     call_args(nt, v, &argc);
     /* A sharing row can also describe a conditional copy (`+@` on a
        frozen String). Only an exact receiver answer keeps this handle. */
     if (bop_answers_self(TY_STRING, nt_str(nt, v, "name"), argc, nt_ref(nt, v, "block") >= 0) != BOPF_SELF) return 0;
-    if (cplan_targets((Compiler *)c, v, targets, CPT_MAX) != 0) return 0;
   }
   /* The receiver can itself be a route over a handle, including an
      append chain followed by a prepend with several arguments. */
@@ -2711,6 +2749,11 @@ static int native_share_answer_ref(Compiler *c, int n, char *out, size_t cap) {
 }
 int strbuf_slot_ref(Compiler *c, int recv, char *out, size_t cap) {
   HolderRef h;
+  if (repr_self_shared(c, recv)) {
+    if (!g_self || strlen(g_self) >= cap) return 0;
+    snprintf(out, cap, "%s", g_self);
+    return 1;
+  }
   if (native_share_answer_ref(c, recv, out, cap)) return 1;
   /* via emit_local_ref: a celled/captured local derefs its cell */
   if (strbuf_local_name(c, recv) && holder_of_node(c, recv, &h)) return holder_slot_text(c, &h, out, cap);
@@ -6405,7 +6448,17 @@ void emit_oint_expr(Compiler *c, int node, TyKind t, Buf *b) {
   /* a boxed value, or an untyped one (the gate's raising token): unboxed
      with its nil */
   if (r.kind == RK_BOXED || vt == TY_POLY || vt == TY_UNKNOWN) {
-    buf_printf(b, "%s(", oint_unbox(t)); emit_expr(c, node, b); buf_puts(b, ")");
+    Buf ub; memset(&ub, 0, sizeof ub);
+    emit_expr(c, node, &ub);
+    const char *ut = ub.p ? ub.p : "sp_box_nil()";
+    /* a conditional whose condition folds is its live arm alone; a raise
+       there has no box to open, so it runs, and the nil after it is never
+       reached (as the plain tail runs it, emit_tail_value_1) */
+    if (strncmp(ut, "(sp_raise_cls(", 14) == 0 || strncmp(ut, "(sp_exc_stage_key(", 18) == 0 ||
+        (strncmp(ut, "((void)(", 8) == 0 && text_diverges(ut)))
+      buf_printf(b, "({ (void)%s; %s; })", ut, oint_nil(t));
+    else buf_printf(b, "%s(%s)", oint_unbox(t), ut);
+    free(ub.p);
     return;
   }
   /* an Integer into a Float slot (or the reverse) converts the value */

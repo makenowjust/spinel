@@ -147,6 +147,10 @@ int repr_write_share(const Compiler *c, int node) {
 int repr_call_returns_handle(Compiler *c, int v) {
   const NodeTable *nt = c->nt;
   v = unwrap_parens(c, v);
+  if (repr_share_rule(c) && v >= 0 && (nt_kind(nt, v) == NK_SuperNode || nt_kind(nt, v) == NK_ForwardingSuperNode)) {
+    const CallPlan *p = cplan_user(c, v);
+    return p->dispatch == CP_DIRECT && repr_self_handle(c, p->mi) && c->scopes[p->mi].ret_handle;
+  }
   if (!repr_share_rule(c) || v < 0 || nt_kind(nt, v) != NK_CallNode) return 0;
   /* a String's value, or one the pickup marks to be stored as the handle */
   TyKind t = c->ntype[v];
@@ -191,6 +195,24 @@ int repr_call_returns_handle(Compiler *c, int v) {
   for (int i = 0; i < n; i++) if (!c->scopes[mis[i]].ret_handle) return 0;
   return 1;
 }
+/* A boxed receiver's reader arms already box their shared fields as
+   handles. A String demand can take that boxed result without a copy.
+   Names with a builtin face keep their own route. */
+int repr_boxed_reader_handle(Compiler *c, int v) {
+  const NodeTable *nt = c->nt;
+  if (!repr_share_rule(c) || v < 0 || nt_kind(nt, v) != NK_CallNode ||
+      c->ntype[v] != TY_STRING || nt_ref(nt, v, "block") >= 0 ||
+      nt_ref(nt, v, "arguments") >= 0) return 0;
+  int recv = nt_ref(nt, v, "receiver");
+  if (recv < 0 || repr_of(c, recv).kind != RK_BOXED ||
+      ty_poly_face_owners(nt_str(nt, v, "name"), 0, 0, 1, 1)) return 0;
+  const PolyPlan *p = cplan_poly_arms(c, v);
+  if (p->n == 0) return 0;
+  for (int i = 0; i < p->n; i++)
+    if (p->arm[i].kind != PA_READER || p->arm[i].vty != TY_STRBUF) return 0;
+  return 1;
+}
+
 /* A boxed to_s can answer the String in the box itself,
    beside user methods answering fresh Strings. Keep that handle; the
    ordinary call still dispatches every other receiver. A String reopen
@@ -217,12 +239,36 @@ int repr_boxed_to_s_operand(Compiler *c, int v) {
   }
   return recv;
 }
+
+int repr_self_handle(const Compiler *c, int scope) {
+  if (!c->share_strings) return 0;
+  int h = share_self_holder(c, scope);
+  return share_self_used(c, h) && repr_str_shares(c, h);
+}
+
+int repr_self_shared(const Compiler *c, int node) {
+  if (!c->share_strings || node < 0 || nt_kind(c->nt, node) != NK_SelfNode) return 0;
+  Scope *s = comp_scope_of((Compiler *)c, node);
+  return s && repr_self_handle(c, (int)(s - c->scopes));
+}
+
+/* A builtin receiver conversion on a String keeps its handle. The seal,
+   the route emitter and boxed-form prediction use the same fact. */
+int repr_string_conversion_operand(Compiler *c, int v) {
+  v = unwrap_parens(c, v);
+  if (!repr_share_rule(c) || v < 0 || nt_kind(c->nt, v) != NK_CallNode) return -1;
+  int r = nt_ref(c->nt, v, "receiver");
+  return r >= 0 && is_receiver_conversion(nt_str(c->nt, v, "name")) &&
+         call_plain_argc(c, v) == 0 && nt_ref(c->nt, v, "block") < 0 &&
+         comp_recv_type(c, r) == TY_STRING && cplan_user(c, v)->dispatch == CP_NONE ? r : -1;
+}
 /* Where the boxed form of a shared-mutable String comes from, as emit_boxed
    decides it for a node stored as (or holding) the handle. */
 static int repr_strbuf_src(const Compiler *c, int node, TyKind t) {
   Compiler *mc = (Compiler *)c;
   const NodeTable *nt = c->nt;
   NodeKind k = nt_kind(nt, node);
+  if (repr_self_shared(c, node)) return RS_HANDLE;
   if (t == TY_STRING) {
     /* a global holding the handle (--share-strings): its read boxes it */
     if (repr_static_read_kind(k)) return repr_static_share(c, node) ? RS_HANDLE : RS_NONE;
@@ -282,9 +328,11 @@ static int repr_strbuf_src(const Compiler *c, int node, TyKind t) {
   if (k == NK_CallNode) {
     /* A boxed receiver route keeps its handle beside fresh user answers. */
     if (repr_boxed_to_s_operand(mc, node) >= 0) return RS_HANDLE;
+    if (repr_string_conversion_operand(mc, node) >= 0) return RS_HANDLE;
     /* A demanded call whose return route carries a handle is already that
        handle, including when operand ordering holds it in a temp. */
     if (c->strbuf_handle_demand[node] && repr_call_returns_handle(mc, node)) return RS_DEMANDED;
+    if (c->strbuf_handle_demand[node] && repr_boxed_reader_handle(mc, node)) return RS_DEMANDED;
     int r = nt_ref(nt, node, "receiver");
     if (r >= 0 && ty_is_object(comp_ntype(c, r)) &&
         (strbuf_marked_yields_handle(mc, node) || c->strbuf_handle_demand[node]))
@@ -702,6 +750,11 @@ static Repr repr_of_share_holder(Compiler *c, const ShareHolder *h) {
   memset(&r, 0, sizeof r);
   r.ty = r.as_ty = TY_UNKNOWN;
   switch (h->kind) {
+  case SHK_SELF:
+    if (!share_self_used(c, share_self_holder(c, h->scope))) break;
+    r.ty = r.as_ty = TY_STRING;
+    r.share = repr_self_handle(c, h->scope);
+    break;
   case SHK_LOCAL: {
     LocalVar *lv = &c->scopes[h->scope].locals[h->local];
     r = repr_of_slot(c, lv);
@@ -774,6 +827,14 @@ static int repr_share_elems_carried(Compiler *c, const ShareHolder *h) {
 /* repr.h: a container type whose C form holds its Strings as `const char *` */
 int repr_typed_str_container(TyKind t) {
   return t == TY_STR_ARRAY || t == TY_STR_STR_HASH || t == TY_INT_STR_HASH;
+}
+
+int repr_str_literal_shares(Compiler *c, int node) {
+  if (!c->share_strings || node < 0) return 0;
+  NodeKind k = nt_kind(c->nt, node);
+  return (k == NK_ArrayNode || k == NK_HashNode) &&
+         repr_typed_str_container(c->ntype[node]) && comp_scope_of(c, node)->reachable &&
+         share_node_elems_share(c, node) && share_node_anchored(c, node);
 }
 
 static const char *repr_share_kind_name(int kind) {
@@ -935,14 +996,12 @@ static void repr_share_seal(Compiler *c) {
     NodeKind k = nt_kind(c->nt, n);
     if (k != NK_ArrayNode && k != NK_HashNode) continue;
     if (!comp_scope_of(c, n)->reachable) continue;
-    TyKind t = c->ntype[n];
     int ne = 0;
     nt_arr(c->nt, n, "elements", &ne);
     /* an empty one holds no String yet: what is stored later goes through
        the holder that keeps it; one nothing can reach again once its
        expression is done (`p [a, b]`) keeps no name for its copies */
-    if (ne > 0 && repr_typed_str_container(t) && share_node_elems_share(c, n) &&
-        share_node_anchored(c, n))
+    if (ne > 0 && repr_str_literal_shares(c, n))
       bad_lit = n;
   }
   if (stats && stats[0] == '3') share_dump_unknown_mutations(c);

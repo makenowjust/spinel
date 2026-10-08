@@ -137,10 +137,16 @@ typedef enum {
 
 /* Does a call's settled return route hand back a shared String handle? */
 int repr_call_returns_handle(Compiler *c, int v);
+/* A builtin receiver conversion's String operand, or -1. */
+int repr_string_conversion_operand(Compiler *c, int v);
 /* A boxed to_s that keeps its String receiver beside fresh user returns. */
 int repr_boxed_to_s_operand(Compiler *c, int v);
+/* A boxed call whose reader arms all hold shared String handles. */
+int repr_boxed_reader_handle(Compiler *c, int v);
 /* The representation of node `node`'s value. */
 Repr repr_of(const Compiler *c, int node);
+int repr_self_handle(const Compiler *c, int scope);
+int repr_self_shared(const Compiler *c, int node);
 /* The representation of a local variable's slot (a global's and a
    constant's LocalVar too). */
 Repr repr_of_slot(const Compiler *c, const LocalVar *lv);
@@ -174,6 +180,8 @@ int repr_local_nullable_int(Compiler *c, int node);
    String Array or a Hash with String values), so none can be the shared
    handle? */
 int repr_typed_str_container(TyKind t);
+/* A retained typed literal whose String elements need shared handles. */
+int repr_str_literal_shares(Compiler *c, int node);
 /* Whether repr_seal has run for the current compile. */
 int repr_sealed(void);
 /* Does the share rule decide which Strings are the shared handle

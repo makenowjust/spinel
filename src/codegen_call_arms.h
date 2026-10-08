@@ -11,6 +11,8 @@
 #include "builtin_ops.h"
 #include "call_plan.h"
 
+int array_fill_boxes_handle(Compiler *c, int id, int fill);
+
 /* ---- the arms ---- */
 int emit_call_synchronize_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv);
 int emit_call_bigint_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv, int argc, const int *argv, TyKind rt);
@@ -257,6 +259,7 @@ void emit_upto_recv(Compiler *c, int recv, int lim, Buf *b);
 int emit_implicit_self_member(Compiler *c, int id, Buf *b);
 int emit_reopen_own_call(Compiler *c, int id, int dispatch_cid, Buf *b);
 void emit_reopen_recv_args(Compiler *c, int id, int mi, int recv, int boxed, const char *box_fn, Buf *b);
+void emit_reopen_self_arg(Compiler *c, int id, int mi, Buf *b);
 int implicit_self_plan_mi(Compiler *c, int id, int dispatch_cid);
 
 int emit_send_blind(Compiler *c, int id, Buf *b);

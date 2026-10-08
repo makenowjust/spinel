@@ -126,6 +126,11 @@ static int an_nonblock_no_exception(Compiler *c, int id) {
   const char *lty = nt_type(nt, av[an - 1]);
   if (!lty || !sp_streq(lty, "KeywordHashNode")) return 0;
   int e = kwh_lookup(nt, av[an - 1], "exception");
+  /* An output-buffer read with a runtime exception switch may also answer
+     nil or the wait symbol. Keep that narrow route boxed. */
+  if (e >= 0 && an == 3 && nt_kind(nt, av[1]) != NK_KeywordHashNode &&
+      bop_share_named(TY_IO, nt_str(nt, id, "name")) == BSH_FILL1 &&
+      nt_kind(nt, e) != NK_TrueNode && nt_kind(nt, e) != NK_FalseNode) return 1;
   return e >= 0 && nt_type(nt, e) && sp_streq(nt_type(nt, e), "FalseNode");
 }
 
@@ -1932,6 +1937,26 @@ static TyKind an_poly_concrete(Compiler *c, const char *name, TyKind t) {
   return t;
 }
 
+/* Class-value arms share the result slot with the instance and builtin
+   arms, even when no instance method owns the name. Only this call's
+   targets can widen it; unrelated class methods must not change the slot. */
+TyKind an_class_concrete(Compiler *c, int id, const char *name, TyKind t) {
+  if (an_builtin_only || t == TY_POLY || t == TY_UNKNOWN || t == TY_VOID ||
+      !cplan_boxed_cmethod(c, id, name)) return t;
+  int targets[CPT_MAX];
+  int n = cplan_targets(c, id, targets, CPT_MAX);
+  if (n == CPT_UNKNOWN) return TY_POLY;
+  for (int i = 0; i < n; i++) {
+    Scope *s = &c->scopes[targets[i]];
+    if (!s->is_cmethod) continue;
+    TyKind r = (TyKind)s->ret;
+    if (r == t || r == TY_UNKNOWN || r == TY_VOID) continue;
+    if (r == TY_NIL && an_ty_holds_nil(t)) continue;
+    return TY_POLY;
+  }
+  return t;
+}
+
 int an_bare_call_class_owned(Compiler *c, int id) {
   const NodeTable *nt = c->nt;
   if (nt_ref(nt, id, "receiver") >= 0) return 0;
@@ -3064,6 +3089,8 @@ static int infer_poly_operand_call(Compiler *c, int id, const NodeTable *nt, con
 static TyKind infer_array_new_fill(Compiler *c, int fill) {
   TyKind ft = infer_type(c, fill);
   if (ft == TY_STRBUF && c->share_strings) ft = TY_POLY;
+  /* Static slots keep their String type after their storage is shared. */
+  if (ft == TY_STRING && c->share_strings && repr_static_share(c, fill)) ft = TY_POLY;
   return ty_array_of(ft);
 }
 /* A constructor call: a class's .new, and the builtin constructors (infer_call_inner's rules, in their order) */
@@ -4628,6 +4655,11 @@ static int infer_class_module_call(Compiler *c, int id, const NodeTable *nt, con
       if (nblk > 0) { *out = TY_POLY; return 1; }
       if (nc > 0 && !has_blk)
         { *out = (uret == TY_UNKNOWN || uret == TY_VOID) ? TY_POLY : uret; return 1; }
+    }
+    if (argc == 1 && is_ivar_access(name) && !is_ivar_set(name)) {
+      int ci = class_recv_static_ci(c, recv);
+      if (ci < 0 || comp_cmethod_in_chain(c, ci, name, NULL) < 0)
+        { *out = TY_POLY; return 1; }
     }
   }
 
@@ -7453,6 +7485,8 @@ static TyKind infer_call_inner(Compiler *c, int id) {
       (rt == TY_BOOL || rt == TY_NIL)) return TY_POLY;
   /* __enum_chain(arr): the desugared Enumerable#chain / Enumerator#+ (#2545) */
   if (recv < 0 && sp_streq(name, "__enum_chain") && argc == 1) return TY_ENUMERATOR;
+  /* __enum_chain_of([*sources]): the desugared Enumerator::Chain.new */
+  if (recv < 0 && sp_streq(name, "__enum_chain_of") && argc == 1) return TY_ENUMERATOR;
   if (recv < 0 && sp_streq(name, "__enum_pairs") && argc == 1) return TY_ENUMERATOR;
   /* Dir surface (#2823, #2828, #2830) */
   if (recv >= 0 && nt_type(nt, recv) && sp_streq(nt_type(nt, recv), "ConstantReadNode") &&
@@ -7823,7 +7857,7 @@ static TyKind infer_call_inner(Compiler *c, int id) {
 
   { TyKind r; if (infer_exception_call(c, id, nt, name, recv, argc, rt, &r)) return r; }
 
-  { TyKind r; if (infer_poly_operand_call(c, id, nt, name, recv, argc, argv, rt, a0, &r)) return r; }
+  { TyKind r; if (infer_poly_operand_call(c, id, nt, name, recv, argc, argv, rt, a0, &r)) return an_class_concrete(c, id, name, r); }
 
   /* symbol receiver methods */
   if (recv >= 0 && rt == TY_SYMBOL) { TyKind st = infer_symbol_call(c, id, nt, name, argc, argv); if (st != TY_UNKNOWN) return st; }
@@ -9015,6 +9049,7 @@ TyKind infer_uncached(Compiler *c, int id) {
        unless an instance_eval/exec block there rebinds it to an object */
     if (self_cls >= 0 && s->is_cmethod) {
       int iec = ie_class_of(c, id);
+      if (iec < -1) return TY_POLY;
       if (iec < 0) return TY_CLASS;
       self_cls = iec;
     }

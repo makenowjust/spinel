@@ -790,10 +790,18 @@ spinel: test/reject/string_boxed_local_iterator_element.rb:7: a String a boxed l
 spinel: test/reject/string_boxed_reader_copied_too_late.rb:12: a String read through a reader on a boxed receiver (a Struct or Data member, an attr_reader, `def m = @iv`) is mutated in place (a String is not yet shared by reference through a reader on a boxed receiver). Assign the changed String back to the member.
 == test/reject/string_boxed_reader_copied_too_late.rb [promote] rc=1
 spinel: test/reject/string_boxed_reader_copied_too_late.rb:12: a String read through a reader on a boxed receiver (a Struct or Data member, an attr_reader, `def m = @iv`) is mutated in place (a String is not yet shared by reference through a reader on a boxed receiver). Assign the changed String back to the member.
+== test/reject/string_boxed_reader_copy_reopened_dup.rb [default] rc=1
+spinel: test/reject/string_boxed_reader_copy_reopened_dup.rb:16: a String read through a reader on a boxed receiver (a Struct or Data member, an attr_reader, `def m = @iv`) is mutated in place (a String is not yet shared by reference through a reader on a boxed receiver). Assign the changed String back to the member.
+== test/reject/string_boxed_reader_copy_reopened_dup.rb [promote] rc=1
+spinel: test/reject/string_boxed_reader_copy_reopened_dup.rb:16: a String read through a reader on a boxed receiver (a Struct or Data member, an attr_reader, `def m = @iv`) is mutated in place (a String is not yet shared by reference through a reader on a boxed receiver). Assign the changed String back to the member.
 == test/reject/string_boxed_reader_mutation.rb [default] rc=1
 spinel: test/reject/string_boxed_reader_mutation.rb:6: a String read through a reader on a boxed receiver (a Struct or Data member, an attr_reader, `def m = @iv`) is mutated in place (a String is not yet shared by reference through a reader on a boxed receiver). Assign the changed String back to the member.
 == test/reject/string_boxed_reader_mutation.rb [promote] rc=1
 spinel: test/reject/string_boxed_reader_mutation.rb:6: a String read through a reader on a boxed receiver (a Struct or Data member, an attr_reader, `def m = @iv`) is mutated in place (a String is not yet shared by reference through a reader on a boxed receiver). Assign the changed String back to the member.
+== test/reject/string_boxed_reader_query_reopened.rb [default] rc=1
+spinel: test/reject/string_boxed_reader_query_reopened.rb:16: a String read through a reader on a boxed receiver (a Struct or Data member, an attr_reader, `def m = @iv`) is mutated in place (a String is not yet shared by reference through a reader on a boxed receiver). Assign the changed String back to the member.
+== test/reject/string_boxed_reader_query_reopened.rb [promote] rc=1
+spinel: test/reject/string_boxed_reader_query_reopened.rb:16: a String read through a reader on a boxed receiver (a Struct or Data member, an attr_reader, `def m = @iv`) is mutated in place (a String is not yet shared by reference through a reader on a boxed receiver). Assign the changed String back to the member.
 == test/reject/string_callee_reader_store.rb [default] rc=1
 spinel: test/reject/string_callee_reader_store.rb:8: a String a method stores into an Array or Hash its caller passed it is mutated in place through the caller's container (a String is not yet shared by reference through a store into a parameter's container). Store the String in the caller, or mutate it in the method.
 == test/reject/string_callee_reader_store.rb [promote] rc=1
@@ -964,6 +972,10 @@ spinel: test/reject/string_identity_return_mutation.rb:6: a String a method retu
 spinel: test/reject/string_identity_return_nil_arm.rb:10: a String a method returns as its parameter is mutated in place, or the variable passed in is (a String is not yet shared by reference through a method returning its parameter). Mutate and read the String through the variable passed in.
 == test/reject/string_identity_return_nil_arm.rb [promote] rc=1
 spinel: test/reject/string_identity_return_nil_arm.rb:10: a String a method returns as its parameter is mutated in place, or the variable passed in is (a String is not yet shared by reference through a method returning its parameter). Mutate and read the String through the variable passed in.
+== test/reject/string_identity_return_param.rb [default] rc=1
+spinel: test/reject/string_identity_return_param.rb:7: a String a method returns as its parameter is mutated in place, or the variable passed in is (a String is not yet shared by reference through a method returning its parameter). Mutate and read the String through the variable passed in.
+== test/reject/string_identity_return_param.rb [promote] rc=1
+spinel: test/reject/string_identity_return_param.rb:7: a String a method returns as its parameter is mutated in place, or the variable passed in is (a String is not yet shared by reference through a method returning its parameter). Mutate and read the String through the variable passed in.
 == test/reject/string_iter_block_argument.rb [default] rc=1
 spinel: test/reject/string_iter_block_argument.rb:7: unsupported a String iterator given its block as a block argument (&blk): write the block out, or use each_char / each_byte / each_line: node 12 (CallNode `bytes`) recv=StringNode/ty6 argc=0
 spinel: 1 refusal, nothing written
@@ -1064,6 +1076,18 @@ spinel: test/reject/string_nested_masgn_target.rb:3: a nested multiple-assignmen
 spinel: test/reject/string_proc_param_store.rb:5: a String held by a block parameter no element iterator binds (a proc's, a lambda's, a yielding method's block, `each_char`'s) is stored into a container and mutated in place through it (a String is not yet shared by reference through a stored block parameter). Mutate the String before storing it, or store it where the caller holds it.
 == test/reject/string_proc_param_store.rb [promote] rc=1
 spinel: test/reject/string_proc_param_store.rb:5: a String held by a block parameter no element iterator binds (a proc's, a lambda's, a yielding method's block, `each_char`'s) is stored into a container and mutated in place through it (a String is not yet shared by reference through a stored block parameter). Mutate the String before storing it, or store it where the caller holds it.
+== test/reject/string_reopen_proc_self_mutation.rb [default] rc=1
+spinel: test/reject/string_reopen_proc_self_mutation.rb:4: String self is not yet shared by reference with a block that mutates it: the default build would hand on a copy. Build with --share-strings to support this call.
+spinel: 1 refusal, nothing written
+== test/reject/string_reopen_proc_self_mutation.rb [promote] rc=1
+spinel: test/reject/string_reopen_proc_self_mutation.rb:4: String self is not yet shared by reference with a block that mutates it: the default build would hand on a copy. Build with --share-strings to support this call.
+spinel: 1 refusal, nothing written
+== test/reject/string_reopen_yield_self_mutation.rb [default] rc=1
+spinel: test/reject/string_reopen_yield_self_mutation.rb:4: String self is not yet shared by reference with a block that mutates it: the default build would hand on a copy. Build with --share-strings to support this call.
+spinel: 1 refusal, nothing written
+== test/reject/string_reopen_yield_self_mutation.rb [promote] rc=1
+spinel: test/reject/string_reopen_yield_self_mutation.rb:4: String self is not yet shared by reference with a block that mutates it: the default build would hand on a copy. Build with --share-strings to support this call.
+spinel: 1 refusal, nothing written
 == test/reject/string_rest_splat_yield.rb [default] rc=1
 spinel: test/reject/string_rest_splat_yield.rb:6: a String is passed to a block's parameter `b` through a splat into a yield, which the proc appends to: this call hands the proc a copy, so the append would not reach the caller's String (a String is not yet shared by reference through a splat into a yield). Return the String from the proc and assign it, or append to it in the caller.
 spinel: 1 refusal, nothing written

@@ -161,6 +161,50 @@ static int emit_compare_lead_arms(Compiler *c, int id, const char *name, int rec
   return 0;
 }
 
+/* is_a? / kind_of? / instance_of? against a class the static type cannot
+   tell apart from its sibling, asked of the runtime object: Queue and
+   SizedQueue (its bound), Enumerator::Chain and ::Product (its flag). 1 when
+   it emitted. Kept out of emit_call_compare_arms for its length. */
+static int emit_isa_runtime_flag_class(Compiler *c, const NodeTable *nt, const char *name, TyKind eff_rt,
+                                       int recv, const int *argv, Buf *b) {
+  /* Queue and SizedQueue are one runtime object told apart by its bound, so
+     these two cannot be answered statically from TY_QUEUE alone -- a
+     SizedQueue reported false for its own class (#3466). */
+  { const char *qcn = nt_str(nt, argv[0], "name");
+    if (eff_rt == TY_QUEUE && qcn &&
+        (is_queue_class_name(qcn))) {
+      int tq3 = ++g_tmp;
+      int want_sized = sp_streq(qcn, "SizedQueue");
+      buf_printf(b, "({ sp_queue *_t%d = ", tq3); emit_expr(c, recv, b);
+      /* is_a?(Queue) is true for both (SizedQueue < Queue); instance_of? and
+         is_a?(SizedQueue) read the bound. */
+      if (!want_sized && !sp_streq(name, "instance_of?"))
+        buf_printf(b, "; (void)_t%d; (sp_bool)1; })", tq3);
+      else
+        buf_printf(b, "; (sp_bool)((sp_Queue_max(_t%d) > 0) == %d); })", tq3, want_sized ? 1 : 0);
+      return 1;
+    } }
+  /* A chain and a product are one Enumerator object told apart by a flag
+     (is_chain / is_product), as #class reads it, so is_a?(Enumerator::Chain)
+     and is_a?(Enumerator::Product) are asked at run time; from TY_ENUMERATOR
+     alone they folded to false. Both classes are leaves under Enumerator,
+     so instance_of? asks the same. */
+  if (eff_rt == TY_ENUMERATOR && nt_kind(nt, argv[0]) == NK_ConstantPathNode) {
+    int epar = nt_ref(nt, argv[0], "parent");
+    const char *ecn = nt_str(nt, argv[0], "name");
+    if (epar >= 0 && nt_kind(nt, epar) == NK_ConstantReadNode && ecn &&
+        nt_str(nt, epar, "name") && sp_streq(nt_str(nt, epar, "name"), "Enumerator") &&
+        (sp_streq(ecn, "Chain") || sp_streq(ecn, "Product"))) {
+      int te = ++g_tmp;
+      buf_printf(b, "({ sp_Enumerator *_t%d = ", te); emit_expr(c, recv, b);
+      buf_printf(b, "; (sp_bool)(_t%d && _t%d->%s); })", te, te,
+                 sp_streq(ecn, "Chain") ? "is_chain" : "is_product");
+      return 1;
+    }
+  }
+  return 0;
+}
+
 int emit_call_compare_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv, int argc, const int *argv, TyKind rt) {
   if (emit_compare_lead_arms(c, id, name, recv, argc, argv, rt, b)) return 1;
   /* a literal `<<` whose result overflowed int64 (`1 << 64`): the node is typed
@@ -961,23 +1005,7 @@ int emit_call_compare_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
         return 1;
       }
     }
-    /* Queue and SizedQueue are one runtime object told apart by its bound, so
-       these two cannot be answered statically from TY_QUEUE alone -- a
-       SizedQueue reported false for its own class (#3466). */
-    { const char *qcn = nt_str(nt, argv[0], "name");
-      if (eff_rt == TY_QUEUE && qcn &&
-          (is_queue_class_name(qcn))) {
-        int tq3 = ++g_tmp;
-        int want_sized = sp_streq(qcn, "SizedQueue");
-        buf_printf(b, "({ sp_queue *_t%d = ", tq3); emit_expr(c, recv, b);
-        /* is_a?(Queue) is true for both (SizedQueue < Queue); instance_of? and
-           is_a?(SizedQueue) read the bound. */
-        if (!want_sized && !sp_streq(name, "instance_of?"))
-          buf_printf(b, "; (void)_t%d; (sp_bool)1; })", tq3);
-        else
-          buf_printf(b, "; (sp_bool)((sp_Queue_max(_t%d) > 0) == %d); })", tq3, want_sized ? 1 : 0);
-        return 1;
-      } }
+    if (emit_isa_runtime_flag_class(c, nt, name, eff_rt, recv, argv, b)) return 1;
     int yes = ty_matches_class(eff_rt, nt_str(nt, argv[0], "name"), sp_streq(name, "instance_of?"));
     /* an Integer or a Float reads its nil sentinel at run time, as nil?
        does: the nullable-value analysis does not see every way nil reaches

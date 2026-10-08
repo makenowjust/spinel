@@ -22,6 +22,7 @@ int poly_ivar_set_reaches(Compiler *c, int call, int k);
 int pivs_callables(Compiler *c, int call, int *out, int cap);
 /* Frees the facts poly_ivar_set_reaches keeps on the compiler (c->pivs). */
 void pivs_facts_free(Compiler *c);
+void strbuf_arg_index_free(Compiler *c);
 
 /* Set by main.c from --int-overflow=promote. In promote mode the analyzer is
    free to widen accumulating int locals to bigint more aggressively (e.g. block
@@ -300,6 +301,7 @@ int view_face_top(int *node, TyKind *kind);   /* codegen_view.c */
 const char *block_param_name(Compiler *c, int block, int idx);
 int native_call_ret_plain_num(Compiler *c, int v);
 int param_strict(Compiler *c, int mi, int k, const char **what, int *ord);   /* a parameter whose nil raises at its first use */   /* a native method declared :int / :float */
+int block_param_used_up(Compiler *c, int blk, const char *nm, int value);
 /* The name of a numbered block parameter (`_1`..`_9`) on this parameters node.
    Per BLOCK where a scope holds more than one such block; see
    scope_numbered_block_params. Every site that needs the name goes here. */
@@ -405,6 +407,10 @@ int method_call_param_shift(Compiler *c, int mn, int mi); /* 1 when self carries
    (out-of-range ci) answers 1. Shared by the by-reference name group
    (analyze.c) and codegen's user_defines_or_reads. */
 int an_class_can_be_reached(Compiler *c, int ci);
+
+/* Can a Class value reach a receiver the analysis cannot pin? Memoized
+   alongside dynamic constructor binding; shared with boxed ivar emission. */
+int class_value_escapes(Compiler *c, int cid);
 
 int a_block_is_lifted(Compiler *c, int id);
 

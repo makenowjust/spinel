@@ -2830,7 +2830,8 @@ static sp_RbVal sp_poly_sub(sp_RbVal a, sp_RbVal b) { /* Two plain numbers are w
      which then read "no implicit conversion of Array into Array" (#3475). */
   if (a.tag == SP_TAG_OBJ && sp_poly_is_array_kind(a.cls_id) && b.tag == SP_TAG_OBJ && sp_poly_is_array_kind(b.cls_id)) { SP_GC_ROOT_RBVAL(a); SP_GC_ROOT_RBVAL(b); sp_PolyArray *pa = sp_poly_to_poly_array(a); SP_GC_ROOT(pa); sp_PolyArray *pb = sp_poly_to_poly_array(b); SP_GC_ROOT(pb); return sp_box_poly_array(sp_PolyArray_difference(pa, pb)); }
   return sp_poly_binop_bad("-", a, b); }
-static sp_RbVal sp_poly_mul(sp_RbVal a, sp_RbVal b) { /* Two plain numbers are what a boxed arithmetic loop actually holds, and the tower checks below cannot match either tag: answer them first rather than after eight of them (#3984). */ if (a.tag == SP_TAG_FLT && b.tag == SP_TAG_FLT) return sp_box_float(a.v.f * b.v.f); if (a.tag == SP_TAG_INT && b.tag == SP_TAG_INT) return SP_POLY_INT_OP(mul, a.v.i, b.v.i); if (a.tag == SP_TAG_FLT && b.tag == SP_TAG_INT) return sp_box_float(a.v.f * (sp_float)b.v.i); if (a.tag == SP_TAG_INT && b.tag == SP_TAG_FLT) return sp_box_float((sp_float)a.v.i * b.v.f); /* a user object on either side belongs to the binop hook and the coerce protocol, not to the tower branches below -- those match on the RECEIVER kind and would convert the object to a number of that kind */ if (SP_UNLIKELY(sp_poly_is_user_obj(a) || sp_poly_is_user_obj(b))) return sp_poly_binop_bad("*", a, b); /* A shared-mutable string handle behaves as its live string VALUE for every non-mutating operator, so it has to become one BEFORE the rules below read its kind -- reached as a handle it is neither a String nor a number, and the guard reported a missing method for an operator String has. */ if (SP_UNLIKELY(sp_poly_is_strbuf(a) || sp_poly_is_strbuf(b))) return sp_poly_mul(sp_poly_strbuf_deref(a), sp_poly_strbuf_deref(b)); if (SP_UNLIKELY(sp_poly_tower_mismatch(a, b))) return sp_poly_binop_bad("*", a, b); if ((a.tag == SP_TAG_OBJ && a.cls_id == SP_BUILTIN_COMPLEX) || (b.tag == SP_TAG_OBJ && b.cls_id == SP_BUILTIN_COMPLEX)) return sp_box_complex(sp_complex_mul(sp_poly_as_complex(a), sp_poly_as_complex(b))); if ((sp_poly_is_brat(a) || sp_poly_is_brat(b))) { if (a.tag == SP_TAG_FLT || b.tag == SP_TAG_FLT) return sp_box_float(sp_poly_to_f(a) * sp_poly_to_f(b)); return sp_brat_mul_poly(a, b); } if ((sp_poly_is_rational(a) || sp_poly_is_rational(b)) && a.tag != SP_TAG_FLT && b.tag != SP_TAG_FLT) return sp_box_rational(sp_rational_mul(sp_poly_as_rational(a), sp_poly_as_rational(b))); if ((sp_poly_is_rational(a) || sp_poly_is_rational(b)) && (a.tag == SP_TAG_FLT || b.tag == SP_TAG_FLT)) return sp_box_float(sp_poly_to_f_with_rational(a) * sp_poly_to_f_with_rational(b)); if (a.tag == SP_TAG_BIGINT || b.tag == SP_TAG_BIGINT) { if (a.tag == SP_TAG_FLT || b.tag == SP_TAG_FLT) return sp_box_float(sp_poly_to_f(a) * sp_poly_to_f(b)); return sp_box_bigint(sp_bigint_mul(sp_poly_as_bigint(a), sp_poly_as_bigint(b))); } if (a.tag == SP_TAG_INT && b.tag == SP_TAG_INT) return SP_POLY_INT_OP(mul, a.v.i, b.v.i); if (a.tag == SP_TAG_FLT && b.tag == SP_TAG_FLT) return sp_box_float(a.v.f * b.v.f); if (a.tag == SP_TAG_INT && b.tag == SP_TAG_FLT) return sp_box_float((sp_float)a.v.i * b.v.f); if (a.tag == SP_TAG_FLT && b.tag == SP_TAG_INT) return sp_box_float(a.v.f * (sp_float)b.v.i); if (a.tag == SP_TAG_STR && b.tag == SP_TAG_INT) return a.v.s ? sp_box_str(sp_str_repeat(a.v.s, b.v.i)) : a; /* String#*; NULL is the empty string */ /* Array#*: an Integer repeats, a String joins (#4834). A boxed Array fell to the bad-operand report, which read as the argument failing to convert into an Array. */ if (a.tag == SP_TAG_OBJ && sp_poly_is_array_kind(a.cls_id)) { if (b.tag == SP_TAG_STR) return sp_box_str(sp_poly_join(a, b.v.s ? b.v.s : sp_str_empty)); if (b.tag == SP_TAG_INT) return sp_box_poly_array(sp_poly_array_repeat(a, b.v.i)); } return sp_poly_binop_bad("*", a, b); }
+static SP_INLINE sp_int sp_poly_arg_int_chk(sp_RbVal v);
+static sp_RbVal sp_poly_mul(sp_RbVal a, sp_RbVal b) { /* Two plain numbers are what a boxed arithmetic loop actually holds, and the tower checks below cannot match either tag: answer them first rather than after eight of them (#3984). */ if (a.tag == SP_TAG_FLT && b.tag == SP_TAG_FLT) return sp_box_float(a.v.f * b.v.f); if (a.tag == SP_TAG_INT && b.tag == SP_TAG_INT) return SP_POLY_INT_OP(mul, a.v.i, b.v.i); if (a.tag == SP_TAG_FLT && b.tag == SP_TAG_INT) return sp_box_float(a.v.f * (sp_float)b.v.i); if (a.tag == SP_TAG_INT && b.tag == SP_TAG_FLT) return sp_box_float((sp_float)a.v.i * b.v.f); /* a user object on either side belongs to the binop hook and the coerce protocol, not to the tower branches below -- those match on the RECEIVER kind and would convert the object to a number of that kind */ if (SP_UNLIKELY(sp_poly_is_user_obj(a) || sp_poly_is_user_obj(b))) return sp_poly_binop_bad("*", a, b); /* A shared-mutable string handle behaves as its live string VALUE for every non-mutating operator, so it has to become one BEFORE the rules below read its kind -- reached as a handle it is neither a String nor a number, and the guard reported a missing method for an operator String has. */ if (SP_UNLIKELY(sp_poly_is_strbuf(a) || sp_poly_is_strbuf(b))) return sp_poly_mul(sp_poly_strbuf_deref(a), sp_poly_strbuf_deref(b)); if (SP_UNLIKELY(sp_poly_tower_mismatch(a, b))) return sp_poly_binop_bad("*", a, b); if ((a.tag == SP_TAG_OBJ && a.cls_id == SP_BUILTIN_COMPLEX) || (b.tag == SP_TAG_OBJ && b.cls_id == SP_BUILTIN_COMPLEX)) return sp_box_complex(sp_complex_mul(sp_poly_as_complex(a), sp_poly_as_complex(b))); if ((sp_poly_is_brat(a) || sp_poly_is_brat(b))) { if (a.tag == SP_TAG_FLT || b.tag == SP_TAG_FLT) return sp_box_float(sp_poly_to_f(a) * sp_poly_to_f(b)); return sp_brat_mul_poly(a, b); } if ((sp_poly_is_rational(a) || sp_poly_is_rational(b)) && a.tag != SP_TAG_FLT && b.tag != SP_TAG_FLT) return sp_box_rational(sp_rational_mul(sp_poly_as_rational(a), sp_poly_as_rational(b))); if ((sp_poly_is_rational(a) || sp_poly_is_rational(b)) && (a.tag == SP_TAG_FLT || b.tag == SP_TAG_FLT)) return sp_box_float(sp_poly_to_f_with_rational(a) * sp_poly_to_f_with_rational(b)); if (a.tag == SP_TAG_BIGINT || b.tag == SP_TAG_BIGINT) { if (a.tag == SP_TAG_FLT || b.tag == SP_TAG_FLT) return sp_box_float(sp_poly_to_f(a) * sp_poly_to_f(b)); return sp_box_bigint(sp_bigint_mul(sp_poly_as_bigint(a), sp_poly_as_bigint(b))); } if (a.tag == SP_TAG_INT && b.tag == SP_TAG_INT) return SP_POLY_INT_OP(mul, a.v.i, b.v.i); if (a.tag == SP_TAG_FLT && b.tag == SP_TAG_FLT) return sp_box_float(a.v.f * b.v.f); if (a.tag == SP_TAG_INT && b.tag == SP_TAG_FLT) return sp_box_float((sp_float)a.v.i * b.v.f); if (a.tag == SP_TAG_FLT && b.tag == SP_TAG_INT) return sp_box_float(a.v.f * (sp_float)b.v.i); if (a.tag == SP_TAG_STR && b.tag == SP_TAG_INT) return a.v.s ? sp_box_str(sp_str_repeat(a.v.s, b.v.i)) : a; /* String#*; NULL is the empty string */ /* Array#*: an Integer repeats, a String joins (#4834). A boxed Array fell to the bad-operand report, which read as the argument failing to convert into an Array. */ if (a.tag == SP_TAG_OBJ && sp_poly_is_array_kind(a.cls_id)) { if (b.tag == SP_TAG_STR) return sp_box_str(sp_poly_join(a, b.v.s ? b.v.s : sp_str_empty)); if (b.tag == SP_TAG_INT) return sp_box_poly_array(sp_poly_array_repeat(a, b.v.i)); } if (a.tag == SP_TAG_STR || (a.tag == SP_TAG_OBJ && sp_poly_is_array_kind(a.cls_id))) return sp_poly_mul(a, sp_box_int(sp_poly_arg_int_chk(b))); return sp_poly_binop_bad("*", a, b); }
 
 /* An Integer array's sum (mul 0) or product (mul 1) folded boxed from acc:
    each step through the mode's checked operation, so --int-overflow=promote
@@ -3410,6 +3411,7 @@ static SP_NOINLINE SP_COLD void sp_ffi_nil_dbl_raise(void) { sp_raise_cls("TypeE
    receiver. Anything else converts as sp_poly_to_i does. */
 static SP_UNUSED sp_int sp_poly_arg_i(sp_RbVal v) { if (SP_UNLIKELY(v.tag == SP_TAG_NIL)) sp_raise_nil_to_int(0); return sp_poly_to_i(v); }
 static SP_UNUSED sp_int sp_poly_arg_i_msg(sp_RbVal v, const char *msg) { if (SP_UNLIKELY(v.tag == SP_TAG_NIL)) sp_raise_cls("TypeError", msg); return sp_poly_to_i(v); }
+static SP_UNUSED int sp_poly_exit_status(sp_RbVal v) { return v.tag == SP_TAG_BOOL ? !v.v.b : (int)sp_poly_arg_int_chk(v); }
 /* The right operand of an Integer or Float op-assign read out of a box:
    `x += nil` is the coercion TypeError ("nil can't be coerced into
    Integer"), and a shift count the conversion one, as CRuby raises. */
@@ -4437,6 +4439,12 @@ static sp_int sp_poly_to_i_meth(sp_RbVal v) {
 /* Like sp_nomethod_msg, but also stages the failed call's argument list for
    NoMethodError#args (#2837). */
 SP_COLD static const char *sp_nomethod_msg_args(const char *m, sp_RbVal v, sp_int n, sp_RbVal *args) {
+  /* The receiver is staged and the arguments are rooted before the list is
+     allocated: one that is a temporary (`mk(x).zork`, `5.zork("a" + s)`) is
+     held by nothing else, and the allocation can collect. */
+  sp_exc_stage_recv(v);
+  SP_GC_SAVE();
+  for (sp_int i = 0; i < n; i++) _sp_gc_root_push((void **)((uintptr_t)&args[i] | (uintptr_t)1));
   sp_PolyArray *a = sp_PolyArray_new();
   SP_GC_ROOT(a);
   for (sp_int i = 0; i < n; i++) sp_PolyArray_push(a, args[i]);
@@ -4446,6 +4454,8 @@ SP_COLD static const char *sp_nomethod_msg_args(const char *m, sp_RbVal v, sp_in
 /* The statically-typed gate arms keep their literal message; this stages the
    argument list beside it. */
 SP_COLD static const char *sp_stage_args_msg(const char *msg, sp_int n, sp_RbVal *args) {
+  SP_GC_SAVE();   /* the arguments are rooted before the list is allocated, as above */
+  for (sp_int i = 0; i < n; i++) _sp_gc_root_push((void **)((uintptr_t)&args[i] | (uintptr_t)1));
   sp_PolyArray *a = sp_PolyArray_new();
   SP_GC_ROOT(a);
   for (sp_int i = 0; i < n; i++) sp_PolyArray_push(a, args[i]);
@@ -6560,17 +6570,17 @@ static sp_PolyArray *sp_poly_product(sp_RbVal *arrs, sp_int n) {
   if (idx != idx_stack) free(idx);
   return res;
 }
-static sp_bool sp_poly_case_eq(sp_RbVal pat, sp_RbVal e);   /* defined below */
+static sp_bool sp_poly_case_eq_match(sp_RbVal pat, sp_RbVal e);   /* defined below */
 /* `when *arr` in a case value: does any element of arr match the
    scrutinee? The scrutinee equal to the element, as before, or the element
-   matching it through sp_poly_case_eq: a Class its instances, a Regexp a
-   String, a Range its members. */
+   matching it through sp_poly_case_eq_match: a Class its instances, a Regexp
+   a String (setting $~, as a `when` arm does), a Range its members. */
 static sp_bool sp_case_splat_match(sp_RbVal scrut, sp_RbVal arr) {
   SP_GC_ROOT_RBVAL(scrut);
   SP_GC_ROOT_RBVAL(arr);
   sp_int n = sp_poly_length(arr);
   for (sp_int i = 0; i < n; i++)
-    if (sp_poly_rb_equal(scrut, sp_poly_arr_get(arr, i)) || sp_poly_case_eq(sp_poly_arr_get(arr, i), scrut))
+    if (sp_poly_rb_equal(scrut, sp_poly_arr_get(arr, i)) || sp_poly_case_eq_match(sp_poly_arr_get(arr, i), scrut))
       return TRUE;
   return FALSE;
 }
@@ -9743,8 +9753,15 @@ static sp_RbVal sp_poly_hash_foreign_miss(sp_RbVal recv, sp_RbVal key) {
 static sp_RbVal sp_poly_get_sym(sp_RbVal v, sp_sym key) {
   if (sp_poly_is_call_aref(v)) return sp_poly_call_aref(v, sp_box_sym(key));
   sp_poly_coll_chk(v, "[]");
-  if (v.tag != SP_TAG_OBJ) return sp_box_nil();
+  if (v.tag != SP_TAG_OBJ) {
+    /* A Symbol is no index of a String, nor of a Symbol, whose [] is its
+       String's: CRuby's TypeError, where the read answered nil. */
+    if (v.tag == SP_TAG_STR || v.tag == SP_TAG_SYM)
+      sp_raise_cls("TypeError", SPL("no implicit conversion of Symbol into Integer"));
+    return sp_box_nil();
+  }
   switch (v.cls_id) {
+    case SP_BUILTIN_STRBUF: sp_raise_cls("TypeError", SPL("no implicit conversion of Symbol into Integer"));   /* a shared String */
     case SP_BUILTIN_CURRY: return sp_curry_call_poly((sp_Curry *)v.v.p, 1, (sp_RbVal[]){sp_box_sym(key)});
     case SP_BUILTIN_SYM_POLY_HASH: return sp_SymPolyHash_get((sp_SymPolyHash*)v.v.p, key);
     case SP_BUILTIN_POLY_POLY_HASH: return sp_PolyPolyHash_get((sp_PolyPolyHash*)v.v.p, sp_box_sym(key));
@@ -9765,6 +9782,10 @@ static sp_RbVal sp_poly_get_sym(sp_RbVal v, sp_sym key) {
     sp_RbVal h = sp_obj_to_h_fn(v);
     if (h.tag == SP_TAG_OBJ && h.cls_id == SP_BUILTIN_SYM_POLY_HASH)
       return sp_SymPolyHash_get((sp_SymPolyHash *)h.v.p, key);
+  } else if (sp_poly_is_array_kind(v.cls_id)) {
+    /* An Array indexed by a Symbol is a TypeError, as the store raises it
+       (sp_poly_set_sym): the read answered nil. */
+    sp_raise_cls("TypeError", SPL("no implicit conversion of Symbol into Integer"));
   }
   return sp_box_nil();
 }
@@ -9980,6 +10001,28 @@ static sp_RbVal sp_poly_str_become(sp_RbVal v, const char *s) {
   sp_str_check_mutable(v.v.s);
   return sp_box_str(s);
 }
+/* A value-form nonblocking read fills an existing buffer or clears it at
+   EOF. The caller writes a plain String back to its local before raising;
+   would-block leaves the buffer unchanged. No new String handle is made. */
+static const char *sp_io_read_nonblock_buffer(sp_File *f, sp_int n, sp_RbVal *buffer,
+                                             const sp_RbVal *exception, sp_bool *eof) {
+  SP_GC_ROOT(f);
+  sp_RbVal v = *buffer;
+  SP_GC_ROOT_RBVAL(v);
+  if (n < 0) sp_raise_cls("ArgumentError", sp_sprintf("negative length %lld given", (long long)n));
+  const char *s = sp_poly_nil_p(v) ? NULL : sp_poly_arg_str_chk(v);
+  if (s && sp_poly_is_strbuf(v) && sp_String_is_frozen((sp_String *)v.v.p)) sp_raise_frozen_str(s);
+  if (s) sp_str_check_mutable(s);
+  if (exception && exception->tag != SP_TAG_BOOL)
+    sp_raise_cls("ArgumentError", sp_sprintf("expected true or false as exception: %s", sp_poly_inspect(*exception)));
+  int text = s && !sp_str_is_binary(s);
+  const char *r = sp_sock_read_nb(f, n, 0, 0, eof);
+  /* Replacing the buffer grows its malloc-backed payload without a GC
+     allocation, so the read result needs no root across that copy. */
+  if (r && text) sp_str_as_text(r);
+  if (s && (r || *eof)) *buffer = sp_poly_str_become(v, r ? r : sp_str_empty);
+  return r;
+}
 /* The same through a receiver that is no variable -- an element read, a Hash
    value: a shared handle absorbs the new contents and every alias observes
    the change; a plain string box has nowhere to send them, and the call
@@ -10170,6 +10213,9 @@ static sp_RbVal sp_poly_get_str(sp_RbVal v, const char *key) {
   /* Struct#["member"] names the member, like the symbol form (#3369) */
   if (v.cls_id >= 0 && sp_obj_to_h_fn && key)
     return sp_poly_get_sym(v, sp_sym_intern(key));
+  /* nor is a String an Array's index (sp_poly_set_str) */
+  if (sp_poly_is_array_kind(v.cls_id))
+    sp_raise_cls("TypeError", SPL("no implicit conversion of String into Integer"));
   return sp_box_nil();
 }
 /* Extend sp_poly_arr_len for hash types defined after the initial declaration. */
@@ -10514,6 +10560,22 @@ static SP_UNUSED sp_oint sp_array_fill_offset_arg(sp_RbVal v, int range_alone) {
   if (v.tag == SP_TAG_BIGINT && !sp_bigint_fits_int((sp_Bigint *)v.v.p))
     sp_raise_cls("RangeError", "bignum too big to convert into 'long'");
   return sp_oint_of(sp_poly_arg_int_chk(v));
+}
+/* An Array's offset in fetch and values_at, as CRuby's NUM2LONG reads it:
+   sp_poly_arg_int_chk, with Array#fill's check for a Float or a Bignum past a
+   word in front of it (a NaN converted to the smallest Integer). The smallest
+   Integer is an offset like any other: boxed, its tag says it is no nil, and
+   held as a Bignum it still fits the word. Out of an int slot it arrives as
+   nil, so nil stays the offset 0 it was where no raise tells the two apart:
+   on an empty Array (n is the Array's length). */
+static SP_INLINE sp_int sp_poly_ary_offset(sp_RbVal v, sp_int n) {
+  if (v.tag == SP_TAG_INT) return v.v.i;
+  if (v.tag == SP_TAG_NIL && n == 0) return 0;
+  if (v.tag == SP_TAG_BIGINT && sp_bigint_bit_length((sp_Bigint *)v.v.p) < (sp_int)(sizeof(sp_int) * 8))
+    return (sp_int)sp_bigint_to_int((sp_Bigint *)v.v.p);
+  /* a Float or Bignum offset is never nil: its value, or the helper's raise */
+  return (v.tag == SP_TAG_FLT || v.tag == SP_TAG_BIGINT) ? sp_oint_arg(sp_array_fill_offset_arg(v, 0))
+                                                         : sp_poly_arg_int_chk_slow(v);
 }
 static sp_IntArray *sp_poly_as_int_array(sp_RbVal v) {
   if (v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_INT_ARRAY) return (sp_IntArray *)v.v.p;
@@ -11178,13 +11240,18 @@ static sp_RbVal sp_poly_fetch(sp_RbVal recv, sp_RbVal key, int has_dflt, sp_RbVa
     sp_raise_key_not_found(key);
   }
   if (recv.tag == SP_TAG_OBJ && sp_poly_is_array_kind(recv.cls_id)) {
-    sp_int n = sp_poly_length(recv), i = sp_poly_to_i(key);
+    /* any index that converts to an Integer, and no other; the element is
+       read by the converted index */
+    sp_int n = sp_poly_length(recv), i0 = sp_poly_ary_offset(key, n), i = i0;
+    /* an object's to_int is the program's code, and may have changed the
+       receiver's length */
+    if (SP_UNLIKELY(key.tag == SP_TAG_OBJ)) n = sp_poly_length(recv);
     if (i < 0) i += n;
-    if (i >= 0 && i < n) return sp_poly_index_poly(recv, key);
+    if (i >= 0 && i < n) return sp_poly_arr_get(recv, i);
     if (has_dflt) return dflt;
     sp_raise_cls("IndexError",
                  sp_sprintf("index %lld outside of array bounds: %lld...%lld",
-                            (long long)sp_poly_to_i(key), (long long)-n, (long long)n));
+                            (long long)i0, (long long)-n, (long long)n));
   }
   sp_raise_nomethod(sp_nomethod_msg("fetch", recv));
   return sp_box_nil();
@@ -11597,6 +11664,10 @@ static sp_bool sp_poly_kind_of_builtin(sp_RbVal v, const char *cn) {
   if (v.tag == SP_TAG_CLASS && strcmp(cn, "Class") == 0 && sp_poly_is_a_hook)
     return (sp_bool)(sp_poly_is_a_hook(v, (sp_Class){-109, NULL}) != 0);
   if (strcmp(sp_poly_class_name(v), cn) == 0) return TRUE;  /* exact builtin class */
+  /* a chain or a product is an Enumerator whose #class names its subclass
+     (Enumerator::Chain, Enumerator::Product), so the exact name above misses it */
+  if (strcmp(cn, "Enumerator") == 0 && v.tag == SP_TAG_OBJ && v.cls_id == SP_BUILTIN_ENUMERATOR && v.v.p)
+    return TRUE;
   /* a class is a Module too: Class < Module */
   if (strcmp(cn, "Module") == 0) return v.tag == SP_TAG_CLASS;
   /* a boxed class object is a Class, and a Class is a Module (Object /
@@ -12943,7 +13014,11 @@ static sp_RbVal sp_poly_arr_values_at(sp_RbVal v, sp_PolyArray *idx) {
       for (sp_int k = f; k <= l; k++) sp_PolyArray_push(out, k < alen ? sp_poly_arr_get(v, k) : sp_box_nil());
       continue;
     }
-    sp_int k = sp_poly_to_i(idx->data[i]);
+    /* a Symbol or true is no offset: it read an element, as a Float Range
+       still does */
+    sp_int k = idx->data[i].tag == SP_TAG_INT ? idx->data[i].v.i
+             : (idx->data[i].tag == SP_TAG_OBJ && idx->data[i].cls_id == SP_BUILTIN_FLOAT_RANGE)
+               ? sp_poly_to_i(idx->data[i]) : sp_poly_ary_offset(idx->data[i], alen);
     if (k < 0) k += alen;
     sp_PolyArray_push(out, (k < 0 || k >= alen) ? sp_box_nil() : sp_poly_arr_get(v, k));
   }
@@ -13265,6 +13340,52 @@ static int sp_poly_queue_push_n(sp_RbVal v, int argc, const sp_RbVal *args) {
   else sp_raise_cls("ArgumentError", sp_sprintf("wrong number of arguments (given %d, expected %s)",
                                                 argc, sized ? "1..2" : "1"));
   return 1;
+}
+/* The Array arms of sp_poly_shl, for a caller that has no use for its other
+   arms: 1 when v, an object, is an Array of one of these kinds and x was
+   appended. sp_poly_shl keeps its own: taken out of it, they cost a loop of
+   two `<<` statements ten instructions a pass under gcc. */
+static SP_INLINE int sp_poly_ary_append(sp_RbVal v, sp_RbVal x) {
+  if (v.cls_id == SP_BUILTIN_INT_ARRAY) {
+    sp_IntArray_push_o((sp_IntArray *)v.v.p, sp_poly_elem_i(x));   /* a nil element keeps its nil */
+    return 1;
+  }
+  if (v.cls_id == SP_BUILTIN_POLY_ARRAY) {
+    sp_PolyArray_push((sp_PolyArray *)v.v.p, x);
+    return 1;
+  }
+  if (v.cls_id == SP_BUILTIN_PTR_ARRAY) {
+    sp_PtrArray *pa = (sp_PtrArray *)v.v.p;
+    sp_PtrArray_push(pa, sp_PtrArray_elem_unbox(pa, x));
+    return 1;
+  }
+  if (v.cls_id == SP_BUILTIN_FLT_ARRAY) {
+    sp_FloatArray_push_o((sp_FloatArray *)v.v.p, sp_poly_elem_f(x));   /* a nil element keeps its nil */
+    return 1;
+  }
+  if (v.cls_id == SP_BUILTIN_STR_ARRAY) {
+    /* a shared String handle stores a copy of its contents, as in sp_poly_shl */
+    const char *_es = x.tag == SP_TAG_STR ? (const char *)x.v.p
+                    : (x.tag == SP_TAG_OBJ && x.cls_id == SP_BUILTIN_STRBUF && x.v.p)
+                        ? sp_str_dup(sp_String_cstr((sp_String *)x.v.p))
+                        : sp_poly_elem_s(x);
+    sp_StrArray_push((sp_StrArray *)v.v.p, _es);
+    return 1;
+  }
+  return 0;
+}
+/* push / append with one argument, as a statement on a boxed value: an Array
+   appends and a queue takes a push. Nothing else has the method: a String, an
+   Integer or an IO has `<<` only, which sp_poly_shl would run for it. */
+static SP_UNUSED void sp_poly_push_stmt(sp_RbVal v, sp_RbVal x, const char *m) {
+  if (v.tag == SP_TAG_OBJ) {
+    if (sp_poly_ary_append(v, x)) return;
+    if (sp_poly_is_array_kind(v.cls_id) || (v.cls_id == SP_BUILTIN_QUEUE && m[0] == 'p')) {
+      sp_poly_shl(v, x);
+      return;
+    }
+  }
+  sp_raise_nomethod(sp_nomethod_msg(m, v));
 }
 /* a boxed sleep timeout as seconds: CRuby's TypeError for anything that is
    not a number (nil, meaning none, is the caller's to check first) */
@@ -14996,7 +15117,7 @@ void sp_exc_ctx_save(void *p) {            /* current globals -> ctx */
     x->shand = (void **)realloc(x->shand, sizeof(void *) * rn);
     if (!x->shand) sp_oom_die(); }
   for (int i = 0; i < rn; i++) x->shand[i] = sp_exc_handling[i];
-  x->rn = rn; x->pcause = sp_pending_cause;
+  x->rn = rn; x->pcause = sp_pending_cause; x->icause = sp_inflight_cause;
   /* The container-walk path travels with the green thread, like the handler
      stack above it: a fiber suspended in the middle of an #inspect resumes
      still knowing what it was inside, and the fiber that runs meanwhile starts
@@ -15035,7 +15156,7 @@ void sp_exc_ctx_load(void *p) {            /* ctx -> current globals */
   sp_proc_ret_head = x->prhead;
   sp_unwind_kind = x->uk; sp_unwind_target = x->ut; sp_unwind_exc_top = x->ue; sp_unwind_home = x->uh;
   for (int i = 0; i < x->rn; i++) sp_exc_handling[i] = x->shand[i];
-  sp_rescue_sp = x->rn; sp_pending_cause = x->pcause;
+  sp_rescue_sp = x->rn; sp_pending_cause = x->pcause; sp_inflight_cause = x->icause;
   if (x->rrn > sp_poly_recur_cap) sp_poly_recur_grow(x->rrn);
   for (int i = 0; i < x->rrn; i++) sp_poly_recur_stack[i] = x->rrf[i];
   sp_poly_recur_top = x->rrn;
@@ -15738,12 +15859,16 @@ sp_PolyPolyHash *sp_poly_hash_merge(sp_RbVal a, sp_RbVal b);
    any other value is CRuby's NoMethodError, with the argument staged as its
    args. sp_poly_hash_merge itself takes nil as an empty start (the keyword
    folds call it so). */
+static SP_UNUSED sp_RbVal sp_poly_hash_merge_arg(sp_RbVal v) {
+  if (v.tag == SP_TAG_NIL) sp_raise_cls("TypeError", "no implicit conversion of nil into Hash");
+  return sp_kw_splat_conv(v, 0);
+}
 static SP_UNUSED sp_PolyPolyHash *sp_poly_hash_merge_m(sp_RbVal a, sp_RbVal b) {
   if (!(a.tag == SP_TAG_OBJ && a.v.p && sp_poly_is_hash_kind(a.cls_id))) {
     sp_raise_nomethod(sp_nomethod_msg_args("merge", a, 1, &b));
     return NULL;
   }
-  return sp_poly_hash_merge(a, b);
+  return sp_poly_hash_merge(a, sp_poly_hash_merge_arg(b));
 }
 /* A boxed hash as the concrete symbol-keyed variant: itself when it already is
    one, rebuilt when every key is a Symbol (a hash folded through the general
@@ -16166,6 +16291,16 @@ static const char *sp_poly_pat_gsub(sp_RbVal pat, const char *s, const char *rep
   sp_raise_cls("TypeError", sp_sprintf("wrong argument type %s (expected Regexp)", sp_poly_class_name(pat)));
   return s;
 }
+/* sub! / gsub! answer nil when the call made no substitution, which they
+   read from sp_re_sub_matched. They enter the runtime through these: the
+   flag is cleared here, after the call's arguments have run, so that an
+   argument which is a sub or gsub of its own does not leave its answer in
+   it. The plain forms do not come this way. */
+static inline const char *sp_str_sub_own(const char *s, const char *pat, const char *rep) { sp_re_sub_matched = 0; return sp_str_sub(s, pat, rep); }
+static inline const char *sp_str_gsub_own(const char *s, const char *pat, const char *rep) { sp_re_sub_matched = 0; return sp_str_gsub(s, pat, rep); }
+static inline const char *sp_re_sub_own(mrb_regexp_pattern *pat, const char *s, const char *rep) { sp_re_sub_matched = 0; return sp_re_sub(pat, s, rep); }
+static inline const char *sp_re_gsub_own(mrb_regexp_pattern *pat, const char *s, const char *rep) { sp_re_sub_matched = 0; return sp_re_gsub(pat, s, rep); }
+static inline const char *sp_poly_pat_gsub_own(sp_RbVal pat, const char *s, const char *rep, int once) { sp_re_sub_matched = 0; return sp_poly_pat_gsub(pat, s, rep, once); }
 static sp_PolyArray *sp_poly_uniq(sp_RbVal v) {
   sp_PolyArray *src = sp_poly_arr_recv(v, "uniq");
   SP_GC_ROOT(src);
@@ -16405,6 +16540,30 @@ static sp_Enumerator *sp_enum_chain_new(sp_RbVal arr) SP_UNUSED;
 static sp_Enumerator *sp_enum_chain_new(sp_RbVal arr) {
   SP_GC_ROOT_RBVAL(arr);
   sp_PolyArray *items = sp_enum_items_from(arr); SP_GC_ROOT(items);   /* the enumerator below is an allocation */
+  sp_Enumerator *e = sp_Enumerator_new_from_items(items);
+  e->is_chain = TRUE;
+  return e;
+}
+/* Enumerator::Chain.new(*sources): `sources` is the boxed Array of the
+   sources in order; the chain holds every source's items, each read as
+   #to_a reads it, and reports as Enumerator::Chain. */
+static sp_Enumerator *sp_enum_chain_of(sp_RbVal sources) SP_UNUSED;
+static sp_Enumerator *sp_enum_chain_of(sp_RbVal sources) {
+  SP_GC_ROOT_RBVAL(sources);
+  sp_PolyArray *srcs = sp_enum_items_from(sources); SP_GC_ROOT(srcs);
+  sp_PolyArray *items = sp_PolyArray_new(); SP_GC_ROOT(items);
+  for (sp_int i = 0; i < srcs->len; i++) {
+    /* a source with no #each is CRuby's NoMethodError, not an empty part
+       (raised here, as the chain is built, where CRuby raises on iteration) */
+    sp_RbVal src = srcs->data[i];
+    if (src.tag == SP_TAG_NIL)
+      sp_raise_cls("NoMethodError", sp_sprintf("undefined method 'each' for nil"));
+    if (!sp_poly_kind_of_builtin(src, "Enumerable"))
+      sp_raise_cls("NoMethodError", sp_sprintf("undefined method 'each' for an instance of %s",
+                                               sp_poly_class_name(src)));
+    sp_PolyArray *part = sp_enum_items_from(src); SP_GC_ROOT(part);
+    for (sp_int j = 0; j < part->len; j++) sp_PolyArray_push(items, part->data[j]);
+  }
   sp_Enumerator *e = sp_Enumerator_new_from_items(items);
   e->is_chain = TRUE;
   return e;

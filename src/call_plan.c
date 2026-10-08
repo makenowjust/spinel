@@ -48,7 +48,7 @@ static void cplan_set(CallPlan *p, int mi, int owner, int via, int dispatch) {
 /* the class a builtin receiver kind is reopened as, or NULL */
 static const char *cplan_reopen_class(TyKind rt) {
   switch (rt) {
-  case TY_STRING: return "String";
+  case TY_STRING: case TY_STRBUF: return "String";
   case TY_INT:    return "Integer";
   case TY_FLOAT:  return "Float";
   case TY_SYMBOL: return "Symbol";
@@ -451,6 +451,19 @@ const CallPlan *cplan_user_fresh(Compiler *c, int id) {
   return &fresh;
 }
 
+/* A constructor's result can be discarded, so resolve from its receiver
+   after the user new plan has declined, rather than from its result type. */
+int cplan_initialize(Compiler *c, int id) {
+  const NodeTable *nt = c->nt;
+  if (id < 0 || nt_kind(nt, id) != NK_CallNode || !is_new_name(nt_str(nt, id, "name"))) return -1;
+  int r = nt_ref(nt, id, "receiver");
+  NodeKind k = nt_kind(nt, r);
+  if (k != NK_ConstantReadNode && k != NK_ConstantPathNode) return -1;
+  if (cplan_user_fresh(c, id)->dispatch != CP_NONE) return -1;
+  int ci = comp_class_index(c, nt_str(nt, r, "name"));
+  return ci >= 0 ? comp_method_in_chain(c, ci, "initialize", NULL) : -1;
+}
+
 /* ---- cplan_targets: the user methods a call may reach ---- */
 
 /* Held answers, per node id: g_ct_n[id] is CT_NONE (not asked), CPT_UNKNOWN
@@ -547,6 +560,24 @@ int cplan_targets(Compiler *c, int id, int *out, int cap) {
   if (n > cap) return CPT_UNKNOWN;
   if (n > 0) memcpy(out, g_ct_pool + g_ct_off[id], (size_t)n * sizeof *out);
   return n;
+}
+
+/* A boxed receiver whose own targets include a class method. The receiver
+   walk bounds instances only: a successful bound cannot contain a Class. */
+int cplan_boxed_cmethod(Compiler *c, int id, const char *name) {
+  int ncc = 0;
+  comp_cmethod_candidates(c, name, &ncc);
+  if (!ncc) return 0;
+  int recv = nt_ref(c->nt, id, "receiver");
+  if (recv < 0 || comp_ntype(c, recv) != TY_POLY) return 0;
+  int n = 0;
+  if (poly_recv_classes(c, id, &n)) return 0;
+  int targets[CPT_MAX];
+  n = cplan_targets(c, id, targets, CPT_MAX);
+  if (n == CPT_UNKNOWN) return 1;
+  for (int i = 0; i < n; i++)
+    if (c->scopes[targets[i]].is_cmethod) return 1;
+  return 0;
 }
 
 /* ---- CP_REFUSE ---- */

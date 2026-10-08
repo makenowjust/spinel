@@ -74,6 +74,8 @@ const CallPlan *cplan_user(Compiler *c, int id);
    analyze_nil.c): it answers from the types as they stand. The answer
    lasts until the next call. */
 const CallPlan *cplan_user_fresh(Compiler *c, int id);
+/* A constant receiver's builtin new reaches this initialize, or -1. */
+int cplan_initialize(Compiler *c, int id);
 /* Every user method the call node id may reach, into out (at most cap):
    its plan's method and, for a switch, each member. Answered from the types
    as they stand, never kept past cplan_targets_drop.
@@ -90,6 +92,7 @@ const CallPlan *cplan_user_fresh(Compiler *c, int id);
 enum { CPT_UNKNOWN = -1, CPT_MAX = 64 };
 int cplan_targets(Compiler *c, int id, int *out, int cap);
 void cplan_targets_drop(void);
+int cplan_boxed_cmethod(Compiler *c, int id, const char *name);
 /* Object fallback behind a class-gated exception accessor, or -1. */
 int cplan_exc_object_method(Compiler *c, const char *name);
 

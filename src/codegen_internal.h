@@ -157,9 +157,12 @@ int strbuf_flow_carries(Compiler *c, StrbufFlowMemo *fm, int kind, int site, int
 int strbuf_call_picks_up(Compiler *c, int id);
 int strbuf_self_reader_handle(Compiler *c, int id);
 int strbuf_call_reads_handle(Compiler *c, int recv);
+int strbuf_route_reader(Compiler *c, int v);
 const NativeMethod *strbuf_native_answer(Compiler *c, int n);
 int strbuf_io_outbuf(Compiler *c, int id);
+int emit_io_read_nonblock_outbuf(Compiler *c, int id, Buf *b);
 int emit_strbuf_io_read(Compiler *c, int id, Buf *b);
+void emit_str_concat_handle(Compiler *c, const char *sref, int argc, const int *argv, Buf *b, int indent);
 int emit_bang_self_handle(Compiler *c, int v, Buf *b);
 int strbuf_chain_over_handle(Compiler *c, int v);
 int strbuf_narrowed_box_mutator(Compiler *c, int id);
@@ -191,7 +194,8 @@ int strbuf_var_handle(Compiler *c, int n, char *out, size_t cap);
    (a variable, a route, a conditional with such an arm)? (codegen_stmt.c) */
 int strbuf_value_carries(Compiler *c, int v);
 /* `String(x)` or `+x` over a variable whose slot holds the handle: that
-   slot's text, *uplus for `+x` (codegen_stmt.c) */
+   slot's text, *uplus for `+x` (codegen_stmt.c). Returns the operand node
+   plus one, or zero when there is no route. */
 int strbuf_self_route_slot(Compiler *c, int v, int *uplus, char *out, size_t cap);
 /* --share-strings: an exception's message argument that reads a variable
    holding the handle, which the exception then holds
@@ -199,6 +203,7 @@ int strbuf_self_route_slot(Compiler *c, int v, int *uplus, char *out, size_t cap
 int exc_msg_handle(Compiler *c, int arg, char *href, size_t cap);
 /* --share-strings: `e.message` over a variable's exception (codegen_stmt.c) */
 int strbuf_exc_message_of_var(Compiler *c, int v);
+int strbuf_route_exc_message(Compiler *c, int v);
 /* A `next` value a block's boxed answer slot takes: a shared String as its
    handle's box under --share-strings (codegen_stmt.c) */
 void emit_boxed_next_value(Compiler *c, int v, Buf *b);
@@ -241,6 +246,7 @@ extern const char *g_yield_block_fallback_param_name;
 extern int  g_nren;
 extern int  g_block_id;
 int builtin_method_known(const char *cls, const char *m);
+int builtin_instance_name_known(const char *m);
 int builtin_arity_violation(Compiler *c, int id);
 int builtin_object_method_known(const char *m);
 int name_is_enumerable_module_method(const char *m);
@@ -295,6 +301,7 @@ int subtree_may_run_proc(Compiler *c, int id);
    -- variable and literal reads, scalar arithmetic, typed-array reads and
    plain field reads, all the way down (codegen_call.c)? */
 int subtree_is_pure_read(Compiler *c, int id);
+int operand_is_held_read(Compiler *c, int id);
 /* Is the call a reader the emitter lowers to a plain field read? *allocates is
    set when the read builds a copy (a shared String slot). codegen_call.c */
 int call_is_field_read(Compiler *c, int id, int *allocates);
@@ -629,6 +636,13 @@ extern int g_uses_program_name;/* $0 / $PROGRAM_NAME read somewhere */
    match (sp_re_track_last), which costs a copy of the match and its groups
    per call; one that never reads them keeps the plain scans. */
 extern int g_reads_match_regs;
+/* A sub! / gsub! beside which, or in whose receiver, argument or block, a
+   sub of another call may run (sub_bang_reenters): the bang arm names its
+   call here. Its plain form enters the runtime through the `_own` wrapper,
+   and a block form (emit_gsub_block_expr) answers with the C local that
+   says whether its loop found a match. */
+extern int g_sub_bang_id, g_sub_bang_tm;
+extern int g_stmt_cur;         /* codegen_stmt.c: the statement being emitted */
 extern int g_gen_obj_hash;
 extern int g_gen_obj_to_json;  /* a package wants obj reflection + >=1 user #to_json */  /* a package wants obj reflection + >=1 struct: emit+install sp_obj_to_hash */
 extern int g_gen_obj_struct_values;  /* >=1 instantiated Struct (not Data): emit+install sp_obj_struct_values (poly member array) */
@@ -899,6 +913,9 @@ const char *poly_sink_unbox_fn(TyKind slot);
 const char *token_unbox_fmt(TyKind target);
 /* A node of such a type may hold NULL: not a literal, not self. */
 int node_may_be_null_nil(Compiler *c, int node);
+/* A value stored where a String handle is wanted may be nil: one the
+   never-nil list (ivs_never_nil) does not prove. */
+int stored_value_may_be_nil(Compiler *c, int v);
 /* `fn(recv)` with recv evaluated once, answering nil_c for a NULL recv. */
 void emit_null_guarded_call(Compiler *c, int recv, TyKind rt, const char *fn, const char *nil_c, Buf *b);
 void emit_unbox_text(Compiler *c, TyKind t, const char *expr, Buf *b);
@@ -959,6 +976,7 @@ int subtree_has_param_named_pub(const NodeTable *nt, int id, const char *nm);
 const char *past_open_parens(const char *s);
 int text_diverges(const char *txt);
 int inlined_local_needs_volatile(Compiler *c, LocalVar *lv);
+int proc_local_needs_volatile(Compiler *c, int create, LocalVar *lv);
 void emit_inlined_local_decl(Compiler *c, LocalVar *lv, const char *rn, Buf *b, int din);
 /* A parameter a closure captures is a heap cell: the `lv_<uniq>` a call
    binds an argument to, for a later default to read, gets that cell too. */
@@ -1309,6 +1327,9 @@ int scope_is_shadowed(Compiler *c, int s);
 int  scope_needs_proc_form(Compiler *c, int s);
 int  scope_proc_form_of(Compiler *c, int s);
 int  expr_is_held_ref(Compiler *c, int node);   /* a read of a held object: no root needed */
+/* Reads kept by their existing frame slot across later argument evaluation. */
+int read_of_fixed_param(Compiler *c, int node);
+int read_unbound_in_stmt(Compiler *c, int node);
 int  proc_form_live(Compiler *c, int s);
 int  proc_form_source(Compiler *c, int s);
 int  ctor_site_on_cycle(Compiler *c, int id, int initm);
@@ -1405,6 +1426,7 @@ int emit_nilfree_operand(Compiler *c, int v, const char *op, int left, const cha
 void emit_rooted_operand(Compiler *c, TyKind pt, int provided, const char *expr, Buf *out);
 int arg_read_converts(Compiler *c, TyKind pt, int provided);
 void emit_rooted_conversion(Compiler *c, TyKind pt, const char *expr, Buf *out);
+int prelude_is_held_decls(const char *p);
 int arg_slot_for_param(Compiler *c, Scope *m, int idx, int argc);
 /* 1 when a parameter default reads an earlier parameter: it must be evaluated
    with that parameter bound (see emit_args_filled). */

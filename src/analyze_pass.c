@@ -1,5 +1,6 @@
 #include "analyze_internal.h"
 #include "builtin_ops.h"
+#include "call_plan.h"
 #include "repr.h"
 int callee_has_kwarg(Compiler *c, Scope *m, const char *name);
 int callee_declares_kwargs(Compiler *c, Scope *m);
@@ -5834,6 +5835,9 @@ static int widen_array_sources(Compiler *c, int v) {
    is followed back to where its arrays are built (widen_array_sources): a
    local assigned a method's value, the value of a method, a chain of them.
    Returns 1 on a change. */
+/* The callee parameter a reverse binding widens on behalf of (-1: none). */
+static int g_wcause_scope = -1;
+static const char *g_wcause_name = NULL;
 static int widen_arg_array(Compiler *c, int arg) {
   const NodeTable *nt = c->nt;
   arg = unwrap_parens(c, arg);
@@ -5850,7 +5854,10 @@ static int widen_arg_array(Compiler *c, int arg) {
     if (!al || !ty_is_array(al->type) || al->type == TY_POLY_ARRAY || al->is_block_param) return 0;
     if (al->is_param) {
       if (al->rbs_seeded) return 0;
-      al->type = TY_POLY_ARRAY; al->push_widened = 1;
+      if (g_wcause_name && al->widen_blocked) return 0;
+      al->type = TY_POLY_ARRAY;
+      if (!al->push_widened && g_wcause_name) { al->widen_from_scope = g_wcause_scope; al->widen_from_name = g_wcause_name; }
+      al->push_widened = 1;
       return 1;
     }
     if (local_all_writes_empty_array(c, asc, an)) { al->type = TY_POLY_ARRAY; return 1; }
@@ -6863,7 +6870,11 @@ static int bind_args_params(Compiler *c, int call_id, int mi, const int *argv, i
        direction, only to the poly array, so it stays monotonic. A hash
        parameter a foreign store widened widens the caller's hash the same
        way. */
-    if (p->push_widened && p->type != TY_POLY_POLY_HASH) changed |= widen_arg_array(c, anode);
+    if (p->push_widened && p->type == TY_POLY_ARRAY) {
+      g_wcause_scope = (int)(m - c->scopes); g_wcause_name = p->name;
+      changed |= widen_arg_array(c, anode);
+      g_wcause_scope = -1; g_wcause_name = NULL;
+    }
     if (p->push_widened && p->type == TY_POLY_POLY_HASH && ty_is_hash(at))
       changed |= widen_arg_hash(c, anode);
     /* A BOXED parameter hides the container from its callee, so the element
@@ -13171,6 +13182,162 @@ static int infer_zip_block_params(Compiler *c, int id, int block, const char *p0
   return changed;
 }
 
+/* Is node `n` a read of the local `nm` of scope `s`? */
+static int local_read_of(Compiler *c, Scope *s, const char *nm, int n) {
+  const char *rn = nt_kind(c->nt, n) == NK_LocalVariableReadNode ? nt_str(c->nt, n, "name") : NULL;
+  return rn && sp_streq(rn, nm) && comp_scope_of(c, n) == s;
+}
+
+/* How often node `n` is used up as a value: as the receiver of a call
+   without a block, or alone in an interpolation. Counted for every node in
+   one walk of the table, which is kept until the table changes. */
+static int node_used_up(Compiler *c, int n) {
+  static const NodeTable *knt;
+  static unsigned kver;
+  static int kcnt, *cnt;
+  const NodeTable *nt = c->nt;
+  if (knt != nt || kver != nt->version || kcnt != nt->count) {
+    int *nv = realloc(cnt, sizeof(int) * (size_t)(nt->count > 0 ? nt->count : 1));
+    /* a lost count would unbox a key into a slot something else reads */
+    if (!nv) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+    cnt = nv;
+    memset(cnt, 0, sizeof(int) * (size_t)nt->count);
+    for (int u = 0; u < nt->count; u++) {
+      NodeKind k = nt_kind(nt, u);
+      int v = -1;
+      if (k == NK_CallNode) v = nt_ref(nt, u, "block") < 0 ? nt_ref(nt, u, "receiver") : -1;
+      else if (k == NK_EmbeddedStatementsNode) {
+        int en = 0; const int *eb = nt_arr(nt, nt_ref(nt, u, "statements"), "body", &en);
+        if (en == 1) v = eb[0];
+      }
+      if (v >= 0 && v < nt->count) cnt[v]++;
+    }
+    knt = nt; kver = nt->version; kcnt = nt->count;
+  }
+  return n >= 0 && n < kcnt ? cnt[n] : 0;
+}
+
+/* Is the parameter `nm` of the block `blk` used up wherever it is read: as
+   the receiver of a call without a block, in an interpolation, or as the
+   node `value`? It is not where something assigns it, a proc captures it,
+   or the block numbers its parameters. The slot is the scope's, so every
+   read in the scope counts; the variable's writes and reads come off the
+   chains that index them (comp_lvw_first_sc, comp_vsite_first), since a
+   walk of the program for each block is quadratic in the blocks. */
+int block_param_used_up(Compiler *c, int blk, const char *nm, int value) {
+  const NodeTable *nt = c->nt;
+  Scope *s = comp_scope_of(c, blk);
+  int si = (int)(s - c->scopes);
+  if (nt_kind(nt, nt_ref(nt, blk, "parameters")) != NK_BlockParametersNode ||
+      subtree_proc_captures_name(c, blk, nm, 0, 0)) return 0;
+  for (int w = comp_lvw_first_sc(c, si, nm); w >= 0; w = comp_lvw_next_sc(c, w)) {
+    const char *wn = nt_str(nt, w, "name");
+    if (wn && sp_streq(wn, nm) && comp_scope_of(c, w) == s) return 0;
+  }
+  int reads = 0, used = value >= 0 && local_read_of(c, s, nm, value);
+  for (int e = comp_vsite_first(c, VS_READ, NK_LocalVariableReadNode, nm, si); e >= 0; e = comp_vsite_next(c, e)) {
+    int r = comp_vsite_node(c, e);
+    if (!local_read_of(c, s, nm, r)) continue;
+    reads++;
+    used += node_used_up(c, r);
+  }
+  return reads == used;
+}
+
+/* A fetch key of type `kt` whose block's parameter may be boxed: the type
+   is known and can hold neither a String nor a Symbol. A nil counts only
+   as the literal; a local that is nil so far may yet be typed a String. */
+static int fetch_key_boxes(const NodeTable *nt, int key, TyKind kt) {
+  return kt != TY_UNKNOWN && kt != TY_POLY && kt != TY_STRING && kt != TY_SYMBOL &&
+         (kt != TY_NIL || nt_kind(nt, key) == NK_NilNode);
+}
+
+/* The local of the fetch block `blk`'s parameter `p0`, or NULL, as
+   scope_local finds it (a scope holds a name once). A scope with a
+   thousand fetch blocks has a thousand such locals and each block is asked
+   about in every round, so the local is looked for where it was found
+   last, and a first search starts after the one found before it: the
+   blocks are asked about in the order their parameters were made. */
+static LocalVar *fetch_param_local(Compiler *c, int blk, const char *p0) {
+  static int *at, cap, last;
+  Scope *s = comp_scope_of(c, blk);
+  if (blk >= cap) {
+    int ncap = c->nt->count > blk ? c->nt->count : blk + 1;
+    int *nv = realloc(at, sizeof(int) * (size_t)ncap);
+    if (!nv) return scope_local(s, p0);
+    memset(nv + cap, 0xff, sizeof(int) * (size_t)(ncap - cap));   /* -1: not found yet */
+    at = nv; cap = ncap;
+  }
+  int i = at[blk];
+  if (i >= 0 && i < s->nlocals && sp_streq(s->locals[i].name, p0)) return &s->locals[i];
+  for (int k = 1; k <= s->nlocals; k++) {
+    i = (last + k) % s->nlocals;
+    if (sp_streq(s->locals[i].name, p0)) { at[blk] = last = i; return &s->locals[i]; }
+  }
+  return NULL;
+}
+
+/* The fetch blocks one of which may be left behind (fetch_params_may_box):
+   its key, its block and the name of the block's parameter. The question
+   is asked for every parameter about to be boxed, and looking every fetch
+   call's block, key and parameter up again each time is cubic in the
+   fetch blocks of a program. So they are listed once a round of
+   infer_block_params, and again if the node table changes under it. A
+   block whose key is a literal that boxes is never the one left behind and
+   is not listed; another literal's type is read once (kt; TY_UNKNOWN: a
+   key to ask about each time). */
+typedef struct { int key, blk; TyKind kt; const char *p0; } FetchBlk;
+static FetchBlk *fblk_v;
+static int fblk_n = -1, fblk_cap, fblk_cnt;
+static unsigned fblk_ver;
+static void fetch_blocks_list(Compiler *c) {
+  const NodeTable *nt = c->nt;
+  fblk_n = 0; fblk_ver = nt->version; fblk_cnt = nt->count;
+  for (int id = an_calls_named_first(c, "fetch"); id >= 0; id = an_calls_named_next(id)) {
+    int blk = nt_ref(nt, id, "block");
+    const char *p0 = nt_kind(nt, blk) == NK_BlockNode ? block_param_name(c, blk, 0) : NULL;
+    int fa = nt_ref(nt, id, "arguments");
+    int fac = 0; const int *fav = fa >= 0 ? nt_arr(nt, fa, "arguments", &fac) : NULL;
+    if (!p0 || fac < 1) continue;
+    NodeKind kk = nt_kind(nt, fav[0]);
+    int lit = kk == NK_IntegerNode || kk == NK_FloatNode || kk == NK_StringNode || kk == NK_SymbolNode ||
+              kk == NK_NilNode || kk == NK_TrueNode || kk == NK_FalseNode;
+    TyKind kt = lit ? infer_type(c, fav[0]) : TY_UNKNOWN;
+    if (lit && fetch_key_boxes(nt, fav[0], kt)) continue;
+    if (fblk_n >= fblk_cap) {
+      fblk_cap = fblk_cap ? fblk_cap * 2 : 16;
+      FetchBlk *nv = realloc(fblk_v, sizeof(FetchBlk) * (size_t)fblk_cap);
+      /* a lost row would box a parameter beside a block left behind */
+      if (!nv) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+      fblk_v = nv;
+    }
+    FetchBlk *f = &fblk_v[fblk_n++];
+    f->key = fav[0]; f->blk = blk; f->kt = kt; f->p0 = p0;
+  }
+}
+
+/* May the fetch blocks' parameters that kept a stale type be boxed? Not
+   while another fetch block of the program would be left behind: one whose
+   key is or may be a String or a Symbol, and whose parameter is neither
+   boxed nor of the key's own type. Boxed, a String is a copy under a
+   change in place, and nothing shows the block's calls are right on a
+   boxed Symbol; so that parameter stays as it is, and its fetch keeps a
+   failure that a program which now builds would reach. The two types are
+   read as they are at each ask: a round changes them as it goes. */
+static int fetch_params_may_box(Compiler *c) {
+  const NodeTable *nt = c->nt;
+  if (fblk_n < 0 || fblk_ver != nt->version || fblk_cnt != nt->count) fetch_blocks_list(c);
+  for (int i = 0; i < fblk_n; i++) {
+    FetchBlk *f = &fblk_v[i];
+    TyKind kt = f->kt != TY_UNKNOWN ? f->kt : infer_type(c, f->key);
+    LocalVar *lv = fetch_param_local(c, f->blk, f->p0);
+    TyKind st = lv ? lv->type : TY_UNKNOWN;
+    if (!fetch_key_boxes(nt, f->key, kt) && st != TY_POLY &&
+        !(st == kt && (kt == TY_STRING || kt == TY_SYMBOL))) return 0;
+  }
+  return 1;
+}
+
 /* infer_block_params's per-call arms for a container receiver's block:
    match, zip, merge, product, fetch, transform_keys / transform_values,
    each_value / each_key, a Hash's each / each_pair, and an Array element
@@ -13237,6 +13404,24 @@ static int infer_block_params_container_arms(Compiler *c, const NodeTable *nt, i
     if (fn >= 1 && want != TY_POLY && infer_type(c, fav[0]) == TY_POLY) want = TY_POLY;
     if (bp_widen(fs, p0, want)) changed = 1;
     return changed | 2;
+  }
+  /* A boxed receiver's fetch(key) { |k| } binds that key too. A read such
+     as `x[:s]` types a still untyped local as a Hash of Symbol keys for a
+     round, and the arm above then gave k that key type, which k kept when
+     the local was boxed: `x.fetch(9) { |k| k * 2 }` multiplied a "Symbol"
+     and lost its Hash arm, or did not build. Where the key is of another
+     type than k has, and is no String and no Symbol, k is boxed, as it is
+     where nothing typed it. */
+  if (sp_streq(name, "fetch") && rt == TY_POLY && p0) {
+    LocalVar *fp = fetch_param_local(c, block, p0);
+    /* an untyped or boxed k has nothing to cure: the key is not looked at */
+    if (fp && fp->type != TY_UNKNOWN && fp->type != TY_POLY) {
+      int fa = nt_ref(nt, id, "arguments");
+      int fac = 0; const int *fav = fa >= 0 ? nt_arr(nt, fa, "arguments", &fac) : NULL;
+      TyKind fkt = fac > 0 ? infer_type(c, fav[0]) : TY_UNKNOWN;
+      if (fac > 0 && fetch_key_boxes(nt, fav[0], fkt) &&
+          fkt != fp->type && fetch_params_may_box(c) && lv_widen(fp, TY_POLY)) changed = 1;
+    }
   }
 
   /* hash.transform_keys { |k| } binds key; transform_values { |v| } value */
@@ -13427,14 +13612,42 @@ static int rows_elem_read(const NodeTable *nt, const int *par, int n) {
   return an == 1 && nt_kind(nt, av[0]) != NK_RangeNode;
 }
 
+/* Whether `name`, or an instance variable's name without its `@`, is
+   written anywhere as a Symbol or a String. That reaches a constant, an
+   instance variable or a method with no read or call of its name:
+   const_get(:T), attr_reader :row, instance_variable_get(:@row), alias,
+   method(:pick). The Symbols and Strings are gathered once and again when
+   the node table changes: every round of inference asks. */
+static ANameHash g_rows_spelled;
+static const NodeTable *g_rows_spelled_nt;
+static unsigned g_rows_spelled_ver;
+static int g_rows_spelled_cnt = -1;
+static int rows_name_spelled(const NodeTable *nt, const char *name) {
+  if (g_rows_spelled_nt != nt || g_rows_spelled_ver != nt->version || g_rows_spelled_cnt != nt->count) {
+    anh_free(&g_rows_spelled); memset(&g_rows_spelled, 0, sizeof g_rows_spelled);
+    NT_FOREACH_KIND(nt, NK_SymbolNode, s) {
+      const char *v = nt_str(nt, s, "value");
+      if (v && !anh_has(&g_rows_spelled, v)) anh_add(&g_rows_spelled, v);
+    }
+    NT_FOREACH_KIND(nt, NK_StringNode, s) {
+      const char *v = nt_str(nt, s, "content");
+      if (v && !anh_has(&g_rows_spelled, v)) anh_add(&g_rows_spelled, v);
+    }
+    g_rows_spelled_nt = nt; g_rows_spelled_ver = nt->version; g_rows_spelled_cnt = nt->count;
+  }
+  return anh_has(&g_rows_spelled, name) || (name[0] == '@' && anh_has(&g_rows_spelled, name + 1));
+}
+
 /* Whether every read of the slot written at `w` (an ivar, by name, or a
    local of its scope) is an element read, and nothing else writes it in
-   place: a row held there is only ever read. */
+   place: a row held there is only ever read. An ivar whose name is spelled
+   (rows_name_spelled) may be handed out by a reader. */
 static int rows_slot_elem_reads(const NodeTable *nt, Compiler *c, const int *par, int w) {
   NodeKind wk = nt_kind(nt, w);
   const char *nm = nt_str(nt, w, "name");
   if (!nm) return 0;
   int iv = wk == NK_InstanceVariableWriteNode;
+  if (iv && rows_name_spelled(nt, nm)) return 0;
   Scope *ws = iv ? NULL : comp_scope_of(c, w);
   for (int n = 0; n < nt->count; n++) {
     NodeKind k = nt_kind(nt, n);
@@ -13451,18 +13664,47 @@ static int rows_slot_elem_reads(const NodeTable *nt, Compiler *c, const int *par
   return 1;
 }
 
+/* an_value_dropped has said the value of `w` is thrown away. For the last
+   statement of a block it went by the iterator's name (`each`, `times`):
+   a method of the program's own by that name may answer what its block
+   answers (`def each = yield`). */
+static int rows_block_drops(Compiler *c, const int *par, int w) {
+  const NodeTable *nt = c->nt;
+  int st = par[w], bl = par[st];
+  int sn = 0; const int *sb = nt_arr(nt, st, "body", &sn);
+  if (sn <= 0 || sb[sn - 1] != w || bl < 0 || nt_kind(nt, bl) != NK_BlockNode) return 1;
+  const char *iter = par[bl] >= 0 ? nt_str(nt, par[bl], "name") : NULL;
+  return iter && !an_user_defines_method(c, iter);
+}
+
+/* Whether the value of method `dn` can be taken other than by a call of
+   its name or a `super`: the name is spelled (rows_name_spelled: an alias,
+   method(:dn), instance_method), `x.dn ||= v` reads through it, or it is a
+   conversion Kernel#Array and a multiple assignment call by themselves. */
+static int rows_method_taken(const NodeTable *nt, const char *dn) {
+  if (sp_streq(dn, "to_a") || sp_streq(dn, "to_ary") || rows_name_spelled(nt, dn)) return 1;
+  const NodeKind rd[] = { NK_CallOrWriteNode, NK_CallAndWriteNode };
+  for (size_t k = 0; k < sizeof rd / sizeof rd[0]; k++)
+    NT_FOREACH_KIND(nt, rd[k], q) {
+      const char *qn = nt_str(nt, q, "name");
+      if (qn && sp_streq(qn, dn)) return 1;
+    }
+  return 0;
+}
+
 /* Whether the value of `w` is thrown away: a statement whose value nothing
    reads, the last statement of a conditional, a parenthesized or a begin
    body whose own value is thrown away, or the last statement of a method
    every call of which (by name, whatever the receiver) throws its value
-   away in turn. A method already being asked about (a tail calling a
-   method of its own name, as `reset` methods do) counts as thrown away
+   away in turn, and whose value nothing takes another way
+   (rows_method_taken). A method already being asked about (a tail calling
+   a method of its own name, as `reset` methods do) counts as thrown away
    there: its other calls decide. `seen` holds those names, `depth` of
    them at most. */
 static int rows_value_dropped(Compiler *c, const int *par, int w, const char **seen, int nseen) {
   const NodeTable *nt = c->nt;
   for (int guard = 0; guard < 64; guard++) {
-    if (an_value_dropped(nt, par, w)) return 1;
+    if (an_value_dropped(nt, par, w)) return rows_block_drops(c, par, w);
     int st = par[w];
     if (st < 0 || nt_kind(nt, st) != NK_StatementsNode) return 0;
     int sn = 0; const int *sb = nt_arr(nt, st, "body", &sn);
@@ -13474,44 +13716,73 @@ static int rows_value_dropped(Compiler *c, const int *par, int w, const char **s
       w = g; continue;
     }
     const char *dn = gk == NK_DefNode ? nt_str(nt, g, "name") : NULL;
-    if (!dn) return 0;
+    if (!dn || rows_method_taken(nt, dn)) return 0;
     for (int k = 0; k < nseen; k++) if (sp_streq(seen[k], dn)) return 1;
     if (nseen >= 4) return 0;
     seen[nseen] = dn;
-    NT_FOREACH_KIND(nt, NK_CallNode, q) {
-      const char *qn = nt_str(nt, q, "name");
+    for (int q = an_calls_named_first(c, dn); q >= 0; q = an_calls_named_next(q)) {
+      const char *qn = nt_kind(nt, q) == NK_CallNode ? nt_str(nt, q, "name") : NULL;
       if (qn && sp_streq(qn, dn) && !rows_value_dropped(c, par, q, seen, nseen + 1)) return 0;
     }
+    /* `super` is a call of the method it is written in; outside a `def`
+       (a define_method block) it may be a call of any */
+    const NodeKind sup[] = { NK_SuperNode, NK_ForwardingSuperNode };
+    for (size_t k = 0; k < sizeof sup / sizeof sup[0]; k++)
+      NT_FOREACH_KIND(nt, sup[k], q) {
+        int d = par[q];
+        while (d >= 0 && nt_kind(nt, d) != NK_DefNode) d = par[d];
+        const char *in = d >= 0 ? nt_str(nt, d, "name") : NULL;
+        if ((!in || sp_streq(in, dn)) && !rows_value_dropped(c, par, q, seen, nseen + 1)) return 0;
+      }
     return 1;
   }
   return 0;
 }
 
+/* Whether constant `cname` is reached other than by the reads
+   const_rows_elem_reads_only examines: by a compound or a multiple
+   assignment, which reads or rebinds it, or by its name given to const_get
+   (rows_name_spelled). */
+static int rows_const_reached(const NodeTable *nt, const char *cname) {
+  const NodeKind by[] = { NK_ConstantOperatorWriteNode, NK_ConstantOrWriteNode, NK_ConstantAndWriteNode,
+                          NK_ConstantTargetNode, NK_ConstantPathTargetNode };
+  for (size_t k = 0; k < sizeof by / sizeof by[0]; k++)
+    NT_FOREACH_KIND(nt, by[k], n) {
+      const char *nn = nt_str(nt, n, "name");
+      if (nn && sp_streq(nn, cname)) return 1;
+    }
+  return rows_name_spelled(nt, cname);
+}
+
 /* Whether the rows of constant `cname` are only ever read element by
-   element: every read of the constant is `CNAME[i]`, and each row it
+   element: every read of the constant, by its bare name or through a path
+   (`M::CNAME`), is `CNAME[i]`, and each row it
    answers is read by an index right there or held, by a write whose value
    is thrown away, in an ivar or a local that is only read by an index
    (optcarrot's `@oscillator_clocks = OSCILLATOR_CLOCKS[0]`). Such rows can be Integer arrays: nothing can
    store into them, copy them or hand them on. */
 static int const_rows_elem_reads_only(Compiler *c, const char *cname) {
   const NodeTable *nt = c->nt;
+  if (rows_const_reached(nt, cname)) return 0;
   int *par = an_parent_map(nt);
   if (!par) return 0;
   const char *seen[4];
+  const NodeKind rd[] = { NK_ConstantReadNode, NK_ConstantPathNode };
   int ok = 1;
-  for (int n = comp_kind_first(c, NK_ConstantReadNode); ok && n >= 0; n = comp_kind_next(c, n)) {
-    if (nt_kind(nt, n) != NK_ConstantReadNode) continue;
-    const char *rn = nt_str(nt, n, "name");
-    if (!rn || !sp_streq(rn, cname)) continue;
-    if (!rows_elem_read(nt, par, n)) { ok = 0; break; }
-    int row = par[n], q = par[row];
-    if (rows_elem_read(nt, par, row)) continue;
-    NodeKind qk = q >= 0 ? nt_kind(nt, q) : NK_NONE;
-    if ((qk == NK_InstanceVariableWriteNode || qk == NK_LocalVariableWriteNode) &&
-        nt_ref(nt, q, "value") == row && rows_value_dropped(c, par, q, seen, 0) &&
-        rows_slot_elem_reads(nt, c, par, q)) continue;
-    ok = 0;
-  }
+  for (int k = 0; ok && k < 2; k++)
+    for (int n = comp_kind_first(c, rd[k]); ok && n >= 0; n = comp_kind_next(c, n)) {
+      if (nt_kind(nt, n) != rd[k]) continue;
+      const char *rn = nt_str(nt, n, "name");
+      if (!rn || !sp_streq(rn, cname)) continue;
+      if (!rows_elem_read(nt, par, n)) { ok = 0; break; }
+      int row = par[n], q = par[row];
+      if (rows_elem_read(nt, par, row)) continue;
+      NodeKind qk = q >= 0 ? nt_kind(nt, q) : NK_NONE;
+      if ((qk == NK_InstanceVariableWriteNode || qk == NK_LocalVariableWriteNode) &&
+          nt_ref(nt, q, "value") == row && rows_value_dropped(c, par, q, seen, 0) &&
+          rows_slot_elem_reads(nt, c, par, q)) continue;
+      ok = 0;
+    }
   free(par);
   return ok;
 }
@@ -13874,6 +14145,7 @@ static int infer_block_params_call_arms(Compiler *c, const NodeTable *nt, int id
     int ymi = -1;
     if (tmi >= 0 && !method_call_param_shift(c, bx, tmi)) {
       if (recv < 0) ymi = comp_self_call_mi(c, id, name);
+      else if (infer_type(c, recv) == TY_STRING || infer_type(c, recv) == TY_STRBUF) ymi = cplan_user_fresh(c, id)->mi;
       else if (sp_streq(name, "new") && (nt_kind(nt, recv) == NK_ConstantReadNode ||
                                          nt_kind(nt, recv) == NK_ConstantPathNode)) {
         int cid = nt_str(nt, recv, "name") ? comp_class_index(c, nt_str(nt, recv, "name")) : -1;
@@ -14007,6 +14279,7 @@ static int infer_block_params_call_arms(Compiler *c, const NodeTable *nt, int id
     }
     else {
       TyKind rt0 = infer_type(c, recv);
+      if (rt0 == TY_STRING || rt0 == TY_STRBUF) mi = cplan_user_fresh(c, id)->mi;
       if (ty_is_object(rt0)) mi = comp_method_in_chain(c, ty_object_class(rt0), name, NULL);
       /* Class.new { |...| }: the yielding method is Class#initialize.
          A ConstantPATH receiver counts: `N::Conn` names a class as much as
@@ -14284,6 +14557,7 @@ int infer_block_params(Compiler *c) {
   int changed = 0;
   block_sites_index(c);
   bsn_n = 0;
+  fblk_n = -1;   /* the fetch blocks are listed again when first asked for */
 
   /* Splat-rest / trailing-post params of proc literals: register them on the
      proc's scope so they are locals, not "uncaptured outer variables". The

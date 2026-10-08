@@ -1650,6 +1650,10 @@ int emit_gsub_block_expr(Compiler *c, int id, Buf *b) {
   if (bn < 1) return 0;
   int ts = ++g_tmp, tpos = ++g_tmp, tslen = ++g_tmp, tout = ++g_tmp,
       tm = ++g_tmp, tms = ++g_tmp, tme = ++g_tmp;
+  /* sub! / gsub! asks whether a match was found. The runtime flag cannot say
+     it for a block form whose block runs a sub! or gsub! of its own: that
+     one clears the flag between this match and the answer. A C local does. */
+  int tsm = g_sub_bang_id == id ? ++g_tmp : 0;
   /* poly values reaching here are strings, like the blockless poly gsub/sub
      arm in codegen_call_recv.c -- unbox through sp_poly_to_s to get the same
      `const char *` the typed String receiver emits directly. */
@@ -1719,6 +1723,7 @@ int emit_gsub_block_expr(Compiler *c, int id, Buf *b) {
      (sp_re_match_next). Only a program that reads them pays for it. */
   const char *re_next = g_reads_match_regs ? "sp_re_match_next" : "sp_re_match_at";
   if (g_reads_match_regs) { emit_indent(g_pre, g_indent); buf_puts(g_pre, "sp_re_clear_last_match();\n"); }
+  if (tsm) { emit_indent(g_pre, g_indent); buf_printf(g_pre, "int _t%d = 0;\n", tsm); }
   emit_indent(g_pre, g_indent); buf_printf(g_pre, "while (_t%d <= _t%d) {\n", tpos, tslen);
   if (polypat) {
     emit_indent(g_pre, g_indent + 1);
@@ -1738,6 +1743,7 @@ int emit_gsub_block_expr(Compiler *c, int id, Buf *b) {
   }
   emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "if (_t%d < 0) { sp_String_append_bin(_t%d, _t%d + _t%d); break; }\n", tm, tout, ts, tpos);
   emit_indent(g_pre, g_indent + 1); buf_puts(g_pre, "sp_re_sub_matched = 1;\n");   /* the bang forms' nil contract */
+  if (tsm) { emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "_t%d = 1;\n", tsm); }
   if (polypat) {
     emit_indent(g_pre, g_indent + 1);
     buf_printf(g_pre, "sp_int _t%d = _t%d ? sp_re_caps[0] - _t%d : _t%d;\n", tms, tre, tpos, tm);
@@ -1798,6 +1804,7 @@ int emit_gsub_block_expr(Compiler *c, int id, Buf *b) {
   }
   emit_indent(g_pre, g_indent); buf_puts(g_pre, "}\n");
   buf_printf(b, "_t%d->data", tout);
+  if (tsm) g_sub_bang_tm = tsm;
   return 1;
 }
 
@@ -7026,6 +7033,7 @@ static void emit_arg_or_default_fill(Compiler *c, Scope *m, int idx, int provide
     }
     int dvP = m->pdefault[idx];
     if (dvP >= 0 && comp_ntype(c, dvP) == TY_NIL) { buf_puts(out, "NULL"); return; }
+    if (repr_self_shared(c, dvP)) { emit_strbuf_handle_of(c, dvP, out); return; }
     /* a default that is an earlier parameter binds that parameter's handle,
        the one String both names hold (promote_default_alias_params) */
     { char srefD[192];
@@ -8044,13 +8052,56 @@ int arg_read_converts(Compiler *c, TyKind pt, int provided) {
 /* Root a converted bare read across the call without moving its evaluation:
    the temp is declared NULL and rooted in g_pre, and assigned where the
    argument stands, so the read sees the value at its own position (the stale
-   capture arg_wants_root avoids for a hoisted read cannot happen). */
+   capture arg_wants_root avoids for a hoisted read cannot happen). A prelude
+   of nothing but these lines runs none of its operand's code
+   (prelude_is_held_decls). */
 void emit_rooted_conversion(Compiler *c, TyKind pt, const char *expr, Buf *out) {
   int t = ++g_tmp;
   emit_indent(g_pre, g_indent);
   emit_ctype(c, pt, g_pre);
   buf_printf(g_pre, " _t%d = NULL; SP_GC_ROOT(_t%d);\n", t, t);
   buf_printf(out, "(_t%d = %s)", t, expr);
+}
+
+/* `_t<digits>` then `tail`, and nothing more. */
+static int held_line_tmp(const char *q, size_t n, const char *tail) {
+  size_t k = 2, tl = strlen(tail);
+  if (n < 3 || q[0] != '_' || q[1] != 't' || !isdigit((unsigned char)q[2])) return 0;
+  while (k < n && isdigit((unsigned char)q[k])) k++;
+  return n - k == tl && !strncmp(q + k, tail, tl);
+}
+
+/* Is the prelude `p` nothing but temps declared NULL and rooted, the line
+   emit_rooted_conversion writes (`<type> _tN = NULL; SP_GC_ROOT(_tN);`)?
+   Read off the text, since an emitter that catches an operand's prelude in
+   a buffer of its own passes the lines on as bytes
+   (emit_operands_in_order). Such a prelude assigns no variable and calls
+   nothing, so it may run ahead of anything. */
+int prelude_is_held_decls(const char *p) {
+  static const char mid[] = " = NULL; SP_GC_ROOT(";
+  int lines = 0;
+  while (p && *p) {
+    const char *nl = strchr(p, '\n');
+    size_t n = nl ? (size_t)(nl - p) : strlen(p);
+    const char *q = p;
+    p = nl ? nl + 1 : p + n;
+    while (n && *q == ' ') { q++; n--; }
+    if (!n) continue;
+    const char *eq = strstr(q, mid);
+    if (!eq || eq >= q + n) return 0;
+    /* `<type> _tN`: the type is names, spaces and stars */
+    size_t e = (size_t)(eq - q), k = e;
+    while (k && q[k - 1] != ' ') k--;
+    if (k < 2 || !held_line_tmp(q + k, e - k, "")) return 0;
+    for (size_t i = 0; i < k; i++)
+      if (!(isalnum((unsigned char)q[i]) || q[i] == '_' || q[i] == ' ' || q[i] == '*')) return 0;
+    /* `_tN);`, the same temp */
+    const char *r = eq + sizeof mid - 1;
+    size_t rn = n - (size_t)(r - q);
+    if (rn != e - k + 2 || strncmp(r, q + k, e - k) || strncmp(r + rn - 2, ");", 2)) return 0;
+    lines++;
+  }
+  return lines > 0;
 }
 
 /* Like emit_arg_or_default, but hoists a pointer-backed / poly argument into a
@@ -10344,6 +10395,9 @@ static int arg_layout_param_node_inner(Compiler *c, Scope *m, int call, int i, i
   const char *pn = m->pnames[i];
   int lead = L.gather ? gather_lead_arg(c, m, argv, argc, i) : -1;
   if (L.from[i] == ARG_NODE) a = argv[L.arg[i]];
+  /* A braceless Hash bound as a positional is the container itself.
+     The sharing source walk must reach its original element stores. */
+  else if (c->share_strings && L.from[i] == ARG_KWH) a = kwh;
   else if (defaults && L.from[i] == ARG_DEFAULT && m->pdefault) a = m->pdefault[i];
   else if (lead >= 0) a = argv[lead];
   else if (L.from[i] == ARG_ELEM || L.from[i] == ARG_GATHERED) {
@@ -11648,7 +11702,7 @@ static LocalVar *read_of_rooted_local(Compiler *c, int node, Scope **sp) {
    holds that value for the whole call and is rooted on entry
    (emit_scope_decls), so an argument temp copied from it is reachable without
    a root of its own however much the later arguments allocate. */
-static int read_of_fixed_param(Compiler *c, int node) {
+int read_of_fixed_param(Compiler *c, int node) {
   Scope *s = NULL;
   LocalVar *lv = read_of_rooted_local(c, node, &s);
   return lv && lv->is_param && s->def_node >= 0 &&
@@ -11662,7 +11716,7 @@ static int read_of_fixed_param(Compiler *c, int node) {
    a non-captured local of this frame. The local's own root holds the value
    meanwhile. A temp written into any other buffer -- a private one spliced
    elsewhere, or with no statement open -- is not judged. */
-static int read_unbound_in_stmt(Compiler *c, int node) {
+int read_unbound_in_stmt(Compiler *c, int node) {
   Scope *s = NULL;
   if (!read_of_rooted_local(c, node, &s)) return 0;
   int st = -1;

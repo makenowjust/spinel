@@ -997,10 +997,10 @@ int emit_call_symbol_bool_string_arms(Compiler *c, int id, Buf *b, const NodeTab
     if (is_line) {
       int tl = ++g_tmp;
       /* chomp: true keyword arg uses the _chomp variant */
-      int eline_chomp = 0;
+      int eline_chomp = 0, cv = -1;
       if (argc == 1 && argv && nt_type(nt, argv[0]) && sp_streq(nt_type(nt, argv[0]), "KeywordHashNode")) {
-        int cv = struct_kwarg_value(c, argv[0], "chomp");
-        eline_chomp = (cv >= 0 && nt_type(nt, cv) && sp_streq(nt_type(nt, cv), "TrueNode"));
+        cv = struct_kwarg_value(c, argv[0], "chomp");
+        eline_chomp = kw_flag_static(c, cv);
       }
       /* a separator argument splits on it, the way the blockless enumerator
          form already does (#3594) */
@@ -1009,6 +1009,11 @@ int emit_call_symbol_bool_string_arms(Compiler *c, int id, Buf *b, const NodeTab
         buf_printf(b, "sp_StrArray *_t%d = sp_str_lines_sep(_t%d, ", tl, ts);
         emit_expr(c, eline_sep, b);
         buf_puts(b, "); ");
+      }
+      else if (eline_chomp < 0) {
+        buf_printf(b, "sp_StrArray *_t%d = ", tl);
+        emit_kw_flag(c, cv, b);
+        buf_printf(b, " ? sp_str_lines_chomp(_t%d) : sp_str_lines(_t%d); ", ts, ts);
       }
       else
         buf_printf(b, "sp_StrArray *_t%d = %s(_t%d); ",
@@ -1281,6 +1286,13 @@ int emit_string_handle_append(Compiler *c, int id, Buf *b, const char *name, int
             for (int j = 1; j < argc; j++) { buf_puts(b, ", "); emit_str_expr(c, argv[j], b); buf_puts(b, ")"); }
             buf_printf(b, ", sp_String_cstr(_t%d)); sp_String_set_bin(_t%d, _t%d);", tb2, tb2, tp3);
           }
+        }
+        else if (is_concat_name(name) && argc >= 2) {
+          /* Value position takes the same argument snapshots as a
+             statement before an alias of the receiver can grow. */
+          char ref[48];
+          snprintf(ref, sizeof ref, "_t%d", tb2);
+          emit_str_concat_handle(c, ref, argc, argv, b, 0);
         }
         else {
           for (int j = 0; j < argc; j++) {

@@ -456,8 +456,10 @@ void emit_strbuf_param_bind(Compiler *c, const LocalVar *pv, TyKind want, const 
 int emit_handle_var_ref(Compiler *c, int a, Buf *b) {
   /* so is a write whose slot holds the rule's handle (--share-strings) */
   if (emit_strbuf_write_handle(c, a, b)) return 1;
-  /* under --share-strings a global or an ivar holding the handle is one too */
+  /* under --share-strings a global or an ivar holding the handle is one too.
+     A String reopening's self has the handle selected by its receiver ABI. */
   if (!local_is_handle(c, a) && !repr_static_share(c, a) &&
+      !repr_self_shared(c, a) &&
       !(repr_share_rule(c) && a >= 0 && nt_kind(c->nt, a) == NK_InstanceVariableReadNode))
     return 0;
   /* a value that ran first, ahead of a later one that rebinds the local
@@ -841,9 +843,24 @@ typedef struct {
   int implicit_self;
 } InlineTarget;
 
+static int inline_string_self(Compiler *c, int id, InlineTarget *t) {
+  if (!repr_share_rule(c)) return 0;
+  const CallPlan *p = cplan_user(c, id);
+  if (p->via != UC_REOPEN || !repr_self_handle(c, p->mi)) return 0;
+  t->mi = p->mi; t->recv_class = p->owner_ci;
+  return 1;
+}
+
+static void emit_inline_receiver(Compiler *c, int mi, int recv, Buf *b) {
+  if (g_inline_recv_expr) buf_puts(b, g_inline_recv_expr);  /* pre-hoisted cast (#2448) */
+  else if (repr_self_handle(c, mi)) emit_strbuf_handle_of(c, recv, b);
+  else emit_expr(c, recv, b);
+}
+
 static void inline_target_lookup(Compiler *c, int id, const char *name, int recv, InlineTarget *t) {
   const NodeTable *nt = c->nt;
   t->mi = -1; t->recv_class = -1; t->cm_class = -1; t->cm_self_id = 0; t->implicit_self = 0;
+  if (inline_string_self(c, id, t)) return;
   if (recv < 0) {
     /* A bare call resolves to self first, as Ruby does and as the analyzer
        does (comp_self_call_mi): a top-level `def request` beside a class's
@@ -928,6 +945,7 @@ static int inline_target_plan(Compiler *c, int id, const char *name, int recv, i
                               InlineTarget *t) {
   const NodeTable *nt = c->nt;
   t->mi = -1; t->recv_class = -1; t->cm_class = -1; t->cm_self_id = 0; t->implicit_self = 0;
+  if (inline_string_self(c, id, t)) return 1;
   const CallPlan *p;
   if (recv < 0 && g_ie_class_id >= 0) {
     /* inside an instance_eval/exec splice self is the rebound receiver: its
@@ -1347,8 +1365,7 @@ int emit_inline_call_x(Compiler *c, int id, Buf *b, int indent, int as_expr) {
     int st = ++g_tmp;
     emit_indent(b, indent + 1);
     buf_printf(b, "sp_%s %s_t%d = ", c->classes[recv_class].c_name, self_is_val ? "" : "*", st);
-    if (g_inline_recv_expr) buf_puts(b, g_inline_recv_expr);  /* pre-hoisted cast (#2448) */
-    else emit_expr(c, recv, b);
+    emit_inline_receiver(c, mi, recv, b);
     g_inline_recv_expr = NULL; g_inline_recv_class = -1;
     buf_puts(b, ";");
     /* Root it: for the whole inlined body this temp is the only handle on the
@@ -4615,6 +4632,9 @@ int iter_recv_bind_once(Compiler *c, int node) {
   buf_printf(g_pre, " _t%d = %s;", t, ob.p ? ob.p : "");
   free(ob.p);
   if (needs_root(ot)) buf_printf(g_pre, ot == TY_POLY ? " SP_GC_ROOT_RBVAL(_t%d);" : " SP_GC_ROOT(_t%d);", t);
+  /* a String Range is held by value: its two ends are what the walk must
+     keep, the binding being read again as the answer after it */
+  else if (ot == TY_STR_RANGE) { buf_puts(g_pre, " "); emit_gc_root_tmp_refs(c, ot, t, g_pre); }
   buf_puts(g_pre, "\n");
   view_bind(node, "_t%d", t);
   return 1;
@@ -4716,6 +4736,8 @@ int emit_iter_value_expr(Compiler *c, int id, Buf *b) {
      for arrays, hashes and objects (it asks how a value is RETURNED, not
      whether it is collectable), so this rooted almost nothing. */
   if (needs_root(rt)) buf_printf(b, rt == TY_POLY ? "SP_GC_ROOT_RBVAL(_t%d); " : "SP_GC_ROOT(_t%d); ", ta);
+  /* a String Range is held by value: its two ends */
+  else if (rt == TY_STR_RANGE) { emit_gc_root_tmp_refs(c, rt, ta, b); buf_puts(b, " "); }
   buf_puts(b, body.p ? body.p : "");
   free(body.p);
   /* yield the original Enumerable receiver, not the intermediate member array:
@@ -6178,6 +6200,14 @@ static int iter_enum_poly_walk_arms(Compiler *c, int id, Buf *b, int indent, con
       else if (to_strbuf) {
         buf_printf(b, "lv_%s = sp_String_new_shared(sp_StrArray_get(", p0);
         buf_puts(b, rb.p); buf_printf(b, ", _t%d));\n", t);
+      }
+      else if (et == TY_POLY && repr_of_slot(c, bp0).kind == RK_STRBUF) {
+        /* Sharing can box the source array after the parameter has
+           settled as a String handle. Bind the box through its slot. */
+        Buf src = {0};
+        buf_printf(&src, "sp_PolyArray_get(%s, _t%d)", rb.p, t);
+        emit_block_param_from_boxed(c, p0, TY_STRBUF, src.p, b);
+        free(src.p);
       }
       else {
         int o0 = (sp_streq(k, "Int") || sp_streq(k, "Float")) && block_param_slot_is_oint(c, block, 0);

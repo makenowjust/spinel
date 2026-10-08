@@ -92,6 +92,11 @@ typedef intptr_t sp_int;
 typedef double sp_float;
 typedef bool sp_bool;
 
+/* CRuby's nil.object_id, false.object_id and true.object_id. */
+#define SP_NIL_OBJECT_ID 4
+#define SP_FALSE_OBJECT_ID 0
+#define SP_TRUE_OBJECT_ID 20
+
 /* A nullable Integer or Float in flight (a local, a parameter, a return, a
    temp, a container read that can miss): the value and its nil live side by
    side. No bit pattern of sp_int or sp_float means nil -- -2**63 and every
