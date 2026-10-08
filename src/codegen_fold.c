@@ -3612,6 +3612,9 @@ int emit_reduce_block_expr(Compiler *c, int id, Buf *b) {
     else
       buf_printf(b, "(sp_%sArray_length(_t%d) > 0 ? _t%d : %s(%s)); })", k, ta, tacc, oint_arg(acc_ty), oint_nil(acc_ty));
   }
+  /* a seeded Integer or Float fold never answers nil: lifted where the
+     call's slot holds its nil (a block value that is a Proc call's) */
+  else if (oint_kind(acc_ty) && node_is_oint(c, id)) buf_printf(b, "%s(_t%d); })", oint_of(acc_ty), tacc);
   else buf_printf(b, "_t%d; })", tacc);
   if (rlv0) rlv0->type = rpt0;
   if (rlv1) rlv1->type = rpt1;
