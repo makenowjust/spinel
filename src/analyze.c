@@ -29491,6 +29491,18 @@ static int site_args_may_be_nil(Compiler *c, const int *av, int an) {
    sentinel, an Integer or Float one handed a value that can be it -- a
    keyword parameter by the value its key names (`k: nil`). Returns 1 if any
    mark was set. */
+/* Is argument `a` a read of a parameter whose default is nil (`port: nil`)?
+   The value it hands on can be that nil. */
+static int arg_reads_nil_default_param(Compiler *c, int a) {
+  const NodeTable *nt = c->nt;
+  if (a < 0 || nt_kind(nt, a) != NK_LocalVariableReadNode) return 0;
+  const char *n = nt_str(nt, a, "name");
+  Scope *s = comp_scope_of(c, a);
+  for (int k = 0; n && s && s->pdefault && k < s->nparams; k++)
+    if (s->pnames[k] && sp_streq(s->pnames[k], n))
+      return s->pdefault[k] >= 0 && nt_kind(nt, s->pdefault[k]) == NK_NilNode;
+  return 0;
+}
 static int mark_nullable_params_of_call(Compiler *c, int id, int mi) {
   const NodeTable *nt = c->nt;
   int changed = 0;
@@ -29517,7 +29529,7 @@ static int mark_nullable_params_of_call(Compiler *c, int id, int mi) {
     if ((p->type == TY_INT_ARRAY || p->type == TY_FLOAT_ARRAY) && !p->nullable_int_elem &&
         nullable_int_elem_expr(c, a, 0)) { p->nullable_int_elem = 1; changed = 1; }
     if ((p->type != TY_INT && p->type != TY_FLOAT) || p->nullable_int) continue;
-    if (nullable_int_value(c, a)) { p->nullable_int = 1; changed = 1; continue; }
+    if (nullable_int_value(c, a) || arg_reads_nil_default_param(c, a)) { p->nullable_int = 1; changed = 1; continue; }
     /* an ivar that can be read before anything assigned it, or a parameter
        already carrying one: boxing the parameter has to answer nil (#5085) */
     if (!p->box_nullable && box_nullable_arg(c, a)) { p->box_nullable = 1; changed = 1; }
