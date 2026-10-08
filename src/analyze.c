@@ -30504,13 +30504,46 @@ static int wnh_last_stmt(Compiler *c, int id) {
   }
   return 1;   /* not a statement: its value is used */
 }
-static int wnh_local_escapes(Compiler *c, Scope *sc, const char *name) {
+/* Is node n method mi's answer: its body's last statement, or the last
+   statement of an `if` / `unless` / `else` arm in that place? */
+static int wnh_answer_in(Compiler *c, int at, int n, int depth) {
+  const NodeTable *nt = c->nt;
+  at = an_unparen(nt, at);
+  if (at < 0 || depth > 32) return 0;
+  if (at == n) return 1;
+  switch (nt_kind(nt, at)) {
+    case NK_StatementsNode: {
+      int k = 0; const int *b = nt_arr(nt, at, "body", &k);
+      return k > 0 && wnh_answer_in(c, b[k - 1], n, depth + 1);
+    }
+    case NK_IfNode: case NK_UnlessNode:
+      return wnh_answer_in(c, nt_ref(nt, at, "statements"), n, depth + 1) ||
+             wnh_answer_in(c, nt_ref(nt, at, nt_kind(nt, at) == NK_IfNode ? "subsequent" : "else_clause"), n, depth + 1);
+    case NK_ElseNode:
+      return wnh_answer_in(c, nt_ref(nt, at, "statements"), n, depth + 1);
+    case NK_BeginNode: {   /* its statements answer, or its `else` when it has one */
+      int el = nt_ref(nt, at, "else_clause");
+      return wnh_answer_in(c, el >= 0 ? el : nt_ref(nt, at, "statements"), n, depth + 1);
+    }
+    default: return 0;
+  }
+}
+static int wnh_is_answer(Compiler *c, Scope *sc, int n) {
+  if (!sc || sc->def_node < 0 || sc->body < 0) return 0;
+  return wnh_answer_in(c, sc->body, n, 0);
+}
+/* `answered`, when given, lets a read that is sc's own answer (the method's
+   last value, wnh_is_answer; a `return` still escapes) pass, and reports
+   that one did: the caller then widens the method's return with the local */
+static int wnh_local_escapes_ex(Compiler *c, Scope *sc, const char *name, int *answered) {
   const NodeTable *nt = c->nt;
   NT_FOREACH_KIND(nt, NK_StatementsNode, st) {
     int n = 0; const int *b = nt_arr(nt, st, "body", &n);
     if (n <= 0 || nt_kind(nt, b[n - 1]) != NK_LocalVariableReadNode) continue;
     const char *rn = nt_str(nt, b[n - 1], "name");
-    if (rn && sp_streq(rn, name) && comp_scope_of(c, b[n - 1]) == sc) return 1;
+    if (!rn || !sp_streq(rn, name) || comp_scope_of(c, b[n - 1]) != sc) continue;
+    if (answered && wnh_is_answer(c, sc, b[n - 1])) { *answered = 1; continue; }
+    return 1;
   }
   static const NodeKind wk[] = { NK_ReturnNode, NK_LocalVariableWriteNode, NK_InstanceVariableWriteNode,
                                  NK_GlobalVariableWriteNode, NK_ClassVariableWriteNode, NK_CallNode };
@@ -30542,6 +30575,9 @@ static int wnh_local_escapes(Compiler *c, Scope *sc, const char *name) {
     }
   }
   return 0;
+}
+static int wnh_local_escapes(Compiler *c, Scope *sc, const char *name) {
+  return wnh_local_escapes_ex(c, sc, name, NULL);
 }
 /* The block parameters of a key/value iteration over a local the widening
    retyped (`g.each { |k, v| }`) were bound from the typed kind: a key or
@@ -30721,7 +30757,8 @@ static void widen_nullable_keyed_hash_literals(Compiler *c) {
     Scope *sc = comp_scope_of(c, r);
     LocalVar *lv = ln && sc ? scope_local(sc, ln) : NULL;
     if (!lv || lv->type != ht || lv->is_param || lv->rbs_seeded) continue;
-    if (wnh_local_escapes(c, sc, ln)) continue;
+    int answered = 0;
+    if (wnh_local_escapes_ex(c, sc, ln, &answered)) continue;
     /* every write must be one the widening can rebuild */
     int ok = 1;
     NT_FOREACH_KIND(nt, NK_LocalVariableWriteNode, w) {
@@ -30736,6 +30773,22 @@ static void widen_nullable_keyed_hash_literals(Compiler *c) {
       if (!((vk == NK_HashNode && en == 0) || bare_new)) { ok = 0; break; }
     }
     if (!ok) continue;
+    /* the method answers the local (`counts = {}; ...; counts`, tally in
+       builtins/): its return widens with it, and each call of it, where
+       wnh_ret_widenable allows; else the local stays typed and the store
+       refuses, as before */
+    if (answered) {
+      /* only for a key that can be nil: a nil value is the typed hash's own
+         (its per-entry value nil bits), not a reason to widen the return */
+      if (!kn) continue;
+      if (vn) {
+        want = ty_hash_of(TY_POLY, vt);
+        if (!ty_is_hash(want)) want = TY_POLY_POLY_HASH;
+        vn = 0;
+      }
+      int mi = (int)(sc - c->scopes);
+      if (sc->ret != ht || !wnh_widen_ret(c, mi, want)) continue;
+    }
     lv->type = want;
     wnh_widen_block_params(c, sc, ln, kn, vn);
     NT_FOREACH_KIND(nt, NK_LocalVariableWriteNode, w) {
