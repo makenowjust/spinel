@@ -26153,6 +26153,51 @@ int file_stat_nil_call(Compiler *c, int v) {
   return 1;
 }
 
+/* The classes a `new` receiver can be: a local holding one class, a
+   constant, or a class value chosen at run time -- each branch of a `?:` or
+   an `if`, a parenthesized one, or an element of a literal Array of them
+   (`[A, B][i]`). Up to cap of them, in *out; answers the count. */
+static int new_recv_classes(Compiler *c, int recv, int *out, int cap) {
+  const NodeTable *nt = c->nt;
+  if (recv < 0 || cap <= 0) return 0;
+  NodeKind rk = nt_kind(nt, recv);
+  if (rk == NK_LocalVariableReadNode) { int k = class_var_static_ci(c, recv); if (k < 0) return 0; out[0] = k; return 1; }
+  if (rk == NK_ConstantReadNode || rk == NK_ConstantPathNode) {
+    int k = comp_class_index(c, nt_str(nt, recv, "name"));
+    if (k < 0) return 0;
+    out[0] = k; return 1;
+  }
+  if (rk == NK_ParenthesesNode) {
+    int b = nt_ref(nt, recv, "body"), n = 0;
+    const int *st = b >= 0 && nt_kind(nt, b) == NK_StatementsNode ? nt_arr(nt, b, "body", &n) : NULL;
+    return st && n == 1 ? new_recv_classes(c, st[0], out, cap) : 0;
+  }
+  if (rk == NK_IfNode || rk == NK_ElseNode || rk == NK_StatementsNode) {
+    int n = 0;
+    if (rk == NK_StatementsNode) {
+      const int *st = nt_arr(nt, recv, "body", &n);
+      return n > 0 ? new_recv_classes(c, st[n - 1], out, cap) : 0;
+    }
+    n = new_recv_classes(c, nt_ref(nt, recv, "statements"), out, cap);
+    if (rk == NK_IfNode) {
+      int e = nt_ref(nt, recv, "subsequent");
+      if (e < 0) e = nt_ref(nt, recv, "consequent");
+      n += new_recv_classes(c, e, out + n, cap - n);
+    }
+    return n;
+  }
+  /* `[A, B][i]`: every element of the literal */
+  if (rk == NK_CallNode && nt_str(nt, recv, "name") && sp_streq(nt_str(nt, recv, "name"), "[]")) {
+    int ar = nt_ref(nt, recv, "receiver");
+    if (ar < 0 || nt_kind(nt, ar) != NK_ArrayNode) return 0;
+    int en = 0; const int *ev = nt_arr(nt, ar, "elements", &en);
+    int n = 0;
+    for (int e = 0; e < en && n < cap; e++) n += new_recv_classes(c, ev[e], out + n, cap - n);
+    return n;
+  }
+  return 0;
+}
+
 static int nullable_int_call_name(const char *nm) {
   if (!nm) return 0;
   static const char *const N[] = {
@@ -28701,9 +28746,18 @@ int nullable_int_value(Compiler *c, int v) {
   if (nt_kind(nt, v) == NK_RescueModifierNode)
     return nullable_int_value(c, nt_ref(nt, v, "expression")) ||
            nullable_int_value(c, nt_ref(nt, v, "rescue_expression"));
-  if (nt_kind(nt, v) == NK_OrNode || nt_kind(nt, v) == NK_AndNode)
-    return nullable_int_value(c, nt_ref(nt, v, "left")) ||
-           nullable_int_value(c, nt_ref(nt, v, "right"));
+  /* `a && b` / `a || b` answers one of its operands: nil where one is nil
+     (`nil && 2`, `false || nil`), not only where one is a number that can be */
+  if (nt_kind(nt, v) == NK_OrNode || nt_kind(nt, v) == NK_AndNode) {
+    int l = nt_ref(nt, v, "left"), r = nt_ref(nt, v, "right");
+    for (int s = 0; s < 2; s++) {
+      int o = s ? r : l;
+      if (o < 0) continue;
+      TyKind ot = infer_type(c, o);
+      if (nt_kind(nt, o) == NK_NilNode || ot == TY_NIL || ot == TY_VOID) return 1;
+    }
+    return nullable_int_value(c, l) || nullable_int_value(c, r);
+  }
   /* Reading a slot some write left the sentinel in: the reader method a caller
      resolves to is this read, so its callers box through it too. */
   if (nt_kind(nt, v) == NK_InstanceVariableReadNode) {
@@ -30435,15 +30489,18 @@ static void mark_nullable_int_locals(Compiler *c) {
       int recv = nt_ref(nt, id, "receiver");
       if (!cn || !sp_streq(cn, "new")) continue;
       NodeKind rk = recv >= 0 ? nt_kind(nt, recv) : NK_SelfNode;
-      int k = rk == NK_LocalVariableReadNode ? class_var_static_ci(c, recv)
-            : rk == NK_ConstantReadNode || rk == NK_ConstantPathNode ? comp_class_index(c, nt_str(nt, recv, "name"))
-            : -1;
-      /* `new(...)` / `self.new(...)` in a class method of the Struct / Data
-         itself (`def self.of(path, line = nil) = new(path:, line:)`) */
+      /* the classes the receiver can be: a class value chosen at run time
+         (`(c ? A : B).new`, `[A, B][i].new`) is each of them */
+      int ks[8], nk = 0;
       if (rk == NK_SelfNode) {
+        /* `new(...)` / `self.new(...)` in a class method of the Struct / Data
+           itself (`def self.of(path, line = nil) = new(path:, line:)`) */
         Scope *ns = comp_scope_of(c, id);
-        if (ns && ns->is_cmethod && ns->class_id >= 0) k = ns->class_id;
+        if (ns && ns->is_cmethod && ns->class_id >= 0) ks[nk++] = ns->class_id;
       }
+      else nk = new_recv_classes(c, recv, ks, 8);
+      for (int q = 0; q < nk; q++) {
+      int k = ks[q];
       if (k < 0 || !(c->classes[k].is_struct || c->classes[k].is_data) ||
           comp_method_in_chain(c, k, "initialize", NULL) >= 0) continue;
       ClassInfo *ci = &c->classes[k];
@@ -30468,6 +30525,7 @@ static void mark_nullable_int_locals(Compiler *c) {
         if (vnode < 0 ? !ci->is_data : nullable_int_value(c, vnode)) {
           ci->ivar_nullable_int[m] = 1; changed = 1;
         }
+      }
       }
     }
     /* ... and through a class variable */
