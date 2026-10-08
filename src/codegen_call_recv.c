@@ -5386,7 +5386,13 @@ static int emit_hash_nilkey_read(Compiler *c, int id, const char *name, int recv
     else buf_printf(b, "(_t%d ? _t%d->default_v : (const char *)NULL)", tr, tr);
   }
   else if (is_q) buf_puts(b, cr.kind == RK_BOXED ? "sp_box_bool(0)" : "(sp_bool)0");
-  else if (is_fetch) { if (cr.kind == RK_BOXED) emit_boxed(c, argv[1], b); else emit_expr(c, argv[1], b); }
+  else if (is_fetch) {
+    /* a fetch whose hit answers an oint (a hash whose values may be nil,
+       DESIGN.md D3b-ii) takes its default in that form too */
+    if (cr.kind == RK_BOXED) emit_boxed(c, argv[1], b);
+    else if (oint_kind(ct) && node_is_oint(c, id)) emit_oint_expr(c, argv[1], ct, b);
+    else emit_expr(c, argv[1], b);
+  }
   else if (ct == TY_POLY_ARRAY) buf_puts(b, "({ sp_PolyArray *_va = sp_PolyArray_new(); sp_PolyArray_push(_va, sp_box_nil()); _va; })");
   else if (ct == TY_INT_ARRAY) buf_puts(b, "({ sp_IntArray *_va = sp_IntArray_new(); sp_IntArray_push_nilable(_va, sp_oint_nil()); _va; })");
   else buf_puts(b, "({ sp_StrArray *_va = sp_StrArray_new(); sp_StrArray_push(_va, NULL); _va; })");
