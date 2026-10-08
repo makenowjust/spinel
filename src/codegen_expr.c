@@ -4877,7 +4877,9 @@ static void emit_expr_node(Compiler *c, int id, Buf *b) {
         buf_puts(g_pre, cap.p);
         if (is_scalar_ret(pvt) && pvt != TY_VOID && pvt != TY_NIL && pvt != TY_UNKNOWN) {
           int tpv = ++g_tmp;
-          emit_indent(g_pre, g_indent); emit_ctype(c, pvt, g_pre);
+          emit_indent(g_pre, g_indent);
+          /* the tail answered its oint (emit_paren_tail): the temp holds it */
+          if (oint_kind(pvt) && node_is_oint(c, id)) buf_puts(g_pre, oint_ctype(pvt)); else emit_ctype(c, pvt, g_pre);
           buf_printf(g_pre, " _t%d = %s;\n", tpv, vb.p ? vb.p : "0");
           buf_printf(b, "_t%d", tpv);
         }

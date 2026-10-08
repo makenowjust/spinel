@@ -5041,6 +5041,12 @@ int emit_collect_expr(Compiler *c, int id, Buf *b) {
                 if (ppt == TY_POLY && et_ec == TY_INT) buf_printf(g_pre, "sp_box_int(%s)", acc);
                 else if (ppt == TY_POLY && et_ec == TY_FLOAT) buf_printf(g_pre, "sp_box_float(%s)", acc);
                 else if (ppt == TY_POLY && et_ec == TY_STRING) buf_printf(g_pre, "sp_box_str(%s)", acc);
+                /* a boxed window into a typed parameter (promote's boxed
+                   Integers): unboxed, with its nil where the slot holds one */
+                else if (et_ec == TY_POLY && ppt != TY_POLY && ppt != TY_UNKNOWN) {
+                  if (oint_kind(ppt) && slot_is_oint(plv)) buf_printf(g_pre, "%s(%s)", oint_unbox(ppt), acc);
+                  else emit_unbox_text(c, ppt, acc, g_pre);
+                }
                 else buf_puts(g_pre, acc);
                 buf_puts(g_pre, ";\n");
               }
@@ -5175,7 +5181,9 @@ int emit_collect_expr(Compiler *c, int id, Buf *b) {
                      the pair param is declared poly; box the typed slice so the
                      assignment types match (a desugared |(x,y), i| destructure
                      over a receiver like `n.times.map { ... }`). */
-                  if (lvp_wi && lvp_wi->type == TY_POLY && !sp_streq(kwi, "Poly")) {
+                  /* (a PolyArray window too: under promote every Integer
+                     is boxed and the window is one) */
+                  if (lvp_wi && lvp_wi->type == TY_POLY) {
                     Buf bxs; memset(&bxs, 0, sizeof bxs);
                     emit_boxed_text(c, arr_wi, slice_wi, &bxs);
                     buf_printf(g_pre, "lv_%s = %s;\n", rename_local(pair_p_wi), bxs.p ? bxs.p : slice_wi);
