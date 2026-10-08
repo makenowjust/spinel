@@ -990,6 +990,9 @@ typedef struct {
   int *toplevel_includes;  /* class indices of modules included at top level */
   int ntoplevel_includes;
   int has_include_math;    /* program has `include Math`: expose bare PI/E/fns */
+  /* some store in the program can put a nil VALUE into a typed Hash of this
+     Integer-valued kind (hash_vals_nullable, DESIGN.md D3b-ii) */
+  unsigned char hash_vnil_str_int, hash_vnil_int_int;
 
   /* FFI registry: ffi_func declarations */
   FfiFunc *ffi_funcs;

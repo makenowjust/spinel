@@ -212,6 +212,10 @@ int poly_blockless_enum_name(const char *name);
    asks this before choosing between sp_box_int and sp_box_int_or_nil at a poly
    boundary. Valid only after analyze_program has settled the marking. */
 int nullable_int_value(Compiler *c, int id);
+/* 1: the typed Integer-valued Hash `node` evaluates to (TY_STR_INT_HASH /
+   TY_INT_INT_HASH) may hold a nil VALUE; 0 for every other kind and for
+   node < 0 (DESIGN.md D3b-ii) */
+int hash_vals_nullable(Compiler *c, int node);
 /* The same, asked of the variable rather than of the read: what it can hold
    anywhere, the nil narrowing's facts left out. */
 int nullable_int_value_raw(Compiler *c, int id);

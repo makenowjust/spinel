@@ -5884,8 +5884,10 @@ int node_is_oint(Compiler *c, int node) {
     }
     /* `a[i] = v` on an Integer / Float array answers v as it was stored:
        with its nil (a nil, a boxed value, an oint) -- emit_array_call's
-       store */
-    if (sp_streq(nm, "[]=") && r >= 0 && (rt == TY_INT_ARRAY || rt == TY_FLOAT_ARRAY) && an2 >= 2) {
+       store; so does `h[k] = v` on an Integer-valued typed Hash, which
+       stores it through _oset (D3b-ii) */
+    if (sp_streq(nm, "[]=") && r >= 0 && an2 >= 2 &&
+        (rt == TY_INT_ARRAY || rt == TY_FLOAT_ARRAY || rt == TY_STR_INT_HASH || rt == TY_INT_INT_HASH)) {
       int sa = nt_ref(nt, node, "arguments"), san = 0;
       const int *sav = nt_arr(nt, sa, "arguments", &san);
       int lv = sav[san - 1];

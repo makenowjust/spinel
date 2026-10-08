@@ -15682,6 +15682,14 @@ const char *hash_order_val(TyKind t, int tr, int ti) {
   else snprintf(o, sizeof bufs[0], "sp_%sHash_get(_t%d, _t%d->order[_t%d])", ty_hash_cname(t), tr, tr, ti);
   return o;
 }
+/* The same value of an Integer-valued typed Hash that may hold a nil
+   (D3b-ii), as an sp_oint with that nil */
+const char *hash_order_oval(TyKind t, int tr, int ti) {
+  static char bufs[4][96]; static int n = 0;
+  char *o = bufs[n++ & 3];
+  snprintf(o, sizeof bufs[0], "sp_%sHash_vget(_t%d, _t%d->order[_t%d])", ty_hash_cname(t), tr, tr, ti);
+  return o;
+}
 
 
 /* ---- Index / element-assignment statements (a[i]=x, a[i] op= x, a[i]&&=/||=,
@@ -15701,9 +15709,22 @@ void emit_hash_store_key(Compiler *c, int key, TyKind rt, Buf *b) {
   }
   emit_hash_key(c, key, kt, b);
 }
-/* The value of a hash store, as the kind's set takes it. */
+/* A store into an Integer-valued typed Hash of a value that can be nil (a
+   nil, an oint, a boxed value): it goes through `_oset`, which keeps the nil
+   in the entry's bit (D3b-ii), with the value as its oint */
+static int hash_store_oset(Compiler *c, int val, TyKind rt) {
+  if (rt != TY_STR_INT_HASH && rt != TY_INT_INT_HASH) return 0;
+  return nt_kind(c->nt, val) == NK_NilNode || node_has_oint_form(c, val) || repr_of(c, val).kind == RK_BOXED;
+}
+/* The value of a hash store, as the kind's set takes it (as an oint for
+   hash_store_oset's `_oset`). */
 static void emit_hash_store_val(Compiler *c, int val, TyKind rt, Buf *b) {
   if (ty_hash_val(rt) == TY_POLY) { emit_boxed(c, val, b); return; }
+  if (hash_store_oset(c, val, rt)) {
+    if (repr_of(c, val).kind == RK_BOXED) { buf_puts(b, "sp_poly_hval_oi("); emit_expr(c, val, b); buf_puts(b, ")"); }
+    else emit_oint_expr(c, val, TY_INT, b);
+    return;
+  }
   /* A poly value (holds the hash's value type at runtime, e.g. a String?
      guarded non-nil) into a typed-value hash: unbox to its element
      representation, refusing one of another kind as the typed-array `[]=`
@@ -16853,14 +16874,15 @@ static int emit_array_mutate_stmt_body(Compiler *c, int id, Buf *b, int indent) 
         if (subtree_may_allocate(nt, recv) || subtree_has_side_effect(c, argv[0]) || subtree_has_side_effect(c, argv[1])) { emit_gc_root_tmp(c, rt, tr, b); buf_puts(b, " "); }
         buf_printf(b, "%s _t%d = ", c_type_name(kt), tk); emit_hash_store_key(c, argv[0], rt, b); buf_puts(b, "; ");
         if (subtree_may_allocate(nt, argv[0]) && needs_root(kt)) { emit_gc_root_tmp(c, kt, tk, b); buf_puts(b, " "); }
-        buf_printf(b, "%s _t%d = ", c_type_name(ty_hash_val(rt)), tv); emit_hash_store_val(c, argv[1], rt, b);
+        int vo = hash_store_oset(c, argv[1], rt);
+        buf_printf(b, "%s _t%d = ", vo ? "sp_oint" : c_type_name(ty_hash_val(rt)), tv); emit_hash_store_val(c, argv[1], rt, b);
         buf_printf(b, "; if (sp_gc_is_frozen(_t%d)) sp_raise_frozen_hash_at(_t%d, %s); ", tr, tr, hash_box_cls(rt));
-        buf_printf(b, "sp_%sHash_set(_t%d, _t%d, _t%d); }\n", hn, tr, tk, tv);
+        buf_printf(b, "sp_%sHash_%s(_t%d, _t%d, _t%d); }\n", hn, vo ? "oset" : "set", tr, tk, tv);
         return 1;
       }
       buf_puts(b, "if (sp_gc_is_frozen("); emit_expr(c, recv, b); buf_puts(b, ")) sp_raise_frozen_hash_at("); emit_expr(c, recv, b); buf_printf(b, ", %s);\n", hash_box_cls(rt));
       emit_indent(b, indent);
-      buf_printf(b, "sp_%sHash_set(", hn); emit_expr(c, recv, b); buf_puts(b, ", ");
+      buf_printf(b, "sp_%sHash_%s(", hn, hash_store_oset(c, argv[1], rt) ? "oset" : "set"); emit_expr(c, recv, b); buf_puts(b, ", ");
       emit_hash_store_key(c, argv[0], rt, b); buf_puts(b, ", ");
       emit_hash_store_val(c, argv[1], rt, b); buf_puts(b, ");\n");
       return 1;
@@ -17438,8 +17460,13 @@ void emit_index_op_write(Compiler *c, int id, Buf *b, int indent) {
          sp_streq(op, "&") ? "sp_poly_band" : sp_streq(op, "|") ? "sp_poly_bor" :
          sp_streq(op, "^") ? "sp_poly_bxor" : NULL) : NULL;
     int eff = g_pre && subtree_has_side_effect(c, v);
-    char slot[64];
-    snprintf(slot, sizeof slot, "sp_%sHash_get(_t%d, _t%d)", hn, ta, tb);
+    char slot[128];
+    /* an entry that may hold nil (D3b-ii) is read with it: `nil + 1` is
+       CRuby's NoMethodError, as a miss without a default is */
+    if ((rt == TY_STR_INT_HASH || rt == TY_INT_INT_HASH) && vt == TY_INT && hash_vals_nullable(c, recv))
+      snprintf(slot, sizeof slot, "sp_oint_val(sp_%sHash_oget(_t%d, _t%d), \"%s\")", hn, ta, tb, op);
+    else
+      snprintf(slot, sizeof slot, "sp_%sHash_get(_t%d, _t%d)", hn, ta, tb);
     if (eff) iow_capture_slot(c, vt, slot, sizeof slot, b);
     char *rhs = iow_rhs(c, v, pf ? IOW_RHS_BOXED : IOW_RHS_EXPR, eff ? b : NULL);
     buf_printf(b, "%s _t%d = ", c_type_name(vt), tv);

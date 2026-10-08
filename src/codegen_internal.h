@@ -2008,6 +2008,7 @@ void emit_hash_store_key(Compiler *c, int key, TyKind rt, Buf *b);
 const char *hash_box_cls(TyKind t);
 const char *hash_order_key(TyKind t, int tr, int ti);
 const char *hash_order_val(TyKind t, int tr, int ti);
+const char *hash_order_oval(TyKind t, int tr, int ti);
 int emit_hash_filter_loop(Compiler *c, int recv, int block, TyKind rt, const char *name,
                           const char *rs, Buf *b, int indent, int *tr, int *torig, int *twp);
 void emit_unbox_text(Compiler *c, TyKind t, const char *expr, Buf *b);
