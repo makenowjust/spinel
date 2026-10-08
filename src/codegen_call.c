@@ -11078,6 +11078,10 @@ int emit_struct_new_call(Compiler *c, int id, int ci, int argc, const int *argv,
     if (nt_kind(nt, ke[e]) != NK_AssocNode || nt_kind(nt, nt_ref(nt, ke[e], "key")) != NK_SymbolNode) ok_plain = 0;
   int otmp[64], omem[64], on = 0, unset[64], un = 0;
   int bind0 = -1;
+  /* the members that take an argument with its nil, by member; the
+     argument values in source order (a keyword hash's, or the positional
+     ones) */
+  int mval[64]; for (int m = 0; m < 64; m++) mval[m] = -1;
   for (int m = 0; ok_plain && m < cls->nmembers && m < 64; m++) {
     if (!oint_kind(cls->ivar_types[m]) || !ivar_has_nilbit(c, ci, m)) continue;
     int v = -1;
@@ -11095,7 +11099,43 @@ int emit_struct_new_call(Compiler *c, int id, int ci, int argc, const int *argv,
     /* a nil (literal or typed) member: 0 in the constructor, the bit set */
     if (nt_kind(nt, v) == NK_NilNode || comp_ntype(c, v) == TY_NIL) { unset[un++] = m; continue; }
     int boxed = repr_of(c, v).kind == RK_BOXED;
-    if ((!node_has_oint_form(c, v) && !boxed) || subtree_has_side_effect(c, v)) continue;
+    if (!node_has_oint_form(c, v) && !boxed) continue;
+    mval[m] = v;
+  }
+  int sv[64], sn = 0;
+  if (ok_plain) {
+    if (kwh >= 0) { for (int e = 0; e < kn && sn < 64; e++) sv[sn++] = nt_ref(nt, ke[e], "value"); }
+    else for (int a = 0; a < argc && sn < 64; a++) sv[sn++] = argv[a];
+  }
+  /* A member argument with a side effect is held too, and so is every
+     argument with one ahead of it: they run in their source order, ahead of
+     the construction, as CRuby runs them (`D.new(a: f(0), b: g)`) */
+  int last_eff = -1;
+  for (int i = 0; i < sn; i++)
+    for (int m = 0; m < cls->nmembers && m < 64; m++)
+      if (mval[m] == sv[i] && subtree_has_side_effect(c, sv[i])) last_eff = i;
+  for (int i = 0; i < sn; i++) {
+    int v = sv[i], m = -1;
+    for (int q = 0; q < cls->nmembers && q < 64; q++) if (mval[q] == v) m = q;
+    if (m < 0) {
+      /* a plain argument with a side effect ahead of a held member one */
+      if (i > last_eff || !subtree_has_side_effect(c, v)) continue;
+      TyKind vt = comp_ntype(c, v);
+      int t = ++g_tmp;
+      Buf vb; memset(&vb, 0, sizeof vb); emit_expr(c, v, &vb);
+      emit_indent(g_pre, g_indent);
+      buf_printf(g_pre, "__typeof__(%s) _t%d = %s;", vb.p ? vb.p : "0", t, vb.p ? vb.p : "0");
+      if (vt == TY_POLY) buf_printf(g_pre, " SP_GC_ROOT_RBVAL(_t%d);", t);
+      else if (vt == TY_STRING) buf_printf(g_pre, " SP_GC_ROOT_STR(_t%d);", t);
+      else if (needs_root(vt)) buf_printf(g_pre, " SP_GC_ROOT(_t%d);", t);
+      buf_puts(g_pre, "\n");
+      free(vb.p);
+      int sl = view_bind(v, "_t%d", t);
+      if (bind0 < 0) bind0 = sl;
+      continue;
+    }
+    if (subtree_has_side_effect(c, v) && i > last_eff) continue;
+    int boxed = repr_of(c, v).kind == RK_BOXED;
     int t = ++g_tmp;
     emit_indent(g_pre, g_indent);
     buf_printf(g_pre, "%s _t%d = ", oint_ctype(cls->ivar_types[m]), t);
@@ -11107,6 +11147,8 @@ int emit_struct_new_call(Compiler *c, int id, int ci, int argc, const int *argv,
     if (bind0 < 0) bind0 = sl;
     otmp[on] = t; omem[on] = m; on++;
   }
+  /* (a member argument the positional / keyword walk above did not reach --
+     a value listed twice -- keeps the plain path) */
   Buf inner; memset(&inner, 0, sizeof inner);
   int sv_kwht = g_struct_kw_ht; g_struct_kw_ht = -1;
   int r = emit_struct_new_call_members(c, id, ci, argc, argv, &inner);
