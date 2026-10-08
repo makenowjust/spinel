@@ -280,6 +280,8 @@ typedef struct {
   int shim_lift;    /* how many sb_shim_lift calls hold the local at shim_ty */
   unsigned char plain_int; /* (TY_INT) int_value_plain's memo: 0 not asked, 1 being
                        asked, 2 never holds the nil sentinel, 3 may */
+  signed char hcp_int; /* (--int-overflow=promote, codegen) hcp_compute's fact: 1 the
+                       boxed slot only ever holds an Integer or nil, -1 not proven */
 } LocalVar;
 #define POLY_LIFT_APPENDED 1
 #define POLY_LIFT_ZSUPER   2
