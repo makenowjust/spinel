@@ -5801,7 +5801,7 @@ int node_is_oint(Compiler *c, int node) {
     if (sp_streq(nm, "instance_variable_set") && an2 == 2 && r >= 0) {
       int a1 = nt_ref(nt, node, "arguments"), a1n = 0;
       const int *a1a = a1 >= 0 ? nt_arr(nt, a1, "arguments", &a1n) : NULL;
-      return a1a && a1n == 2 && node_has_oint_form(c, a1a[1]);
+      return a1a && a1n == 2 && (nt_kind(nt, a1a[1]) == NK_NilNode || node_has_oint_form(c, a1a[1]));
     }
     /* a receiver that stayed poly: the dispatch answers an oint when a
        target can answer nil (the analysis's dispatch set) -- except on the

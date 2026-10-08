@@ -28796,6 +28796,12 @@ int nullable_int_value(Compiler *c, int v) {
       return 1;
     }
     if (nullable_int_call_name(nt_str(nt, v, "name"))) return 1;
+    /* `o.instance_variable_set(:@x, v)` answers v */
+    if (sp_streq(nt_str(nt, v, "name"), "instance_variable_set") && nt_ref(nt, v, "receiver") >= 0) {
+      int sa = nt_ref(nt, v, "arguments"), sn = 0;
+      const int *sv = sa >= 0 ? nt_arr(nt, sa, "arguments", &sn) : NULL;
+      if (sn == 2 && (nt_kind(nt, sv[1]) == NK_NilNode || nullable_int_value(c, sv[1]))) return 1;
+    }
     if (file_stat_nil_call(c, v)) return 1;
     /* a Range's omitted bound is nil: (1.0..).end, (..2).begin. A literal
        with both ends has both */
@@ -30374,10 +30380,22 @@ static void mark_nullable_int_locals(Compiler *c) {
       TyKind srt = infer_type(c, srecv);
       int scid = ty_is_object(srt) ? ty_object_class(srt) : -1;
       if (scid < 0 && nt_kind(nt, srecv) == NK_SelfNode) { Scope *ss = comp_scope_of(c, id); scid = ss ? ss->class_id : -1; }
-      if (scid < 0 || scid >= c->nclasses) continue;
       const char *ivn0 = nt_str(nt, sav[0], "value");
       if (!ivn0 || !ivn0[0]) continue;
       char ivn[300]; snprintf(ivn, sizeof ivn, "%s%s", ivn0[0] == '@' ? "" : "@", ivn0);   /* the symbol's text, with or without its `@` */
+      /* a boxed receiver can be an instance of any class: every class with
+         an Integer or Float ivar of that name can be handed the nil */
+      if (scid < 0 && srt == TY_POLY && (nt_kind(nt, sav[1]) == NK_NilNode || nullable_int_value(c, sav[1]))) {
+        for (int k = 0; k < c->nclasses; k++) {
+          ClassInfo *pci = &c->classes[k];
+          int piv = comp_ivar_index(pci, ivn);
+          if (piv < 0 || pci->ivar_nullable_int[piv]) continue;
+          if (pci->ivar_types[piv] != TY_INT && pci->ivar_types[piv] != TY_FLOAT) continue;
+          pci->ivar_nullable_int[piv] = 1; changed = 1;
+        }
+        continue;
+      }
+      if (scid < 0 || scid >= c->nclasses) continue;
       ClassInfo *sci = NULL; int siv = -1;
       for (int k = scid; k >= 0 && siv < 0; k = c->classes[k].parent) { sci = &c->classes[k]; siv = comp_ivar_index(sci, ivn); }
       if (siv < 0 || sci->ivar_nullable_int[siv]) continue;
