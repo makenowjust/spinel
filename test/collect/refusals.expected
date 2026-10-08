@@ -786,6 +786,10 @@ spinel: test/reject/string_boxed_local_container_element.rb:7: a String a boxed 
 spinel: test/reject/string_boxed_local_iterator_element.rb:7: a String a boxed local holds is stored into a container and mutated in place through it (a String is not yet shared by reference through a boxed local's container element). Mutate the String through the local itself.
 == test/reject/string_boxed_local_iterator_element.rb [promote] rc=1
 spinel: test/reject/string_boxed_local_iterator_element.rb:7: a String a boxed local holds is stored into a container and mutated in place through it (a String is not yet shared by reference through a boxed local's container element). Mutate the String through the local itself.
+== test/reject/string_boxed_reader_copied_too_late.rb [default] rc=1
+spinel: test/reject/string_boxed_reader_copied_too_late.rb:12: a String read through a reader on a boxed receiver (a Struct or Data member, an attr_reader, `def m = @iv`) is mutated in place (a String is not yet shared by reference through a reader on a boxed receiver). Assign the changed String back to the member.
+== test/reject/string_boxed_reader_copied_too_late.rb [promote] rc=1
+spinel: test/reject/string_boxed_reader_copied_too_late.rb:12: a String read through a reader on a boxed receiver (a Struct or Data member, an attr_reader, `def m = @iv`) is mutated in place (a String is not yet shared by reference through a reader on a boxed receiver). Assign the changed String back to the member.
 == test/reject/string_boxed_reader_mutation.rb [default] rc=1
 spinel: test/reject/string_boxed_reader_mutation.rb:6: a String read through a reader on a boxed receiver (a Struct or Data member, an attr_reader, `def m = @iv`) is mutated in place (a String is not yet shared by reference through a reader on a boxed receiver). Assign the changed String back to the member.
 == test/reject/string_boxed_reader_mutation.rb [promote] rc=1
@@ -1090,10 +1094,22 @@ spinel: 1 refusal, nothing written
 == test/reject/string_splat_global_toplevel.rb [promote] rc=1
 spinel: test/reject/string_splat_global_toplevel.rb:7: a String is passed to `app`'s parameter `a` through a splat, which the method appends to: this call hands the method a copy, so the append would not reach the caller's String (a String is not yet shared by reference through a splat). Return the String from the method and assign it, or append to it in the caller.
 spinel: 1 refusal, nothing written
+== test/reject/string_split_local_each_mutation.rb [default] rc=1
+spinel: test/reject/string_split_local_each_mutation.rb:6: a String returned in a String Array is not yet shared by reference through a local Array into an appending iterator block
+== test/reject/string_split_local_each_mutation.rb [promote] rc=1
+spinel: test/reject/string_split_local_each_mutation.rb:6: a String returned in a String Array is not yet shared by reference through a local Array into an appending iterator block
+== test/reject/string_split_map_bang_read_before.rb [default] rc=1
+spinel: test/reject/string_split_map_bang_read_before.rb:6: a String returned in a String Array is not yet shared by reference through a local Array into an appending iterator block
+== test/reject/string_split_map_bang_read_before.rb [promote] rc=1
+spinel: test/reject/string_split_map_bang_read_before.rb:6: a String returned in a String Array is not yet shared by reference through a local Array into an appending iterator block
 == test/reject/string_split_result_iterator_append.rb [default] rc=1
 spinel: test/reject/string_split_result_iterator_append.rb:4: a String returned in a String Array is not yet shared by reference through a local Array into an appending iterator block
 == test/reject/string_split_result_iterator_append.rb [promote] rc=1
 spinel: test/reject/string_split_result_iterator_append.rb:4: a String returned in a String Array is not yet shared by reference through a local Array into an appending iterator block
+== test/reject/string_split_select_mutation.rb [default] rc=1
+spinel: test/reject/string_split_select_mutation.rb:4: a String is not yet shared by reference through an ivar's or a call's Array into an appending iterator block
+== test/reject/string_split_select_mutation.rb [promote] rc=1
+spinel: test/reject/string_split_select_mutation.rb:4: a String is not yet shared by reference through an ivar's or a call's Array into an appending iterator block
 == test/reject/string_tap_fresh_append.rb [default] rc=1
 spinel: test/reject/string_tap_fresh_append.rb:2: a String is not yet shared by reference through tap on a fresh String
 spinel: 1 refusal, nothing written
@@ -1244,6 +1260,14 @@ spinel: 1 refusal, nothing written
 == test/reject/systemcallerror_zsuper_keyword.rb [promote] rc=1
 spinel: test/reject/systemcallerror_zsuper_keyword.rb:6: unsupported a bare super forwarding a rest, keyword or block parameter to SystemCallError#initialize: node N (ForwardingSuperNode)
 spinel: 1 refusal, nothing written
+== test/reject/time_parse_no_require.rb [default] rc=1
+spinel: test/reject/time_parse_no_require.rb:6: Time.parse is not supported: spinel implements Time's other `require "time"` additions (iso8601, httpdate, rfc2822) but not the string-parsing ones. Store times as epoch seconds and read them with Time.at instead (see docs/limitations.md)
+== test/reject/time_parse_no_require.rb [promote] rc=1
+spinel: test/reject/time_parse_no_require.rb:6: Time.parse is not supported: spinel implements Time's other `require "time"` additions (iso8601, httpdate, rfc2822) but not the string-parsing ones. Store times as epoch seconds and read them with Time.at instead (see docs/limitations.md)
+== test/reject/time_strptime_no_require.rb [default] rc=1
+spinel: test/reject/time_strptime_no_require.rb:6: Time.strptime is not supported: spinel implements Time's other `require "time"` additions (iso8601, httpdate, rfc2822) but not the string-parsing ones. Store times as epoch seconds and read them with Time.at instead (see docs/limitations.md)
+== test/reject/time_strptime_no_require.rb [promote] rc=1
+spinel: test/reject/time_strptime_no_require.rb:6: Time.strptime is not supported: spinel implements Time's other `require "time"` additions (iso8601, httpdate, rfc2822) but not the string-parsing ones. Store times as epoch seconds and read them with Time.at instead (see docs/limitations.md)
 == test/reject/toplevel_include_yield_ivar_target.rb [default] rc=1
 spinel: test/reject/toplevel_include_yield_ivar_target.rb:14: unsupported top-level include of a module method that uses instance variables: node N (CallNode `pair`) recv=-/ty-1 argc=0
 spinel: 1 refusal, nothing written

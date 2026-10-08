@@ -14647,6 +14647,21 @@ static int strbuf_promote_ivar(Compiler *c, int cid, const char *nm) {
   if (ci->ivar_types[iv] == TY_STRBUF && ci->ivar_str_shared[iv]) return 0;
   ci->ivar_types[iv] = TY_STRBUF;
   ci->ivar_str_shared[iv] = 1;
+  /* Under the share rule the inherited field has this representation in
+     every descendant, including one with no ivar node of its own (and so
+     no share holder). sh_ivar already joins a child's holder to its
+     ancestor's; carry the promotion to the passive copies of that slot. */
+  if (c->share_strings) {
+    int nk = 0;
+    const int *ks = comp_descendants(c, cid, &nk);
+    for (int k = 0; k < nk; k++) {
+      ClassInfo *sc = &c->classes[ks[k]];
+      int si = comp_ivar_index(sc, nm);
+      if (si < 0 || (sc->ivar_types[si] != TY_STRING && sc->ivar_types[si] != TY_STRBUF)) continue;
+      sc->ivar_types[si] = TY_STRBUF;
+      sc->ivar_str_shared[si] = 1;
+    }
+  }
   return 1;
 }
 
@@ -15481,6 +15496,10 @@ static void sa_refuse_element(Compiler *c, int e, int u);
 static int sa_copy_defer(Compiler *c, int site, int v, int reader, const char *msg) {
   ShareRoute q = share_route(site, v, 0);
   q.carry = reader ? v : SHARE_CARRY_COPY;
+  /* Unary plus already carries a mutable operand's handle; a frozen
+     operand gets its own. Let the seal check that existing value route. */
+  if (nt_kind(c->nt, v) == NK_CallNode && is_unary_plus(nt_str(c->nt, v, "name")) &&
+      cplan_user(c, v)->dispatch == CP_NONE) q.carry = v;
   return share_route_defer(c, &q, msg);
 }
 static const char *sa_msg(int route);
@@ -17622,6 +17641,21 @@ static int share_demand_rest_args(Compiler *c, int mi, const int *argv, int argc
   arg_layout_free(&L);
   return changed;
 }
+/* An element read can itself be the container whose String elements are
+   shared: [[s]][0][0] must demand s at the inner store. The existing
+   container-source walk carries the extra element depth back to it. */
+static int share_demand_nested_read(Compiler *c, int call, int recv) {
+  if (!container_elem_read_p(c->nt, recv) || nt_ref(c->nt, call, "block") >= 0) return 0;
+  TyKind rt = comp_ntype(c, recv);
+  if (rt == TY_POLY && container_elem_read_p(c->nt, call) && share_node_elems_share(c, recv))
+    return strbuf_container_source_walk(c, recv, 0, SB_DEMAND_NAMED);
+  if (!ty_is_array(rt) && !ty_is_hash(rt)) return 0;
+  int sh = bop_share_named(ty_is_array(rt) ? BOP_ANY_ARRAY : BOP_ANY_HASH,
+                           nt_str(c->nt, call, "name"));
+  if (sh != BSH_ELEM && sh != BSH_FETCH && sh != BSH_ELEM_N) return 0;
+  if (!share_node_elems_share(c, recv)) return 0;
+  return strbuf_container_source_walk(c, recv, 0, SB_DEMAND_NAMED);
+}
 static int share_default_apply(Compiler *c, int in_fixpoint) {
   if (!c->share_strings) return 0;
   if (in_fixpoint) {
@@ -17764,6 +17798,7 @@ static int share_default_apply(Compiler *c, int in_fixpoint) {
     else r = nt_ref(c->nt, n, kinds[k] == NK_CaseMatchNode ? "predicate" : "value");
     if (r < 0) continue;
     r = unwrap_parens(c, r);
+    if (kinds[k] == NK_CallNode) changed |= share_demand_nested_read(c, n, r);
     if (r < 0 || (nt_kind(c->nt, r) != NK_ArrayNode && nt_kind(c->nt, r) != NK_HashNode)) continue;
     if (kinds[k] == NK_CallNode && (blk < 0 || nt_kind(c->nt, blk) != NK_BlockNode)) {
       int s = bop_share_named(nt_kind(c->nt, r) == NK_ArrayNode ? BOP_ANY_ARRAY : BOP_ANY_HASH,
@@ -18685,6 +18720,136 @@ static void an_mark_handle_returns(Compiler *c) {
   }
 }
 static int promote_shared_stored_strings_pass(Compiler *c);
+/* A String builtin answering a new Array of new Strings nothing else holds
+   (`s.split(",")`, `s.scan(re)`, `s.lines`, `s.chars`). */
+static int sb_fresh_string_array_call(Compiler *c, int n) {
+  const NodeTable *nt = c->nt;
+  n = an_unparen(nt, n);
+  if (n < 0 || nt_kind(nt, n) != NK_CallNode || nt_ref(nt, n, "block") >= 0) return 0;
+  const char *mn = nt_str(nt, n, "name");
+  int r = nt_ref(nt, n, "receiver");
+  if (!mn || r < 0) return 0;
+  if (!sp_streq(mn, "split") && !sp_streq(mn, "scan") && !sp_streq(mn, "lines") && !sp_streq(mn, "chars"))
+    return 0;
+  TyKind rt = infer_type(c, r);
+  return (rt == TY_STRING || rt == TY_STRBUF) && infer_type(c, n) == TY_STR_ARRAY;
+}
+static int sb_subtree_max(const NodeTable *nt, int n) {
+  if (n < 0) return -1;
+  int m = n;
+  const SpNode *nd = &nt->nodes[n];
+  for (int i = 0; i < nd->nr; i++) { int x = sb_subtree_max(nt, nd->r[i].ref); if (x > m) m = x; }
+  for (int i = 0; i < nd->na; i++)
+    for (int j = 0; j < nd->a[i].n; j++) { int x = sb_subtree_max(nt, nd->a[i].ids[j]); if (x > m) m = x; }
+  return m;
+}
+/* map!/collect! over local `vn` (call w) mutating each element it yields:
+   the elements are replaced by the block's values, so a mutation of the
+   yielded String is seen only where the block's value carries it -- unless
+   the String is reachable some other way. It is not when the local is only
+   ever bound to a fresh String Array (sb_fresh_string_array_call) ahead of
+   w, every other read of it comes after w (none can hand an element out
+   before the replacement), and no loop around w runs it again over Strings
+   a later read may have handed out. */
+static int sb_map_bang_local_unobserved(Compiler *c, int w, int recv, const char *vn, Scope *vs) {
+  const NodeTable *nt = c->nt;
+  if (!vs || vs->body < 0 || !an_subtree_has(nt, vs->body, w)) return 0;
+  int wmax = sb_subtree_max(nt, w), writes = 0;
+  for (int u = comp_kind_first(c, NK_LocalVariableWriteNode); u >= 0; u = comp_kind_next(c, u)) {
+    if (nt_kind(nt, u) != NK_LocalVariableWriteNode || !sp_streq(nt_str(nt, u, "name"), vn)) continue;
+    if (!an_subtree_has(nt, vs->body, u)) continue;
+    if (u > w || !sb_fresh_string_array_call(c, nt_ref(nt, u, "value"))) return 0;
+    writes++;
+  }
+  if (writes == 0) return 0;
+  NodeKind other[] = { NK_LocalVariableOrWriteNode, NK_LocalVariableAndWriteNode,
+                       NK_LocalVariableOperatorWriteNode, NK_LocalVariableTargetNode };
+  for (int k = 0; k < (int)(sizeof other / sizeof other[0]); k++)
+    for (int u = comp_kind_first(c, other[k]); u >= 0; u = comp_kind_next(c, u))
+      if (nt_kind(nt, u) == other[k] && sp_streq(nt_str(nt, u, "name"), vn) &&
+          an_subtree_has(nt, vs->body, u)) return 0;
+  for (int u = comp_kind_first(c, NK_LocalVariableReadNode); u >= 0; u = comp_kind_next(c, u)) {
+    if (u == recv || nt_kind(nt, u) != NK_LocalVariableReadNode || !sp_streq(nt_str(nt, u, "name"), vn)) continue;
+    if (u <= wmax && an_subtree_has(nt, vs->body, u)) return 0;
+  }
+  NodeKind loops[] = { NK_WhileNode, NK_UntilNode, NK_ForNode };
+  for (int k = 0; k < 3; k++)
+    for (int u = comp_kind_first(c, loops[k]); u >= 0; u = comp_kind_next(c, u))
+      if (nt_kind(nt, u) == loops[k] && an_subtree_has(nt, u, w)) return 0;
+  /* w runs where the local lives, not in a block that may run it again */
+  return comp_scope_of(c, w) == vs;
+}
+/* Does the subtree at n hold a node that leaves a block iteration early
+   (next, redo, retry) or writes local `pn`? */
+static int sb_block_body_blocks_rewrite(const NodeTable *nt, int n, const char *pn) {
+  if (n < 0) return 0;
+  NodeKind k = nt_kind(nt, n);
+  if (k == NK_NextNode || k == NK_RedoNode || k == NK_RetryNode) return 1;
+  if ((k == NK_LocalVariableWriteNode || k == NK_LocalVariableOrWriteNode ||
+       k == NK_LocalVariableAndWriteNode || k == NK_LocalVariableOperatorWriteNode ||
+       k == NK_LocalVariableTargetNode) && sp_streq(nt_str(nt, n, "name"), pn)) return 1;
+  const SpNode *nd = &nt->nodes[n];
+  for (int i = 0; i < nd->nr; i++)
+    if (sb_block_body_blocks_rewrite(nt, nd->r[i].ref, pn)) return 1;
+  for (int i = 0; i < nd->na; i++)
+    for (int j = 0; j < nd->a[i].n; j++)
+      if (sb_block_body_blocks_rewrite(nt, nd->a[i].ids[j], pn)) return 1;
+  return 0;
+}
+/* `s.scan(re).each { |x| x.gsub!(...) }.join`: each answers the fresh Array
+   it walked, and its answer is read, so the in-place mutation of each
+   element must be seen there -- but a String Array's element binds the
+   parameter as a copy. Nothing else holds that Array or its Strings, so
+   storing the parameter's final value back over its element is the same
+   program: the block becomes `{ |x| ...; x }` under map!, which answers the
+   Array too. Only a block that runs to its end every time (no next, redo or
+   retry) and never rebinds the parameter; a break answers the break value
+   either way and leaves the Array unread. */
+static int desugar_fresh_array_each_writeback(Compiler *c) {
+  NodeTable *nt = (NodeTable *)c->nt;
+  int n0 = nt->count, changed = 0;
+  for (int w = comp_kind_first(c, NK_CallNode); w >= 0 && w < n0; w = comp_kind_next(c, w)) {
+    if (nt_kind(nt, w) != NK_CallNode || !sp_streq(nt_str(nt, w, "name"), "each")) continue;
+    int blk = nt_ref(nt, w, "block"), recv = nt_ref(nt, w, "receiver");
+    if (blk < 0 || nt_kind(nt, blk) != NK_BlockNode || nt_ref(nt, w, "arguments") >= 0) continue;
+    if (comp_value_dropped(c, w) || !sb_fresh_string_array_call(c, recv)) continue;
+    int bp = nt_ref(nt, blk, "parameters");
+    if (bp < 0 || nt_kind(nt, bp) != NK_BlockParametersNode) continue;
+    int pn = nt_ref(nt, bp, "parameters");
+    if (pn < 0) continue;
+    int nreq = 0, nopt = 0, npost = 0, nkw = 0;
+    const int *req = nt_arr(nt, pn, "requireds", &nreq);
+    nt_arr(nt, pn, "optionals", &nopt); nt_arr(nt, pn, "posts", &npost); nt_arr(nt, pn, "keywords", &nkw);
+    if (nreq != 1 || nopt || npost || nkw || nt_ref(nt, pn, "rest") >= 0 ||
+        nt_ref(nt, pn, "keyword_rest") >= 0 || nt_ref(nt, pn, "block") >= 0 ||
+        nt_kind(nt, req[0]) != NK_RequiredParameterNode) continue;
+    const char *pname = nt_str(nt, req[0], "name");
+    Scope *bs = comp_scope_of(c, blk);
+    int body = nt_ref(nt, blk, "body");
+    if (!pname || !bs || body < 0 || nt_kind(nt, body) != NK_StatementsNode) continue;
+    if (strbuf_mut_kind(c, pname, bs) != 1 || sb_block_body_blocks_rewrite(nt, body, pname)) continue;
+    int bn = 0; const int *bb = nt_arr(nt, body, "body", &bn);
+    int base = nt->count;
+    int rd = nt_new_node(nt, "LocalVariableReadNode");
+    if (rd < 0) continue;
+    nt_node_set_str(nt, rd, "name", pname);
+    nt_node_set_int(nt, rd, "depth", 0);
+    int *nb = malloc(sizeof(int) * (size_t)(bn + 1));
+    if (!nb) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+    memcpy(nb, bb, sizeof(int) * (size_t)bn);
+    nb[bn] = rd;
+    int st = nt_new_node(nt, "StatementsNode");
+    if (st < 0) { free(nb); continue; }
+    nt_node_set_arr(nt, st, "body", nb, bn + 1);
+    free(nb);
+    nt_node_set_ref(nt, blk, "body", st);
+    nt_set_str(nt, w, "name", "map!");
+    comp_grow_node_arrays(c);
+    for (int j = base; j < nt->count; j++) c->nscope[j] = c->nscope[blk];
+    changed = 1;
+  }
+  return changed;
+}
 static int promote_shared_stored_strings(Compiler *c) {
   sb_targets_gen++; sb_targets_on = 1;
   int r = promote_shared_stored_strings_pass(c);
@@ -19374,6 +19539,20 @@ static int promote_shared_stored_strings_pass(Compiler *c) {
       for (int e = 0; e < en && !var; e++) var = nt_kind(nt, el[e]) == NK_LocalVariableReadNode;
       if (!var) continue;
     }
+    /* A fresh String Array a call answers (`s.split(",").map! { |t| t.strip!
+       ... }`) that nothing else holds: a mutation of the String an iterator
+       yields is seen only through the block's own value when the
+       iterator's answer is dropped, or is the block's values (map, and
+       map!/collect!, which store them over the elements). An iterator
+       answering the Array or some of its elements (each, select, find) is
+       read again where its answer is used, and stays refused here
+       (desugar_fresh_array_each_writeback takes each's). The parameter then
+       binds the element as a copy, as for any read. */
+    if ((bpv4->type == TY_STRING || bpv4->type == TY_STRBUF) && sb_fresh_string_array_call(c, recv4) &&
+        (is_map_bang_alias(itn) || comp_value_dropped(c, w) ||
+         bop_share_named(BOP_ANY_ARRAY, itn) == BSH_ITER_MAP ||
+         bop_share_named(BOP_ANY_ARRAY, itn) == BSH_ITER_MAP_BANG))
+      continue;
     if ((bpv4->type == TY_STRING || bpv4->type == TY_STRBUF) &&
         (nt_kind(nt, recv4) == NK_InstanceVariableReadNode || nt_kind(nt, recv4) == NK_CallNode) &&
         (infer_type(c, recv4) == TY_STR_ARRAY || infer_type(c, recv4) == TY_POLY_ARRAY)) {
@@ -19427,6 +19606,12 @@ static int promote_shared_stored_strings_pass(Compiler *c) {
        (settled or literal) element type so an array-of-arrays each+<<
        never promotes its param */
     if (contt4 != TY_STR_ARRAY && contt4 != TY_POLY_ARRAY) continue;
+    /* map!/collect! over a local only ever bound to a fresh String Array,
+       read nowhere before the replacement: the block's value is what each
+       element becomes, and the mutated String is reachable only through it */
+    if (!lit4 && contt4 == TY_STR_ARRAY && is_map_bang_alias(itn) &&
+        sb_map_bang_local_unobserved(c, w, recv4, contn4, conts4))
+      continue;
     if (!lit4 && contt4 == TY_STR_ARRAY &&
         an_local_string_array_has_untracked_call_store(c, contn4, conts4)) {
       static const char sa_msg[] =
@@ -35107,6 +35292,81 @@ static int rd_receiver_observed(Compiler *c, int r, const char *rn) {
   }
   return 0;
 }
+/* Is `call` a query on local `wn`: no block, no String mutator? Its answer
+   must not carry the String on either: it is a branch's condition, or it
+   answers no String (a String answer could be the same object, `s.to_s`). */
+static int rd_query_on(Compiler *c, int call, const char *wn, int as_condition) {
+  const NodeTable *nt = c->nt;
+  if (call < 0 || nt_kind(nt, call) != NK_CallNode) return 0;
+  int r = an_unparen(nt, nt_ref(nt, call, "receiver"));
+  const char *rn = r >= 0 && nt_kind(nt, r) == NK_LocalVariableReadNode ? nt_str(nt, r, "name") : NULL;
+  const char *nm = nt_str(nt, call, "name");
+  if (!rn || !sp_streq(rn, wn) || !nm || nt_ref(nt, call, "block") >= 0 || sp_str_mutator(nm, SP_MUT_LOCAL))
+    return 0;
+  size_t nl = strlen(nm);
+  if (nl > 0 && nm[nl - 1] == '!') return 0;
+  int ty = comp_ntype(c, call);
+  return as_condition || (ty != TY_STRING && ty != TY_STRBUF && ty != TY_POLY);
+}
+/* Does `node` read local `wn` only as the receiver of a query
+   (rd_query_on), so the String is neither changed nor handed on? */
+static int rd_only_queried(Compiler *c, int node, const char *wn) {
+  const NodeTable *nt = c->nt;
+  if (node < 0) return 1;
+  NodeKind k = nt_kind(nt, node);
+  const char *nm = nt_str(nt, node, "name");
+  if ((k == NK_LocalVariableReadNode || k == NK_LocalVariableWriteNode) && nm && sp_streq(nm, wn)) return 0;
+  /* the query itself (its arguments are walked below), or a branch on one */
+  int skip = -1;
+  if (k == NK_CallNode && rd_query_on(c, node, wn, 0)) skip = an_unparen(nt, nt_ref(nt, node, "receiver"));
+  else if (k == NK_IfNode || k == NK_UnlessNode) {
+    int pred = an_unparen(nt, nt_ref(nt, node, "predicate"));
+    if (rd_query_on(c, pred, wn, 1)) {
+      int args = nt_ref(nt, pred, "arguments");
+      if (!rd_only_queried(c, args, wn)) return 0;
+      skip = pred;
+    }
+  }
+  int nr = nt_num_refs(nt, node);
+  for (int i = 0; i < nr; i++) {
+    int ch = nt_ref_at(nt, node, i);
+    if (ch != skip && an_unparen(nt, ch) != skip && !rd_only_queried(c, ch, wn)) return 0;
+  }
+  int na = nt_num_arrs(nt, node);
+  for (int i = 0; i < na; i++) {
+    int cnt = 0; const int *ids = nt_arr_at(nt, node, i, &cnt);
+    for (int j = 0; j < cnt; j++) if (!rd_only_queried(c, ids[j], wn)) return 0;
+  }
+  return 1;
+}
+/* `s = r.m` read through a reader, then only queried until the next
+   statement of the same body rebinds it to a copy, `s = s.dup`
+   (Shellwords.escape: `str = str.to_s ... str = str.dup; str.gsub!`): the
+   mutations after that change the copy, never the member. Statement order
+   is the list order, so "until" is exact. */
+static int rd_read_dropped_for_copy(Compiler *c, int w, const char *wn) {
+  const NodeTable *nt = c->nt;
+  Scope *sc = comp_scope_of(c, w);
+  if (!sc || sc->body < 0 || nt_kind(nt, sc->body) != NK_StatementsNode) return 0;
+  int sn = 0; const int *stmts = nt_arr(nt, sc->body, "body", &sn);
+  int k = 0;
+  while (k < sn && stmts[k] != w) k++;
+  for (int i = k + 1; i < sn; i++) {
+    int s = stmts[i];
+    const char *sname = nt_kind(nt, s) == NK_LocalVariableWriteNode ? nt_str(nt, s, "name") : NULL;
+    if (sname && sp_streq(sname, wn)) {
+      int v = an_unparen(nt, nt_ref(nt, s, "value"));
+      if (v < 0 || nt_kind(nt, v) != NK_CallNode || nt_ref(nt, v, "block") >= 0 || call_plain_argc(c, v) != 0)
+        return 0;
+      const char *vn = nt_str(nt, v, "name");
+      int vr = an_unparen(nt, nt_ref(nt, v, "receiver"));
+      const char *vrn = vr >= 0 && nt_kind(nt, vr) == NK_LocalVariableReadNode ? nt_str(nt, vr, "name") : NULL;
+      return vn && sp_streq(vn, "dup") && vrn && sp_streq(vrn, wn);
+    }
+    if (!rd_only_queried(c, s, wn)) return 0;
+  }
+  return 0;
+}
 /* String routes the settled types show copying where CRuby hands over the
    one object (#6765), refused rather than compiled with the change lost:
    - `t = obj.text; t << x` on a boxed obj: the reader's dispatch answers a
@@ -35127,7 +35387,7 @@ static void refuse_string_read_copies(Compiler *c) {
     int r = an_unparen(nt, nt_ref(nt, v, "receiver"));
     const char *rn = r >= 0 && nt_kind(nt, r) == NK_LocalVariableReadNode ? nt_str(nt, r, "name") : NULL;
     if (!rn || comp_ntype(c, r) != TY_POLY || !nt_str(nt, v, "name") ||
-        !rd_string_reader_anywhere(c, nt_str(nt, v, "name")))
+        !rd_string_reader_anywhere(c, nt_str(nt, v, "name")) || rd_read_dropped_for_copy(c, w, wn))
       continue;
     static const char rd_msg[] =
       "a String read through a reader on a boxed receiver (a Struct or Data member, an attr_reader, `def "
@@ -36480,6 +36740,7 @@ static void an_phase_infer_fixpoint(Compiler *c) {
     ch |= desugar_enum_iter_splat_args(c);     /* enum.map(*a, &b) -> enum.map(&b) */
     ch |= desugar_enum_pair_lone_param(c);     /* a.each_with_index.map { |x| } -> { |x, i| } */
     ch |= desugar_builtin_iter_block_shapes(c);  /* [1].each { |c, a = 10| } -> { |v| c = v; a = 10 } */
+    ch |= desugar_fresh_array_each_writeback(c); /* s.scan(re).each { |x| x.gsub!(..) }.join -> map! { |x| ..; x } */
     ch |= desugar_multi_yield_map_param(c);    /* multi-yield each: map's |x| takes the 1st */
     ch |= desugar_ewi_pack_values(c);          /* multi-yield each: each_with_index packs */
     ch |= desugar_enum_walk_calls(c);          /* enum.map { break } -> __enumw_map(enum) { } */

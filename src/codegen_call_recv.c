@@ -382,6 +382,13 @@ static int needle_misses(Compiler *c, int recv, TyKind rt, int node) {
   return value_kind_misses(c, node, ty_array_elem(rt));
 }
 
+/* A boxed needle can hold a legacy shared handle in either build. A
+   statically plain needle keeps its existing default emission. */
+static int needle_needs_deref(Compiler *c, int node) {
+  Repr r = repr_of(c, node);
+  return repr_share_rule(c) || r.kind == RK_BOXED || r.kind == RK_STRBUF;
+}
+
 /* A needle in the Integer or Float array's own slot type. nil is the
    sentinel, evaluated for effect first, and a nilable scalar passes its
    sentinel unchecked: the runtime search compares it like any value (the
@@ -2399,9 +2406,10 @@ else {
              there, as include? and index read it (#4458) */
           int tv = ++g_tmp;
           char tvn[32]; snprintf(tvn, sizeof tvn, "_t%d", tv);
-          const char *nd = held[0] ? held : tvn;
+          const char *nd = held[0] && !needle_needs_deref(c, argv[0]) ? held : tvn;
           buf_puts(b, "({ ");
-          if (!held[0]) { buf_printf(b, "sp_RbVal %s = ", tvn); emit_boxed(c, argv[0], b); buf_puts(b, "; "); }
+          if (!held[0] || needle_needs_deref(c, argv[0])) { buf_printf(b, "sp_RbVal %s = %s", tvn, needle_needs_deref(c, argv[0]) ? "sp_poly_strbuf_deref(" : "");
+            if (held[0]) buf_puts(b, held); else emit_boxed(c, argv[0], b); buf_puts(b, needle_needs_deref(c, argv[0]) ? "); " : "; "); }
           buf_printf(b, "const char *_t%d = %s.tag == SP_TAG_STR ? sp_StrArray_delete(%s, %s.v.s)"
                         " : (const char *)0; _t%d ? sp_box_str(_t%d) : ", tdr, nd, rdb.p, nd, tdr, tdr);
         }
@@ -2436,7 +2444,7 @@ else {
     else if (rt == TY_STR_ARRAY && a0 == TY_POLY) {
       /* a boxed needle, read as the block form above reads it */
       int tv = ++g_tmp;
-      buf_printf(b, "({ sp_RbVal _t%d = ", tv); emit_boxed(c, argv[0], b);
+      buf_printf(b, "({ sp_RbVal _t%d = %s", tv, needle_needs_deref(c, argv[0]) ? "sp_poly_strbuf_deref(" : ""); emit_boxed(c, argv[0], b); if (needle_needs_deref(c, argv[0])) buf_puts(b, ")");
       buf_printf(b, "; _t%d.tag == SP_TAG_STR ? sp_StrArray_delete(%s, _t%d.v.s)"
                     " : _t%d.tag == SP_TAG_NIL ? sp_StrArray_delete(%s, NULL) : (const char *)0; })",
                  tv, rdl.p, tv, tv, rdl.p);
@@ -2573,7 +2581,7 @@ else {
          compile (#4458). */
       int ta = ++g_tmp, tv = ++g_tmp;
       buf_printf(b, "({ sp_StrArray *_t%d = ", ta); emit_recv_rooted(c, recv, ta, "SP_GC_ROOT", b);
-      buf_printf(b, "sp_RbVal _t%d = ", tv); emit_boxed(c, argv[0], b);
+      buf_printf(b, "sp_RbVal _t%d = %s", tv, needle_needs_deref(c, argv[0]) ? "sp_poly_strbuf_deref(" : ""); emit_boxed(c, argv[0], b); if (needle_needs_deref(c, argv[0])) buf_puts(b, ")");
       buf_printf(b, "; _t%d.tag == SP_TAG_STR ? sp_StrArray_%s(_t%d, _t%d.v.s)"
                     " : _t%d.tag == SP_TAG_NIL ? sp_StrArray_%s(_t%d, NULL) : sp_box_nil(); })", tv, fn, ta, tv, tv, fn, ta);
       { *out = 1; return 1; }
@@ -2658,7 +2666,7 @@ else {
     if (rt == TY_STR_ARRAY && (sat == TY_POLY || sat == TY_NIL)) {
       int ta = ++g_tmp, tv = ++g_tmp;
       buf_printf(b, "({ sp_StrArray *_t%d = ", ta); emit_recv_rooted(c, recv, ta, "SP_GC_ROOT", b);
-      buf_printf(b, "sp_RbVal _t%d = ", tv); emit_boxed(c, argv[0], b);
+      buf_printf(b, "sp_RbVal _t%d = %s", tv, needle_needs_deref(c, argv[0]) ? "sp_poly_strbuf_deref(" : ""); emit_boxed(c, argv[0], b); if (needle_needs_deref(c, argv[0])) buf_puts(b, ")");
       buf_printf(b, "; _t%d.tag == SP_TAG_STR ? sp_StrArray_%s(_t%d, _t%d.v.s)"
                     " : _t%d.tag == SP_TAG_NIL ? sp_StrArray_%s(_t%d, NULL) : FALSE; })",
                  tv, fn, ta, tv, tv, fn, ta);
@@ -7502,12 +7510,18 @@ static int str_arms_pattern(Compiler *c, int id, Buf *b, const NodeTable *nt, co
     int blk = nt_ref(nt, id, "block");
     int re_idx = re_lit_index(c, argv[0]);
     int has_cap = re_idx >= 0 && an_re_has_captures(re_lit_src(c, argv[0]));
+    int runtime_cap = re_idx < 0 && (comp_ntype(c, argv[0]) == TY_REGEX ||
+                                   comp_ntype(c, argv[0]) == TY_POLY);
     int np = 0; while (block_param_name(c, blk, np)) np++;
     int body = nt_ref(nt, blk, "body");
     int bn = 0; const int *bb = body >= 0 ? nt_arr(nt, body, "body", &bn) : NULL;
     int tr = ++g_tmp, tm = ++g_tmp, ti = ++g_tmp, tpat = -1;
     emit_indent(g_pre, g_indent);
     buf_printf(g_pre, "const char *_t%d = %s;\n", tr, r);
+    if (runtime_cap) {
+      emit_indent(g_pre, g_indent);
+      buf_printf(g_pre, "SP_GC_ROOT_STR(_t%d);\n", tr);
+    }
     emit_indent(g_pre, g_indent);
     if (has_cap)
       buf_printf(g_pre, "sp_PolyArray *_t%d = sp_re_scan_poly(sp_re_pat_%d, _t%d); SP_GC_ROOT(_t%d);\n",
@@ -7519,14 +7533,15 @@ static int str_arms_pattern(Compiler *c, int id, Buf *b, const NodeTable *nt, co
        holding one): the value already IS the mrb_regexp_pattern*. has_cap
        is 0 for such a pattern, so the block param stays a whole-match
        String -- the same shape a local bound to a capturing literal
-       already yields here (#3389). */
+       already yields here (#3389). Runtime patterns now retain the capture
+       rows too, with their shape checked when binding the parameters. */
     else if (comp_ntype(c, argv[0]) == TY_REGEX) {
       /* render the pattern to a scratch buffer: `Regexp.new(s)` roots its
          own argument, and those decls go to g_pre, which must receive them
          as whole statements rather than spliced into this initializer */
       Buf eb; memset(&eb, 0, sizeof eb);
       emit_expr(c, argv[0], &eb);
-      buf_printf(g_pre, "sp_StrArray *_t%d = sp_re_scan(%s, _t%d); SP_GC_ROOT(_t%d);\n",
+      buf_printf(g_pre, "sp_PolyArray *_t%d = sp_re_scan_poly(%s, _t%d); SP_GC_ROOT(_t%d);\n",
                  tm, eb.p ? eb.p : "NULL", tr, tm);
       free(eb.p);
     }
@@ -7535,7 +7550,7 @@ static int str_arms_pattern(Compiler *c, int id, Buf *b, const NodeTable *nt, co
          String, told apart at run time (sp_scan_boxed) */
       Buf pb2; memset(&pb2, 0, sizeof pb2);
       emit_boxed(c, argv[0], &pb2);
-      buf_printf(g_pre, "sp_StrArray *_t%d = sp_scan_boxed(_t%d, %s); SP_GC_ROOT(_t%d);\n",
+      buf_printf(g_pre, "sp_PolyArray *_t%d = sp_scan_boxed_poly(_t%d, %s); SP_GC_ROOT(_t%d);\n",
                  tm, tr, pb2.p ? pb2.p : "sp_box_nil()", tm);
       free(pb2.p);
     }
@@ -7578,7 +7593,24 @@ static int str_arms_pattern(Compiler *c, int id, Buf *b, const NodeTable *nt, co
                         " _t%d = sp_re_caps[1] > sp_re_caps[0] ? sp_re_caps[1] : sp_re_caps[1] + 1;\n",
                  re_idx, tr, sc_pos, sc_pos);
     }
-    if (has_cap && np >= 2) {
+    if (runtime_cap) {
+      for (int pj = 0; pj < np; pj++) {
+        const char *pn = block_param_name(c, blk, pj);
+        Scope *sc = comp_scope_of(c, blk);
+        LocalVar *lv = sc ? scope_local(sc, pn) : NULL;
+        char row[64], value[256];
+        snprintf(row, sizeof row, "_t%d->data[_t%d]", tm, ti);
+        if (np == 1) snprintf(value, sizeof value, "%s", row);
+        else snprintf(value, sizeof value, "%s.tag == SP_TAG_OBJ ? sp_poly_arr_get(%s, %d) : %s",
+                      row, row, pj, pj == 0 ? row : "sp_box_nil()");
+        emit_indent(g_pre, g_indent + 1);
+        buf_printf(g_pre, "lv_%s = ", rename_local(pn));
+        emit_coerce_text(c, id, TY_POLY, lv ? repr_of_slot(c, lv).as_ty : TY_POLY,
+                         CO_HOLD, value, "a runtime scan parameter", g_pre);
+        buf_puts(g_pre, ";\n");
+      }
+    }
+    else if (has_cap && np >= 2) {
       int trow = ++g_tmp;
       emit_indent(g_pre, g_indent + 1);
       buf_printf(g_pre, "sp_PolyArray *_t%d = (sp_PolyArray *)_t%d->data[_t%d].v.p;\n", trow, tm, ti);
@@ -11156,8 +11188,8 @@ int emit_value_recv_call(Compiler *c, int id, Buf *b) {
            object answers #to_int, and nil or an Object is CRuby's TypeError,
            where sp_poly_to_i read them as group 0. */
         int mtmp = ++g_tmp, ktmp = ++g_tmp;
-        buf_printf(b, "({ sp_MatchData *_t%d = %s; sp_RbVal _t%d = ", mtmp, r, ktmp);
-        emit_expr(c, argv[0], b);
+        buf_printf(b, "({ sp_MatchData *_t%d = %s; sp_RbVal _t%d = %s", mtmp, r, ktmp, needle_needs_deref(c, argv[0]) ? "sp_poly_strbuf_deref(" : "");
+        emit_expr(c, argv[0], b); if (needle_needs_deref(c, argv[0])) buf_puts(b, ")");
         buf_printf(b, "; _t%d.tag == SP_TAG_SYM ? sp_MatchData_aref_name(_t%d, sp_sym_to_s((sp_sym)_t%d.v.i)) :"
                       " _t%d.tag == SP_TAG_STR ? sp_MatchData_aref_name(_t%d, _t%d.v.s) :"
                       " sp_MatchData_aref(_t%d, sp_poly_arg_int_chk(_t%d)); })",
@@ -11274,9 +11306,9 @@ int emit_value_recv_call(Compiler *c, int id, Buf *b) {
              by name, anything else is an index. Passing the raw sp_RbVal to
              sp_MatchData_aref (sp_int) would be a C type error. */
           int kt = ++g_tmp;
-          buf_printf(b, " sp_RbVal _t%d = ", kt);
+          buf_printf(b, " sp_RbVal _t%d = %s", kt, needle_needs_deref(c, argv[i]) ? "sp_poly_strbuf_deref(" : "");
           if (hold) buf_printf(b, "_t%d", held[i]);
-          else emit_expr(c, argv[i], b);
+          else emit_expr(c, argv[i], b); if (needle_needs_deref(c, argv[i])) buf_puts(b, ")");
           buf_printf(b, "; sp_PolyArray_push(_t%d, sp_box_nullable_str("
                         "_t%d.tag == SP_TAG_SYM ? sp_MatchData_aref_name(_t%d, sp_sym_to_s((sp_sym)_t%d.v.i)) :"
                         " _t%d.tag == SP_TAG_STR ? sp_MatchData_aref_name(_t%d, _t%d.v.s) :"
@@ -14391,6 +14423,20 @@ static void emit_poly_int_pow(Compiler *c, int recv, int arg, Buf *b) {
   buf_printf(b, "; sp_poly_int_pow(_t%d, _t%d); })", tv, te);
 }
 
+static int emit_poly_scan_rows(Compiler *c, int id, Buf *b, const NodeTable *nt,
+                               const char *name, int recv, int argc, const int *argv, int root) {
+  int ts = ++g_tmp;
+  Buf rb; memset(&rb, 0, sizeof rb);
+  emit_expr(c, recv, &rb);
+  emit_indent(g_pre, g_indent);
+  buf_printf(g_pre, "const char *_t%d = sp_poly_recv_s(%s, \"scan\");", ts, rb.p ? rb.p : "sp_box_nil()");
+  if (root) buf_printf(g_pre, " SP_GC_ROOT_STR(_t%d);", ts);
+  buf_puts(g_pre, "\n");
+  free(rb.p);
+  char r[32]; snprintf(r, sizeof r, "_t%d", ts);
+  return str_arms_pattern(c, id, b, nt, name, argc, argv, r);
+}
+
 static int emit_poly_scan_block(Compiler *c, int id, Buf *b, const NodeTable *nt,
                                const char *name, int recv, int argc, const int *argv) {
   /* poly.scan(pat) { }: the block form over a receiver only known to be a
@@ -14411,16 +14457,10 @@ static int emit_poly_scan_block(Compiler *c, int id, Buf *b, const NodeTable *nt
     /* Capturing patterns use the typed String emitter's row binding.
        Hold the checked subject across the scan's allocations. */
     if (re_i >= 0 && an_re_has_captures(re_lit_src(c, argv[0]))) {
-      int ts = ++g_tmp;
-      Buf rb; memset(&rb, 0, sizeof rb);
-      emit_expr(c, recv, &rb);
-      emit_indent(g_pre, g_indent);
-      buf_printf(g_pre, "const char *_t%d = sp_poly_recv_s(%s, \"scan\"); SP_GC_ROOT_STR(_t%d);\n",
-                 ts, rb.p ? rb.p : "sp_box_nil()", ts);
-      free(rb.p);
-      char r[32]; snprintf(r, sizeof r, "_t%d", ts);
-      return str_arms_pattern(c, id, b, nt, name, argc, argv, r);
+      return emit_poly_scan_rows(c, id, b, nt, name, recv, argc, argv, 1);
     }
+    if (re_i < 0 && (pat_t == TY_REGEX || pat_t == TY_POLY))
+      return emit_poly_scan_rows(c, id, b, nt, name, recv, argc, argv, 0);
     int ts = ++g_tmp, tm = ++g_tmp, ti = ++g_tmp;
     /* a body that reads `$~` or a capture global walks the subject for its
        own turn's match, as the typed-String arm does (#3601) */

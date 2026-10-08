@@ -1031,6 +1031,8 @@ re-lit-test: $(SPINEL)
 SHARE_TESTS := $(wildcard test/share/*.rb)
 ifeq ($(FFI_AVAILABLE),yes)
 SHARE_TESTS += packages/ffi/test/ffi_dynamic_owner.rb packages/ffi/test/ffi_store_string.rb
+SHARE_TESTS += packages/ffi/test/ffi_nil_numeric_arg.rb
+SHARE_TESTS += packages/fiddle/test/fiddle_importer_include.rb
 endif
 ifneq ($(FFI_AVAILABLE),yes)
 SHARE_TESTS := $(filter-out test/share/share_strings_fiddle.rb,$(SHARE_TESTS))
@@ -1038,10 +1040,12 @@ endif
 share-strings-test: $(SPINEL) $(SP_RT_LIB) $(SP_RT_MT_LIB) $(BUNDLED_NATIVE_OBJS) $(BUNDLED_NATIVE_MT_OBJS)
 	@tmp=$$(mktemp -d "$${TMPDIR:-/tmp}/spinel-share.XXXXXX"); ok=1; \
 	for t in $(SHARE_TESTS) test/share_strings_*.rb test/nullable_string_identity.rb test/widened_param_reaches_its_callee.rb test/reader_or_assign_frozen.rb \
+	  test/string_freeze_value_shared_handle.rb test/string_unary_plus_frozen_receiver.rb \
 	  test/builtins_inject.rb test/issue_3174.rb test/set_string_member_frozen.rb \
 	  test/dynamic_new_post_params_reach.rb test/block_forward_proc_param_type.rb \
 	  test/builtins_partition_group_by.rb test/forwarded_block_tail_return.rb \
-	  test/boxed_scan_capture_params.rb packages/shellwords/test/shellwords_split_unmatched_quote.rb $$(cat test/share/reject.list); do \
+	  test/boxed_scan_capture_params.rb test/fold_receiver_root.rb \
+	  packages/shellwords/test/shellwords_split_unmatched_quote.rb $$(cat test/share/reject.list); do \
 	  e="$$t.expected"; case "$$t" in test/reject/*) e="test/share/reject/$${t##*/}.expected";; esac; \
 	  if $(SPINEL) --share-strings "$$t" -o "$$tmp/b" >"$$tmp/out" 2>&1; then \
 	    ! grep -q 'did not converge' "$$tmp/out" || { echo "share-strings-test: FAIL $$t (the inference fixpoint ran to its round cap)"; ok=0; }; \
@@ -1427,7 +1431,7 @@ link-names-test: $(SPINEL) $(SP_RT_LIB) $(SP_RT_MT_LIB)
 
 reject-test: $(SPINEL)
 	@ok=1; tmp=$$(mktemp -d /tmp/spinel-reject.XXXXXX); \
-	for t in test/reject/string_thread_arg.rb test/reject/string_fiber_arg.rb test/reject/string_thread_global_arg.rb test/reject/string_global_hash_element_mutation.rb test/reject/string_thread_ivar_arg.rb test/reject/string_thread_method_param_arg.rb test/reject/string_fiber_method_param_arg.rb test/reject/string_thread_block_param_arg.rb test/reject/string_thread_arg_in_loop.rb; do \
+	for t in test/reject/string_thread_arg.rb test/reject/string_fiber_arg.rb test/reject/string_thread_global_arg.rb test/reject/string_global_hash_element_mutation.rb test/reject/string_thread_ivar_arg.rb test/reject/string_thread_method_param_arg.rb test/reject/string_fiber_method_param_arg.rb test/reject/string_thread_block_param_arg.rb test/reject/string_thread_arg_in_loop.rb test/reject/string_split_local_each_mutation.rb test/reject/string_split_select_mutation.rb test/reject/string_split_map_bang_read_before.rb; do \
 	  if $(SPINEL) "$$t" -c --no-line-map -o "$$tmp/sk.c" >"$$tmp/sk.out" 2>&1; then \
 	    echo "reject-test: FAIL ($$t compiled)"; ok=0; \
 	  else grep -q "is not yet shared by reference" "$$tmp/sk.out" || \
@@ -1894,6 +1898,14 @@ reject-test: $(SPINEL)
 	  echo "reject-test: FAIL (IO.popen compiled into a run-time NoMethodError)"; ok=0; \
 	else grep -q "IO.popen is not supported" "$$tmp/pop.out" || \
 	  { echo "reject-test: FAIL (IO.popen refused without saying why)"; sed -n 1,5p "$$tmp/pop.out"; ok=0; }; fi; \
+	for spec in "time_parse_no_require:Time.parse is not supported" \
+	            "time_strptime_no_require:Time.strptime is not supported"; do \
+	  t=test/reject/$${spec%%:*}.rb; why=$${spec#*:}; \
+	  if $(SPINEL) "$$t" -c --no-line-map -o "$$tmp/tp.c" >"$$tmp/tp.out" 2>&1; then \
+	    echo "reject-test: FAIL ($$t compiled into a run-time NoMethodError)"; ok=0; \
+	  else grep -qF "$$why" "$$tmp/tp.out" || \
+	    { echo "reject-test: FAIL ($$t refused without saying why)"; sed -n 1,5p "$$tmp/tp.out"; ok=0; }; fi; \
+	done; \
 	rm -rf "$$tmp"; \
 	if [ $$ok -eq 1 ]; then echo "reject-test: pass"; else exit 1; fi
 
@@ -2260,8 +2272,14 @@ threaded-render-test: $(SPINEL) $(SP_RT_LIB) $(SP_RT_MT_LIB) $(SPINEL_TIMEOUT)
 	if [ $$ok -eq 1 ]; then echo "threaded-render-test: pass"; else exit 1; fi
 
 GC_MINOR_TESTS := test/boxed_scan_capture_params.rb \
+                  test/share_strings_hash_transform_params.rb \
                   test/reopened_builtin_kwrest_keys.rb \
+                  test/string_unary_plus_frozen_receiver.rb \
+                  test/share_strings_boxed_hash_key.rb \
+                  test/string_append_chain_prepend.rb \
+                  test/share_strings_prepend_override.rb \
                   test/share_strings_argument_conversion_root.rb \
+                  test/share_strings_inherited_ivar.rb \
                   test/reader_or_assign_frozen.rb \
                   test/share_strings_boxed_cond_order.rb \
                   test/string_unary_plus_nested.rb \
