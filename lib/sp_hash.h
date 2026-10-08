@@ -98,6 +98,18 @@ void sp_IntStrHash_delete(sp_IntStrHash*h,sp_int k);
 sp_oint sp_IntIntHash_oget(sp_IntIntHash*h,sp_int k);
 sp_oint sp_IntIntHash_fetch_or(sp_IntIntHash*h,sp_int k,sp_oint d);
 sp_bool sp_IntIntHash_has_key(sp_IntIntHash*h,sp_int k);
+/* The key-taking ops of an Integer-keyed hash with an sp_oint key. A nil
+   key matches no entry -- the emitter passes a key of another class (a
+   String into {1 => 2}) as nil, a miss whatever the hash holds -- so each
+   answers as its sp_int-key op does for a missing key. */
+static inline sp_int sp_IntIntHash_get_okey(sp_IntIntHash*h,sp_oint k){if(SP_UNLIKELY(k.nil))return h?h->default_v:0;return sp_IntIntHash_get(h,k.v);}
+static inline sp_oint sp_IntIntHash_oget_okey(sp_IntIntHash*h,sp_oint k){if(SP_UNLIKELY(k.nil))return(!h||h->default_nil)?sp_oint_nil():sp_oint_of(h->default_v);return sp_IntIntHash_oget(h,k.v);}
+static inline sp_oint sp_IntIntHash_fetch_or_okey(sp_IntIntHash*h,sp_oint k,sp_oint d){if(SP_UNLIKELY(k.nil))return d;return sp_IntIntHash_fetch_or(h,k.v,d);}
+static inline sp_bool sp_IntIntHash_has_key_okey(sp_IntIntHash*h,sp_oint k){return !k.nil&&sp_IntIntHash_has_key(h,k.v);}
+static inline void sp_IntIntHash_delete_okey(sp_IntIntHash*h,sp_oint k){if(!k.nil)sp_IntIntHash_delete(h,k.v);}
+static inline const char*sp_IntStrHash_get_okey(sp_IntStrHash*h,sp_oint k){if(SP_UNLIKELY(k.nil))return h?h->default_v:NULL;return sp_IntStrHash_get(h,k.v);}
+static inline sp_bool sp_IntStrHash_has_key_okey(sp_IntStrHash*h,sp_oint k){return !k.nil&&sp_IntStrHash_has_key(h,k.v);}
+static inline void sp_IntStrHash_delete_okey(sp_IntStrHash*h,sp_oint k){if(!k.nil)sp_IntStrHash_delete(h,k.v);}
 sp_int sp_IntIntHash_length(sp_IntIntHash*h);
 sp_IntArray*sp_IntIntHash_keys(sp_IntIntHash*h);
 sp_IntArray*sp_IntIntHash_values(sp_IntIntHash*h);
