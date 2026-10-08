@@ -25579,6 +25579,8 @@ int file_stat_nil_call(Compiler *c, int v) {
     const char *cn = nt_str(nt, rc, "name");
     return cn && (sp_streq(cn, "File") || sp_streq(cn, "FileTest"));
   }
+  /* `size` on a boxed value: a Range of non-numbers answers nil (sp_poly_size) */
+  if (sp_streq(nm, "size") && argc == 0 && infer_type(c, rc) == TY_POLY) return 1;
   static const char *const F[] = { "uid", "gid", "nlink", "dev", "ino", "blksize", "blocks", "rdev", "size?", NULL };
   if (argc != 0 || !str_in(nm, F)) return 0;
   TyKind rt = infer_type(c, rc);
