@@ -6591,19 +6591,11 @@ static sp_RbVal sp_splat_to_array(sp_RbVal v) {
   }
   { sp_PolyArray *r = sp_PolyArray_new(); SP_GC_ROOT(r); sp_PolyArray_push(r, v); return sp_box_poly_array(r); }
 }
-static sp_RbVal sp_poly_arr_get(sp_RbVal a, sp_int i) {
-  if (a.tag != SP_TAG_OBJ) return sp_box_nil();
-  /* The poly array is the common case -- a boxed pair being destructured, an
-     element read out of a container -- so answer it before the switch: the
-     cls_ids are negative and scattered, which the compiler turns into a chain
-     of compares rather than a jump table. */
-  if (a.cls_id == SP_BUILTIN_POLY_ARRAY) {
-    sp_PolyArray *ar = (sp_PolyArray *)a.v.p;
-    if (!ar) return sp_box_nil();
-    if (i < 0) i += ar->len;
-    if (i < 0 || i >= ar->len) return sp_box_nil();
-    return ar->data[i];
-  }
+/* sp_poly_arr_get's other array kinds, out of line: their boxing helpers are
+   calls (the nil-aware box_elem), and a call anywhere in sp_poly_arr_get made
+   clang build a frame on its poly-array fast path too, which every
+   `@fetch[addr][addr]` of optcarrot's runs through */
+SP_NOINLINE SP_COLD static sp_RbVal sp_poly_arr_get_typed(sp_RbVal a, sp_int i) {
   /* Resolve a negative index to the tail (Ruby semantics). Most reads reach
      here already resolved by the codegen, but the chained-index paths
      (sp_poly_slot_set / _op for `a[-1][j] = v`) pass the raw negative index --
@@ -6622,6 +6614,21 @@ static sp_RbVal sp_poly_arr_get(sp_RbVal a, sp_int i) {
     case SP_BUILTIN_PTR_ARRAY: return sp_PtrArray_get_box((sp_PtrArray *)a.v.p, i);
     default: return sp_box_nil();
   }
+}
+static sp_RbVal sp_poly_arr_get(sp_RbVal a, sp_int i) {
+  if (a.tag != SP_TAG_OBJ) return sp_box_nil();
+  /* The poly array is the common case -- a boxed pair being destructured, an
+     element read out of a container -- so answer it before the switch: the
+     cls_ids are negative and scattered, which the compiler turns into a chain
+     of compares rather than a jump table. */
+  if (a.cls_id == SP_BUILTIN_POLY_ARRAY) {
+    sp_PolyArray *ar = (sp_PolyArray *)a.v.p;
+    if (!ar) return sp_box_nil();
+    if (i < 0) i += ar->len;
+    if (i < 0 || i >= ar->len) return sp_box_nil();
+    return ar->data[i];
+  }
+  return sp_poly_arr_get_typed(a, i);
 }
 /* Coerce a poly value that holds an array (any builtin array kind) into an
    sp_PolyArray of boxed elements. A poly-array value is returned as-is; nil or a
