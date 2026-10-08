@@ -10958,6 +10958,17 @@ void emit_args_filled_argv(Compiler *c, int callee_idx, const int *argv, int arg
         ran_first_bind(argv[k], ht, ht);
         continue;
       }
+      /* an Integer / Float argument that can be nil is held with its nil
+         (emit_arg_temp's oint): the plain temp unwrapped it here, ahead of
+         the callee, with the wrong error */
+      if (!fresh && oint_kind(at) && node_has_oint_form(c, argv[k])) {
+        emit_oint_expr(c, argv[k], at, &hb);
+        emit_indent(g_pre, g_indent);
+        buf_printf(g_pre, "%s _t%d = %s;\n", oint_ctype(at), ht, hb.p ? hb.p : oint_nil(at));
+        free(hb.p);
+        view_bind_o(argv[k], "_t%d", ht);
+        continue;
+      }
       /* As in emit_arg_temp, a fresh handle's input is still plain text. */
       if (fresh) {
         int mark = view_push_repr(c, argv[k], VR_STRBUF_BOX, 0);
