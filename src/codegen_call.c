@@ -1760,7 +1760,9 @@ void emit_ffi_num_arg(Compiler *c, int arg, TyKind at, const char *spec, int dbl
     else ck = dbl ? "sp_ffi_dbl_of_i" : "sp_ffi_int_of_i";
   }
   buf_printf(b, "((%s)%s(", ffi_c_type(spec), ck);
-  emit_expr(c, arg, b);
+  /* the _of_i / _of_f checks take the value with its nil */
+  if ((at == TY_INT || at == TY_FLOAT) && *ck) emit_oint_expr(c, arg, at, b);
+  else emit_expr(c, arg, b);
   buf_puts(b, "))");
 }
 /* The C test that temp `v` of an Integer or a Float kind holds that kind's
