@@ -5356,12 +5356,15 @@ int emit_hash_call(Compiler *c, int id, Buf *b) {
           return emit_dig_splat(c, recv, argv[0], b);
         TyKind vt = ty_hash_val(rt);
         TyKind kt = ty_hash_key(rt);
-        /* Static key-type mismatch (string key on sym hash, etc.) -> nil. */
+        /* Static key-type mismatch (string key on sym hash, a String on an
+           Integer-keyed one, etc.) -> nil: a key of another class is never
+           eql? to any key the hash holds (1.0 is not 1 either) */
         TyKind arg0t = comp_ntype(c, argv[0]);
-        if ((kt == TY_SYMBOL && arg0t == TY_STRING) ||
-            (kt == TY_STRING && arg0t == TY_SYMBOL)) {
+        int ksc = kt == TY_INT || kt == TY_FLOAT || kt == TY_STRING || kt == TY_SYMBOL;
+        int asc = arg0t == TY_INT || arg0t == TY_FLOAT || arg0t == TY_STRING || arg0t == TY_SYMBOL;
+        if (ksc && asc && kt != arg0t) {
           buf_puts(b, "({ (void)("); emit_expr(c, recv, b); buf_puts(b, "); (void)("); emit_expr(c, argv[0], b);
-          if (vt == TY_INT) { buf_puts(b, "); "); oint_open(c, id, TY_INT, b); buf_puts(b, "sp_oint_nil()"); oint_close(c, id, b); buf_puts(b, "; })"); }
+          if (oint_kind(vt)) { buf_puts(b, "); "); oint_open(c, id, vt, b); buf_puts(b, oint_nil(vt)); oint_close(c, id, b); buf_puts(b, "; })"); }
           else if (vt == TY_STRING) buf_puts(b, "); NULL; })");
           else buf_puts(b, "); sp_box_nil(); })");
           return 1;
