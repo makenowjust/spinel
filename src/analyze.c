@@ -30809,7 +30809,16 @@ static void mark_nullable_int_locals(Compiler *c) {
           changed |= mark_nullable_params_of_call(c, id, imeth[k].mi);
       }
       else if (mi >= 0) changed |= mark_nullable_params_of_call(c, id, mi);
-      else if (recv >= 0 && cn && is_call_alias(cn)) {
+      /* a class value, boxed or not (`[Q, R].each { |o| o.cm(k: nil) }`),
+         binds the class method of the name any class has */
+      else if (recv >= 0 && cn && nt_ref(nt, id, "arguments") >= 0 &&
+               (infer_type(c, recv) == TY_CLASS || infer_type(c, recv) == TY_POLY)) {
+        for (int k = 0; k < c->nclasses; k++) {
+          int cmi = comp_cmethod_in_class(c, k, cn);   /* an inherited one is its definer's */
+          if (cmi >= 0) changed |= mark_nullable_params_of_call(c, id, cmi);
+        }
+      }
+      if (recv >= 0 && cn && is_call_alias(cn) && mi < 0) {
         TyKind rt = infer_type(c, recv);
         int *mns = NULL;
         int nmn = rt == TY_METHOD ? method_recv_nodes(c, recv, &mns)
@@ -30821,6 +30830,16 @@ static void mark_nullable_int_locals(Compiler *c) {
         }
         free(mns);
       }
+    }
+    /* ... and a `super` with arguments binds the method it reaches */
+    NT_FOREACH_KIND(nt, NK_SuperNode, id) {
+      Scope *ss = comp_scope_of(c, id);
+      if (!ss || ss->class_id < 0 || !ss->name || comp_super_is_class_new(c, id)) continue;
+      int sp = comp_super_parent(c, ss->class_id, ss->is_cmethod);
+      const char *sn = sp >= 0 ? comp_super_name(c, sp, ss->name, ss->is_cmethod) : NULL;
+      if (!sn) continue;
+      int smi = ss->is_cmethod ? comp_cmethod_in_chain(c, sp, sn, NULL) : comp_method_in_chain(c, sp, sn, NULL);
+      if (smi >= 0) changed |= mark_nullable_params_of_call(c, id, smi);
     }
     /* A BLOCK parameter bound from such a value: the sites that bind the
        block -- each yield of the method the call reaches, or an

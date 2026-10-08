@@ -24182,7 +24182,8 @@ void emit_bound_method_call(Compiler *c, int id, int recv, int target, Buf *b) {
     if (np++) buf_puts(&cast, ", ");
     LocalVar *pp = tm->pnames[k] ? scope_local(tm, tm->pnames[k]) : NULL;
     if (pp && pp->byref_out) buf_printf(&cast, "%s *", borrowed_string_type(pp));
-    else emit_ctype(c, pp ? pp->type : TY_POLY, &cast);
+    else if (pp) emit_slot_ctype(c, pp, &cast);   /* a param holding its nil is an oint */
+    else emit_ctype(c, TY_POLY, &cast);
   }
   if (tm->blk_param && tm->blk_param[0] && !tm->yields) buf_puts(&cast, np++ ? ", sp_Proc *" : "sp_Proc *");
   if (!np) buf_puts(&cast, "void");
