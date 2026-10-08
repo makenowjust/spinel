@@ -13213,10 +13213,16 @@ static int infer_block_params_container_arms(Compiler *c, const NodeTable *nt, i
     if (bp_widen(afs, p0, TY_INT)) changed = 1;
     return changed | 2;
   }
-  /* hash.fetch(key) { |k| } binds the looked-up key */
+  /* hash.fetch(key) { |k| } binds the looked-up key -- the key as it was
+     given: a boxed one (nil, or another class than the table's keys, which
+     misses) is handed over boxed */
   if (sp_streq(name, "fetch") && ty_is_hash(rt)) {
     Scope *fs = comp_scope_of(c, block);
-    if (bp_widen(fs, p0, ty_hash_key(rt))) changed = 1;
+    int fa = nt_ref(c->nt, id, "arguments"), fn = 0;
+    const int *fav = fa >= 0 ? nt_arr(c->nt, fa, "arguments", &fn) : NULL;
+    TyKind want = ty_hash_key(rt);
+    if (fn >= 1 && want != TY_POLY && infer_type(c, fav[0]) == TY_POLY) want = TY_POLY;
+    if (bp_widen(fs, p0, want)) changed = 1;
     return changed | 2;
   }
 

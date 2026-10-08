@@ -4008,17 +4008,34 @@ void emit_hash_okey(Compiler *c, int key, Buf *b) {
   buf_puts(b, "({ (void)("); emit_expr(c, key, b); buf_puts(b, "); sp_oint_nil(); })");
 }
 
+/* ... and a key that may not be an Integer at run time -- a boxed one, or
+   an Integer that can be nil -- takes the same entry points with a key
+   that is nil where it matches no entry: a boxed key of another class, a
+   nil key (CRuby looks nil up and misses; it is no TypeError) */
+int hash_okey_form(Compiler *c, int key, TyKind kt) {
+  if (kt != TY_INT) return 0;
+  if (hash_key_misses(c, key, kt)) return 1;
+  TyKind at = comp_ntype(c, key);
+  if (repr_of(c, key).kind == RK_BOXED) return 1;
+  return at == TY_INT && node_is_oint(c, key);
+}
 /* a lookup site's three parts for such a key: the key temp's C type, the
    op's name suffix, and the key itself */
 const char *hash_key_ctype(Compiler *c, int key, TyKind kt) {
-  return hash_okey_miss(c, key, kt) ? "sp_oint" : c_type_name(kt);
+  return hash_okey_form(c, key, kt) ? "sp_oint" : c_type_name(kt);
 }
 const char *hash_okey_sfx(Compiler *c, int key, TyKind kt) {
-  return hash_okey_miss(c, key, kt) ? "_okey" : "";
+  return hash_okey_form(c, key, kt) ? "_okey" : "";
 }
 void emit_hash_key_o(Compiler *c, int key, TyKind kt, Buf *b) {
-  if (hash_okey_miss(c, key, kt)) emit_hash_okey(c, key, b);
-  else emit_hash_key(c, key, kt, b);
+  if (!hash_okey_form(c, key, kt)) { emit_hash_key(c, key, kt, b); return; }
+  if (hash_key_misses(c, key, kt)) { emit_hash_okey(c, key, b); return; }
+  if (repr_of(c, key).kind == RK_BOXED) {
+    buf_puts(b, "({ sp_RbVal _hk = "); emit_boxed(c, key, b);
+    buf_puts(b, "; _hk.tag == SP_TAG_INT ? sp_oint_of(_hk.v.i) : sp_oint_nil(); })");
+    return;
+  }
+  emit_oint_expr(c, key, TY_INT, b);
 }
 
 void emit_hash_key(Compiler *c, int key, TyKind kt, Buf *b) {

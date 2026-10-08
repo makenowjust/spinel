@@ -787,6 +787,7 @@ int rest_shortfall_required(Compiler *c, Scope *m);
 void emit_hash_key(Compiler *c, int key, TyKind kt, Buf *b);
 int hash_key_misses(Compiler *c, int key, TyKind kt);
 int hash_okey_miss(Compiler *c, int key, TyKind kt);
+int hash_okey_form(Compiler *c, int key, TyKind kt);
 void emit_hash_okey(Compiler *c, int key, Buf *b);
 const char *hash_key_ctype(Compiler *c, int key, TyKind kt);
 const char *hash_okey_sfx(Compiler *c, int key, TyKind kt);

@@ -867,7 +867,7 @@ int emit_op_hash_assoc(Compiler *c, const BopCtx *x, Buf *b) {
          reaches here as the NULL miss sentinel emit_hash_key answers */
       buf_printf(b, " if (sp_str_eq(_t%d->order[_t%d], _t%d)) {", th, ti, ta);
     /* a key no entry matches (hash_okey_miss) is a nil sp_oint */
-    else if (!is_rassoc && hash_okey_miss(c, argv[0], kt))
+    else if (!is_rassoc && hash_okey_form(c, argv[0], kt))
       buf_printf(b, " if (!_t%d.nil && _t%d->order[_t%d] == _t%d.v) {", ta, th, ti, ta);
     else
       buf_printf(b, " if (_t%d->order[_t%d] == _t%d) {", th, ti, ta);

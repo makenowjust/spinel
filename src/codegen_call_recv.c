@@ -768,6 +768,57 @@ static void emit_fetch_blk_param(Compiler *c, int id, int blk, TyKind kt, int tk
   else buf_printf(b, "lv_%s = _t%d; ", rename_local(fp0), tk);
 }
 
+/* One key of `slice` on an Integer-keyed table that the _okey lookup takes
+   (hash_okey_form): a key no entry matches slices nothing (evaluated for
+   its effects); a boxed key, or an Integer that can be nil, is copied only
+   when it is an Integer the table holds. 0 for any other key. */
+static int emit_slice_okey_key(Compiler *c, int key, TyKind kt, const char *hn, int th, int tr, int tk, Buf *b) {
+  if (!hash_okey_form(c, key, kt)) return 0;
+  if (hash_okey_miss(c, key, kt)) { buf_puts(b, " (void)("); emit_expr(c, key, b); buf_puts(b, ");"); return 1; }
+  buf_printf(b, " { sp_oint _t%d = ", tk); emit_hash_key_o(c, key, kt, b);
+  buf_printf(b, "; if (sp_%sHash_has_key_okey(_t%d, _t%d)) sp_%sHash_set(_t%d, _t%d.v, sp_%sHash_get_okey(_t%d, _t%d)); }",
+             hn, th, tk, hn, tr, tk, hn, th, tk);
+  return 1;
+}
+
+/* fetch's key on an Integer-keyed table, as the _okey lookup takes it
+   (hash_okey_form): a boxed key, or an Integer that can be nil, becomes an
+   sp_oint `_t<tk>` that is nil where it matches no entry. A boxed key is
+   also held as it was given, in the temp answered (else -1), for the block's
+   parameter. Any other key is the table's own kind. */
+static int emit_fetch_blk_key(Compiler *c, int key, TyKind kt, int tk, Buf *b) {
+  if (!hash_okey_form(c, key, kt)) {
+    buf_printf(b, "; %s _t%d = ", c_type_name(kt), tk); emit_hash_key(c, key, kt, b);
+    return -1;
+  }
+  if (repr_of(c, key).kind != RK_BOXED) {
+    buf_printf(b, "; sp_oint _t%d = ", tk); emit_hash_key_o(c, key, kt, b);
+    return -1;
+  }
+  int tb = ++g_tmp;
+  buf_printf(b, "; sp_RbVal _t%d = ", tb); emit_boxed(c, key, b);
+  buf_printf(b, "; sp_oint _t%d = _t%d.tag == SP_TAG_INT ? sp_oint_of(_t%d.v.i) : sp_oint_nil()", tk, tb, tb);
+  return tb;
+}
+/* ... and the block's parameter, handed that key: the boxed key as given
+   (tb), else the Integer-or-nil key, each in the parameter's form */
+static void emit_fetch_blk_okey_param(Compiler *c, int blk, int tb, int tk, Buf *b) {
+  const char *fp0 = block_param_name(c, blk, 0);
+  if (!fp0) return;
+  Scope *fbs = comp_scope_of(c, blk);
+  LocalVar *flv = fbs ? scope_local(fbs, fp0) : NULL;
+  int poly = flv && flv->type == TY_POLY, o = flv && slot_is_oint(flv);
+  buf_printf(b, "lv_%s = ", rename_local(fp0));
+  if (tb >= 0) {
+    if (poly) buf_printf(b, "_t%d; ", tb);
+    else if (o) buf_printf(b, "%s(_t%d); ", oint_unbox(TY_INT), tb);
+    else buf_printf(b, "sp_poly_hkey_i(_t%d); ", tb);
+  }
+  else if (poly) buf_printf(b, "sp_box_oint(_t%d); ", tk);
+  else if (o) buf_printf(b, "_t%d; ", tk);
+  else buf_printf(b, "sp_oint_arg(_t%d); ", tk);
+}
+
 /* Bind a merge block's parameter `pn` (of block `blk`) to `text`, a value of
    type `vt`: boxed on the way in when the parameter's slot is boxed, as it
    is in a block handed through a method's `&blk` (emit_fetch_blk_param's
@@ -5580,7 +5631,9 @@ int emit_hash_call(Compiler *c, int id, Buf *b) {
           int th = ++g_tmp, tk = ++g_tmp;
           buf_printf(b, "({ %s _t%d = ", c_type_name(rt), th); emit_expr(c, recv, b);
           buf_printf(b, "; SP_GC_ROOT(_t%d)", th);   /* rooted across the key, as the array arms are */
-          buf_printf(b, "; %s _t%d = ", c_type_name(ty_hash_key(rt)), tk); emit_hash_key(c, argv[0], ty_hash_key(rt), b);
+          int okf = hash_okey_form(c, argv[0], ty_hash_key(rt));
+          const char *ks = okf ? "_okey" : "";
+          int tb = emit_fetch_blk_key(c, argv[0], ty_hash_key(rt), tk, b);
           int bbody = nt_ref(nt, blk, "body");
           int bn = 0; const int *bb = bbody >= 0 ? nt_arr(nt, bbody, "body", &bn) : NULL;
           int bval = bn > 0 ? bb[bn - 1] : -1;
@@ -5589,17 +5642,18 @@ int emit_hash_call(Compiler *c, int id, Buf *b) {
              box both arms so the ternary produces a consistent sp_RbVal. */
           int mismatch = vt != TY_POLY && bvt != vt;
           if (mismatch) {
-            buf_printf(b, "; sp_%sHash_has_key(_t%d, _t%d) ? ", hn, th, tk);
-            char getexpr[128]; snprintf(getexpr, sizeof getexpr, "sp_%sHash_get(_t%d, _t%d)", hn, th, tk);
+            buf_printf(b, "; sp_%sHash_has_key%s(_t%d, _t%d) ? ", hn, ks, th, tk);
+            char getexpr[128]; snprintf(getexpr, sizeof getexpr, "sp_%sHash_get%s(_t%d, _t%d)", hn, ks, th, tk);
             emit_boxed_text(c, vt, getexpr, b);
             buf_puts(b, " : ");
           }
 else {
-            buf_printf(b, "; sp_%sHash_has_key(_t%d, _t%d) ? sp_%sHash_get(_t%d, _t%d) : ",
-                       hn, th, tk, hn, th, tk);
+            buf_printf(b, "; sp_%sHash_has_key%s(_t%d, _t%d) ? sp_%sHash_get%s(_t%d, _t%d) : ",
+                       hn, ks, th, tk, hn, ks, th, tk);
           }
           Buf fbind; memset(&fbind, 0, sizeof fbind);
-          emit_fetch_blk_param(c, id, blk, ty_hash_key(rt), tk, &fbind);  /* fetch yields the key */
+          if (okf) emit_fetch_blk_okey_param(c, blk, tb, tk, &fbind);
+          else emit_fetch_blk_param(c, id, blk, ty_hash_key(rt), tk, &fbind);  /* fetch yields the key */
           {
             /* a valued `next` in the block answers through a destination
                temporary, after the key is bound */
@@ -6190,12 +6244,7 @@ else {
             continue;
           }
           int tk = ++g_tmp;
-          /* a key no entry matches (hash_okey_miss) slices nothing: the key
-             is evaluated for its effects */
-          if (rt != TY_POLY_POLY_HASH && hash_okey_miss(c, argv[i], skt)) {
-            buf_puts(b, " (void)("); emit_expr(c, argv[i], b); buf_puts(b, ");");
-            continue;
-          }
+          if (rt != TY_POLY_POLY_HASH && emit_slice_okey_key(c, argv[i], skt, hn, th, tr, tk, b)) continue;
           if (rt == TY_POLY_POLY_HASH) {
             buf_printf(b, " { sp_RbVal _t%d = ", tk); emit_boxed(c, argv[i], b);
           }
