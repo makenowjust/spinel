@@ -1355,20 +1355,21 @@ static int emit_poly_array_call(Compiler *c, int id, Buf *b, const NodeTable *nt
                   " (long long)_t%d, (long long)_n%d)); }",
                tp, tp, tp, ti, tp, tp, tp, ti, tp);
     buf_printf(b, " sp_%sHash_set(_t%d, ", hn, th);
-    /* an Integer key or an Integer or Float value reads a boxed nil as
-       the slot's nil, as every Integer and Float unbox does */
+    /* an Integer key or an Integer or Float value is read with the typed
+       hash's own check: a typed key or value has no nil (a hash that
+       stores one is widened), so another kind -- nil too -- raises */
     char kexpr[128];
     if (kty == TY_SYMBOL)      snprintf(kexpr, sizeof kexpr, "(sp_sym)sp_poly_arr_get(_t%d, 0).v.i", tp);
     else if (kty == TY_STRING) snprintf(kexpr, sizeof kexpr, "sp_poly_arr_get(_t%d, 0).v.s", tp);
     else if (kty == TY_POLY)   snprintf(kexpr, sizeof kexpr, "sp_poly_arr_get(_t%d, 0)", tp);
-    else if (kty == TY_INT)    snprintf(kexpr, sizeof kexpr, "sp_poly_as_int_or_nil(sp_poly_arr_get(_t%d, 0))", tp);
+    else if (kty == TY_INT)    snprintf(kexpr, sizeof kexpr, "sp_poly_hkey_i(sp_poly_arr_get(_t%d, 0))", tp);
     else                       snprintf(kexpr, sizeof kexpr, "sp_poly_arr_get(_t%d, 0).v.i", tp);
     buf_puts(b, kexpr); buf_puts(b, ", ");
     /* value extraction */
     if (vty == TY_POLY)        buf_printf(b, "sp_poly_arr_get(_t%d, 1)", tp);
-    else if (vty == TY_INT)    buf_printf(b, "sp_poly_as_int_or_nil(sp_poly_arr_get(_t%d, 1))", tp);
+    else if (vty == TY_INT)    buf_printf(b, "sp_poly_hval_i(sp_poly_arr_get(_t%d, 1))", tp);
     else if (vty == TY_STRING) buf_printf(b, "sp_poly_arr_get(_t%d, 1).v.s", tp);
-    else if (vty == TY_FLOAT)  buf_printf(b, "sp_poly_as_float_or_nil(sp_poly_arr_get(_t%d, 1))", tp);
+    else if (vty == TY_FLOAT)  buf_printf(b, "sp_poly_hval_f(sp_poly_arr_get(_t%d, 1))", tp);
     else                       buf_printf(b, "sp_poly_arr_get(_t%d, 1)", tp);
     buf_printf(b, "); } _t%d; })", th);
     { *out = 1; return 1; }
@@ -8151,7 +8152,24 @@ static int emit_scalar_recv_arms(Compiler *c, int id, Buf *b, const NodeTable *n
      nil arm is the point. */
   Buf gbody; memset(&gbody, 0, sizeof gbody);
   Buf *g_outer_b = NULL; int g_tmpid = 0; char g_rname[24];
-  if ((rt == TY_INT || rt == TY_STRING) && name && recv >= 0 && !nil_answers_name(name) &&
+  /* A String receiver that is a fresh copy (a shared slot's reader) and is
+     never nil still needs the bound, rooted temp when an argument may
+     allocate: the guard below is the only path that holds it (g_noguard:
+     the hold without the nil test) */
+  int g_noguard = 0;
+  if (rt == TY_STRING && name && recv >= 0 && operand_may_allocate(c, recv) &&
+      !((!nil_answers_name(name)) && recv_may_be_sentinel(c, recv))) {
+    for (int ai = 0; ai < argc && !g_noguard; ai++) g_noguard = operand_may_allocate(c, argv[ai]);
+    const char *sop_n = nt_str(nt, id, "call_operator");
+    if (sop_n && sp_streq(sop_n, "&.")) g_noguard = 0;
+    if (g_noguard) {
+      g_tmpid = ++g_tmp;
+      snprintf(g_rname, sizeof g_rname, "_t%d", g_tmpid);
+      g_outer_b = b; b = &gbody; r = g_rname;
+      if (g_conv_hold) g_conv_hold->guarded = 1;
+    }
+  }
+  if (!g_noguard && (rt == TY_INT || rt == TY_STRING) && name && recv >= 0 && !nil_answers_name(name) &&
       recv_may_be_sentinel(c, recv)) {
     const char *sop_g = nt_str(nt, id, "call_operator");
     if (!(sop_g && sp_streq(sop_g, "&."))) {
@@ -8183,6 +8201,11 @@ static int emit_scalar_recv_arms(Compiler *c, int id, Buf *b, const NodeTable *n
     /* the arms that read only the receiver text and the arguments:
        builtin-op rows (builtin_ops.c) */
     else if (emit_builtin_op_text(c, id, recv, TY_STRING, name, r, b)) ;
+    /* a length is never nil: lifted where the call's slot holds its nil (a
+       site of a call whose other receivers can answer nil) */
+    else if (is_len_alias(name) && argc == 0 && node_is_oint(c, id)) {
+      buf_puts(b, "sp_oint_of("); str_arms_case_search(c, b, nt, name, recv, argc, argv, r); buf_puts(b, ")");
+    }
     else if (str_arms_case_search(c, b, nt, name, recv, argc, argv, r)) ;
     else if (str_arms_slice_encode(c, id, b, name, recv, argc, argv, r)) ;
     else if (sp_streq(name, "delete") && argc == 0) { buf_printf(b, "(%s)", r); { *out = 1; return 1; } }
@@ -8627,7 +8650,7 @@ static int emit_scalar_recv_arms(Compiler *c, int id, Buf *b, const NodeTable *n
       if (rt == TY_STRING) {
         buf_printf(b, "({ const char *_t%d = (%s); ", g_tmpid, rs.p ? rs.p : "");
         if (g_root) buf_printf(b, "SP_GC_ROOT(_t%d); ", g_tmpid);
-        buf_printf(b, "if (!_t%d) sp_raise_nomethod(sp_nomethod_msg(\"%s\", sp_box_nil())); ", g_tmpid, name);
+        if (!g_noguard) buf_printf(b, "if (!_t%d) sp_raise_nomethod(sp_nomethod_msg(\"%s\", sp_box_nil())); ", g_tmpid, name);
       }
       else {
         buf_printf(b, "({ sp_int _t%d = sp_oint_val(", g_tmpid);

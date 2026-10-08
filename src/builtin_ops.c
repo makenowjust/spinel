@@ -1179,7 +1179,7 @@ static const BuiltinOp bop_rows[] = {
   { TY_IO, "lineno",         0, 127, BF_ANY, TY_INT,      BOPE_NONE },
   { TY_IO, "lineno=",        1,   1, BF_ANY, TY_INT,      BOPE_TEMPLATE, "sp_File_set_lineno($r, $i0)", TY_UNKNOWN },
   { TY_IO, "lineno=",        0, 127, BF_ANY, TY_INT,      BOPE_NONE },
-  { TY_IO, "pos=",           1,   1, BF_ANY, TY_INT,      BOPE_TEMPLATE, "({ sp_int _t$t = $o0; sp_File_seek($r, _t$t, 0); _t$t; })", TY_UNKNOWN },
+  { TY_IO, "pos=",           1,   1, BF_ANY, TY_INT,      BOPE_TEMPLATE, "$[({ sp_int _t$t = $o0; sp_File_seek($r, _t$t, 0); _t$t; })$]", TY_UNKNOWN },
   { TY_IO, "pos=",           0, 127, BF_ANY, TY_INT,      BOPE_NONE },
   { TY_IO, "truncate",       1,   1, BF_ANY, TY_INT,      BOPE_TEMPLATE, "sp_File_truncate($r, $o0)", TY_UNKNOWN },
   { TY_IO, "truncate",       0, 127, BF_ANY, TY_INT,      BOPE_NONE },

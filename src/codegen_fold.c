@@ -2578,7 +2578,7 @@ int emit_chunk_while_expr(Compiler *c, int id, Buf *b) {
    is written only where it has a C declaration (`_2` beside `_1` and `_3`
    has none) and is not the first's own name (`|_, _|`). */
 static void emit_chunk_elem_bind(Compiler *c, int ta, int ti, const char *p0,
-                                 const char *p1, int p1_declared, TyKind at0, int pin_poly) {
+                                 const char *p1, int p1_declared, TyKind at0, TyKind at1, int pin_poly) {
   char gv[48]; snprintf(gv, sizeof gv, "sp_PolyArray_get(_t%d, _t%d)", ta, ti);
   if (pin_poly && p1) {
     int te = ++g_tmp;
@@ -2586,10 +2586,18 @@ static void emit_chunk_elem_bind(Compiler *c, int ta, int ti, const char *p0,
     emit_indent(g_pre, g_indent + 1);
     buf_printf(g_pre, "int _fs%d = (_t%d.tag == SP_TAG_OBJ && sp_poly_is_array_kind(_t%d.cls_id));\n", te, te, te);
     emit_indent(g_pre, g_indent + 1);
-    buf_printf(g_pre, "lv_%s = _fs%d ? sp_poly_index_poly(_t%d, sp_box_int(0)) : _t%d;\n", p0, te, te, te);
+    /* a param the pass typed (not pinned) takes the value unboxed */
+    char v0[160], v1[160];
+    snprintf(v0, sizeof v0, "(_fs%d ? sp_poly_index_poly(_t%d, sp_box_int(0)) : _t%d)", te, te, te);
+    snprintf(v1, sizeof v1, "(_fs%d ? sp_poly_index_poly(_t%d, sp_box_int(1)) : sp_box_nil())", te, te);
+    buf_printf(g_pre, "lv_%s = ", p0);
+    if (at0 == TY_POLY) buf_puts(g_pre, v0); else emit_unbox_text(c, at0, v0, g_pre);
+    buf_puts(g_pre, ";\n");
     if (p1_declared && !sp_streq(p0, p1)) {
       emit_indent(g_pre, g_indent + 1);
-      buf_printf(g_pre, "lv_%s = _fs%d ? sp_poly_index_poly(_t%d, sp_box_int(1)) : sp_box_nil();\n", p1, te, te);
+      buf_printf(g_pre, "lv_%s = ", p1);
+      if (at1 == TY_POLY) buf_puts(g_pre, v1); else emit_unbox_text(c, at1, v1, g_pre);
+      buf_puts(g_pre, ";\n");
     }
     return;
   }
@@ -2656,10 +2664,15 @@ static int emit_chunk_family_runs(Compiler *c, int ck) {
      int/str receiver keeps the pass-assigned param types -- the snapshot's
      boxed elements unbox into them below. */
   int pin_poly = prr.elem == TY_POLY || prr.kind == RK_BOXED;
-  if (pin_poly && lva) lva->type = TY_POLY;
-  if (pin_poly && lvb) lvb->type = TY_POLY;
-  TyKind at0 = (!pin_poly && lva && lva->type != TY_UNKNOWN) ? lva->type : TY_POLY;
-  TyKind at1 = (!pin_poly && lvb && lvb->type != TY_UNKNOWN) ? lvb->type : TY_POLY;
+  /* ...only a param whose slot is boxed or untyped already: one the pass
+     typed was declared with that type at the function's top, so it keeps
+     it and the boxed element is unboxed into it, as for a typed receiver */
+  int pin_a = pin_poly && lva && (lva->type == TY_POLY || lva->type == TY_UNKNOWN);
+  int pin_b = pin_poly && lvb && (lvb->type == TY_POLY || lvb->type == TY_UNKNOWN);
+  if (pin_a) lva->type = TY_POLY;
+  if (pin_b) lvb->type = TY_POLY;
+  TyKind at0 = (lva && lva->type != TY_UNKNOWN) ? lva->type : TY_POLY;
+  TyKind at1 = (lvb && lvb->type != TY_UNKNOWN) ? lvb->type : TY_POLY;
 
   int ta = ++g_tmp, tout = ++g_tmp, tcur = ++g_tmp, ti = ++g_tmp;
   Buf rb; memset(&rb, 0, sizeof rb);
@@ -2696,7 +2709,7 @@ static int emit_chunk_family_runs(Compiler *c, int ck) {
   if (is_ck) {
     int tk = ++g_tmp;
     emit_indent(g_pre, g_indent + 1);
-    emit_chunk_elem_bind(c, ta, ti, p0, p1, ptb != TY_UNKNOWN, at0, pin_poly);
+    emit_chunk_elem_bind(c, ta, ti, p0, p1, ptb != TY_UNKNOWN, at0, at1, pin_poly);
     Buf kb; memset(&kb, 0, sizeof kb);
     /* a `next <key>` answers the key through a slot the body writes */
     if (fold_body_has_next(c, body)) {
@@ -2735,7 +2748,7 @@ static int emit_chunk_family_runs(Compiler *c, int ck) {
        after a true element */
     int tc = ++g_tmp;
     emit_indent(g_pre, g_indent + 1);
-    emit_chunk_elem_bind(c, ta, ti, p0, p1, ptb != TY_UNKNOWN, at0, pin_poly);
+    emit_chunk_elem_bind(c, ta, ti, p0, p1, ptb != TY_UNKNOWN, at0, at1, pin_poly);
     Buf cb; memset(&cb, 0, sizeof cb);
     if (!emit_block_cond_next(c, block, g_indent + 1, &cb)) {
       for (int j = 0; j < bn - 1; j++) emit_stmt(c, bb[j], g_pre, g_indent + 1);
@@ -3612,6 +3625,9 @@ int emit_reduce_block_expr(Compiler *c, int id, Buf *b) {
     else
       buf_printf(b, "(sp_%sArray_length(_t%d) > 0 ? _t%d : %s(%s)); })", k, ta, tacc, oint_arg(acc_ty), oint_nil(acc_ty));
   }
+  /* a seeded Integer or Float fold never answers nil: lifted where the
+     call's slot holds its nil (a block value that is a Proc call's) */
+  else if (oint_kind(acc_ty) && node_is_oint(c, id)) buf_printf(b, "%s(_t%d); })", oint_of(acc_ty), tacc);
   else buf_printf(b, "_t%d; })", tacc);
   if (rlv0) rlv0->type = rpt0;
   if (rlv1) rlv1->type = rpt1;
@@ -4382,10 +4398,15 @@ int emit_sortby_expr(Compiler *c, int id, Buf *b) {
   IterStep st; emit_iter_step_open(c, block, 0, g_indent + 1, &st);
   int save = g_indent; g_indent += 1;
   Buf kb; memset(&kb, 0, sizeof kb);
-  if (emit_iter_step_tail(c, &st, &kb) == TY_POLY) kt = TY_POLY;
+  /* an Integer or Float key that can be nil is boxed with its nil: the
+     comparison then raises CRuby's ArgumentError for it */
+  TyKind kot = iter_step_tail_ty(c, &st);
+  int ko = oint_kind(kot) && emit_iter_step_tail_o(c, &st, kot, &kb);
+  if (!ko && emit_iter_step_tail(c, &st, &kb) == TY_POLY) kt = TY_POLY;
   g_indent = save;
   emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "sp_PolyArray_push(_t%d, ", tkeys);
-  if (kt == TY_POLY) buf_puts(g_pre, kb.p ? kb.p : "sp_box_nil()");
+  if (ko) buf_printf(g_pre, "%s(%s)", oint_box(kot), kb.p ? kb.p : oint_nil(kot));
+  else if (kt == TY_POLY) buf_puts(g_pre, kb.p ? kb.p : "sp_box_nil()");
   else { Buf bx; memset(&bx, 0, sizeof bx); emit_boxed_text(c, kt, kb.p ? kb.p : "0", &bx); buf_puts(g_pre, bx.p ? bx.p : ""); free(bx.p); }
   buf_puts(g_pre, ");\n"); free(kb.p);
   emit_indent(g_pre, g_indent + 1); buf_printf(g_pre, "sp_IntArray_push(_t%d, _t%d);\n", tidx, ti);

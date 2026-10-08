@@ -449,7 +449,10 @@ int emit_call_poly_io_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
           else if (theld[ai])
             buf_printf(b, "sp_int _t%d = sp_poly_arg_int_chk(_t%d); ", targ[ai], theld[ai]);
         if (sp_streq(name, "pos=")) {
-          buf_printf(b, "sp_File_seek(_t%d, _t%d, 0); _t%d; })", tio2, targ[0], targ[0]);
+          /* the assigned offset, never nil: lifted where an oint is wanted */
+          int po = node_is_oint(c, id);
+          buf_printf(b, "sp_File_seek(_t%d, _t%d, 0); %s_t%d%s; })", tio2, targ[0],
+                     po ? "sp_oint_of(" : "", targ[0], po ? ")" : "");
         }
         else if (sp_streq(name, "flock")) {
           buf_printf(b, "sp_File_flock(_t%d, _t%d); })", tio2, targ[0]);

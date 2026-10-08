@@ -102,6 +102,14 @@ static int emit_op_template(Compiler *c, const BopCtx *x, Buf *b) {
   char *r = NULL, *o = NULL;
   int argc;
   const int *argv = call_args(c->nt, x->id, &argc);
+  /* a row that answers a plain Integer or Float, never nil, where the
+     call's slot holds its nil (a site of a call another receiver of which
+     can answer nil): the whole text lifted. A row that speaks the oint
+     itself ($[ $< $O $N, an oint helper) is left as it is. */
+  int tlift = (x->op->result == TY_INT || x->op->result == TY_FLOAT) && node_is_oint(c, x->id) &&
+              !strstr(tmpl, "$[") && !strstr(tmpl, "$<") && !strstr(tmpl, "$O") && !strstr(tmpl, "$N") &&
+              !strstr(tmpl, "oint") && !strstr(tmpl, "ofloat") && !strstr(tmpl, "_o(") && !strstr(tmpl, "_opt");
+  if (tlift) buf_printf(b, "%s(", oint_of(x->op->result));
   for (const char *p = tmpl; *p; p++) {
     const char *tk = p[0] == '$' && p[1] ? strchr(tnames, p[1]) : NULL;
     if (p[0] == '$' && p[1] == 'r') {
@@ -211,6 +219,7 @@ static int emit_op_template(Compiler *c, const BopCtx *x, Buf *b) {
     else { char ch[2] = { *p, 0 }; buf_puts(b, ch); }
   }
   free(r); free(o);
+  if (tlift) buf_puts(b, ")");
   if (held) buf_puts(b, "; })");
   free(hb.p);
   return 1;

@@ -130,6 +130,16 @@ int emit_op_condvar_wait(Compiler *c, const BopCtx *x, Buf *b) {
                       ": sp_CondVar_wait_timeout(_t%d, _m%d, sp_poly_to_f_with_rational(_timeout%d)); })",
                    timeout, t, m, t, m, timeout);
       }
+      /* an Integer or Float timeout that can be nil: nil waits with no
+         timeout, as a boxed nil does */
+      else if (oint_kind(comp_ntype(c, to_arg)) && node_has_oint_form(c, to_arg)) {
+        int timeout = ++g_tmp;
+        TyKind tk = comp_ntype(c, to_arg);
+        buf_printf(b, "; %s _timeout%d = ", oint_ctype(tk), timeout); emit_oint_expr(c, to_arg, tk, b);
+        buf_printf(b, "; _timeout%d.nil ? sp_CondVar_wait(_t%d, _m%d) "
+                      ": sp_CondVar_wait_timeout(_t%d, _m%d, (double)_timeout%d.v); })",
+                   timeout, t, m, t, m, timeout);
+      }
       else {
         int timeout = ++g_tmp;
         buf_printf(b, "; double _timeout%d = ", timeout); emit_float_expr(c, to_arg, b);
