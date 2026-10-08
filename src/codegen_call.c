@@ -1106,7 +1106,7 @@ void unhoist_dispatch_args(Compiler *c, int n, int *sv, int *vw);
 /* The builtin's own emission of typed IO call `id` on the handle in _r<tv>,
    with the reopenings out of sight, or NULL when it does not fit the call's
    slot or does not emit. */
-static char *emit_io_builtin_call(Compiler *c, int id, int recv, int tv) {
+static char *emit_io_builtin_call(Compiler *c, int id, int recv, int tv, int want_o) {
   if (g_n_argov + 1 > MAX_ARG_OVERRIDE) return NULL;
   /* this may run inside another call's re-emission (an argument's call) */
   int sv_skip = g_io_skip_reopen, sv_skip_node = g_io_skip_node;
@@ -1126,7 +1126,7 @@ static char *emit_io_builtin_call(Compiler *c, int id, int recv, int tv) {
   volatile int ok = 1;
   EmitUnitState *sv_state = emit_state_snapshot();
   g_pre = pb; g_unsup_probe = 1;
-  if (setjmp(g_unsup_recover) == 0) emit_expr(c, id, nb);
+  if (setjmp(g_unsup_recover) == 0) { if (want_o) emit_oint_expr(c, id, ct, nb); else emit_expr(c, id, nb); }
   else ok = 0;
   emit_state_release(sv_state, !ok);
   memcpy(g_unsup_recover, sv_jb, sizeof(jmp_buf));
@@ -1181,6 +1181,10 @@ void emit_io_reopen_call(Compiler *c, int id, int recv, const char *name, Buf *b
     return;
   }
   int boxed = repr_of(c, id).kind == RK_BOXED;
+  /* a call that can answer nil (the builtin's getbyte) is read with its
+     nil: each arm answers its oint */
+  TyKind ot = repr_of(c, id).as_ty;
+  int want_o = !boxed && oint_kind(ot) && node_is_oint(c, id);
   /* the receiver first, then the arguments, each evaluated once: every
      arm, and the builtin's, reads them from temps */
   int trv = ++g_tmp;
@@ -1214,6 +1218,8 @@ void emit_io_reopen_call(Compiler *c, int id, int recv, const char *name, Buf *b
       buf_puts(&vb, "), ");
     }
     if (boxed) emit_boxed_text(c, c->scopes[kmi].ret, cb.p, &vb);
+    else if (want_o && !method_ret_is_oint(&c->scopes[kmi])) buf_printf(&vb, "%s(%s)", oint_of(ot), cb.p);
+    else if (!want_o && oint_kind(ot) && method_ret_is_oint(&c->scopes[kmi])) buf_printf(&vb, "%s(%s)", oint_arg(ot), cb.p);
     else buf_puts(&vb, cb.p);
     if (vis != SP_VIS_PUBLIC) buf_puts(&vb, ")");
     free(cb.p);
@@ -1223,7 +1229,7 @@ void emit_io_reopen_call(Compiler *c, int id, int recv, const char *name, Buf *b
          serves runs the builtin -- the call emitted again with the
          reopenings out of sight and the handle in the temp -- where its
          answer fits the call's slot; otherwise the reopening, as before */
-      char *bi = emit_io_builtin_call(c, id, recv, tv);
+      char *bi = emit_io_builtin_call(c, id, recv, tv, want_o);
       buf_printf(b, "_k%d == %d ? %s : %s", tv, ks[i], vb.p, bi ? bi : vb.p);
       free(bi);
     }
