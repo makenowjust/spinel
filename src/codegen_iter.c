@@ -4343,7 +4343,9 @@ int emit_tap_then_expr(Compiler *c, int id, Buf *b) {
   const char *unbox = NULL;
   if (use_shadow && et == TY_POLY && tsaved0 == TY_INT) unbox = slot_is_oint(tlv0) ? "sp_unbox_oint" : "sp_poly_to_i";
   else if (use_shadow && et == TY_POLY && tsaved0 == TY_FLOAT) unbox = slot_is_oint(tlv0) ? "sp_unbox_ofloat" : "sp_poly_to_f";
-  if (unbox) use_shadow = 0;
+  /* the body reads the parameter typed: its cached types follow (the tail's
+     kind decides the result slot's conversion below) */
+  if (unbox) { use_shadow = 0; for (int j = 0; j < bn; j++) infer_subtree(c, bb[j]); }
   int din = g_indent;
   if (use_shadow) {
     tlv0->type = et;
