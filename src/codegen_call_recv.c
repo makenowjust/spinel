@@ -7019,7 +7019,7 @@ static int str_arms_slice_encode(Compiler *c, int id, Buf *b, const char *name, 
     /* s["sub"] -> the substring if present, else nil */
     int tsub = ++g_tmp;
     buf_printf(b, "({ const char *_t%d = ", tsub); emit_str_expr(c, argv[0], b);
-    buf_printf(b, "; (strstr(%s, _t%d) ? _t%d : NULL); })", r, tsub, tsub);
+    buf_printf(b, "; (strstr(%s, _t%d) ? sp_str_dup(_t%d) : NULL); })", r, tsub, tsub);
   }
   else if ((is_slice_alias(name)) && argc == 1) {
     buf_printf(b, "sp_str_char_at_or_nil(%s, ", r); emit_int_expr(c, argv[0], b); buf_puts(b, ")");
@@ -7185,6 +7185,12 @@ static int str_arms_case_search(Compiler *c, Buf *b, const NodeTable *nt, const 
     /* s.start_with?(/re/): true when the pattern matches at index 0 */
     buf_printf(b, "(sp_re_match(sp_re_pat_%d, %s) == 0)", re_lit_index(c, argv[0]), r);
   }
+  else if (sp_streq(name, "start_with?") && argc == 1 && comp_ntype(c, argv[0]) == TY_REGEX) {
+    /* the same with the Regexp in a value; the receiver is read first */
+    int ts = ++g_tmp;
+    buf_printf(b, "({ const char *_t%d = %s; SP_GC_ROOT(_t%d); sp_re_match(", ts, r, ts);
+    emit_expr(c, argv[0], b); buf_printf(b, ", _t%d) == 0; })", ts);
+  }
   else if (sp_streq(name, "start_with?") && argc == 1) {
     buf_printf(b, "sp_str_start_with(%s, ", r); emit_str_expr(c, argv[0], b); buf_puts(b, ")");
   }
@@ -7276,25 +7282,35 @@ static int str_arms_case_search(Compiler *c, Buf *b, const NodeTable *nt, const 
     buf_puts(b, ", "); emit_int_expr(c, argv[1], b); buf_puts(b, ")");
   }
   else if ((is_partition_family(name)) && argc == 1 &&
-           re_lit_index(c, argv[0]) < 0) {
+           re_lit_index(c, argv[0]) < 0 && comp_ntype(c, argv[0]) != TY_REGEX) {
     buf_printf(b, "sp_str_%s(%s, ", name, r); emit_str_expr(c, argv[0], b); buf_puts(b, ")");
   }
-  else if (sp_streq(name, "partition") && argc == 1 && re_lit_index(c, argv[0]) >= 0) {
-    /* [before, match, after] from the first regex match, else [s, "", ""] */
-    int tr = ++g_tmp;
+  else if (sp_streq(name, "partition") && argc == 1 &&
+           (re_lit_index(c, argv[0]) >= 0 || comp_ntype(c, argv[0]) == TY_REGEX)) {
+    /* [before, match, after] from the first regex match, else [s, "", ""];
+       a Regexp in a value is read after the receiver */
+    int tr = ++g_tmp, ts = ++g_tmp, tp = ++g_tmp;
+    buf_printf(b, "({ const char *_t%d = %s; SP_GC_ROOT(_t%d); mrb_regexp_pattern *_t%d = ", ts, r, ts, tp);
+    if (re_lit_index(c, argv[0]) >= 0) buf_printf(b, "sp_re_pat_%d", re_lit_index(c, argv[0]));
+    else emit_expr(c, argv[0], b);
     /* rooted: both arms allocate (the match pieces, the unmatched copies)
        while the array is only in _t */
-    buf_printf(b, "({ sp_StrArray *_t%d = sp_StrArray_new(); SP_GC_ROOT(_t%d);"
-                  " if (sp_re_match(sp_re_pat_%d, %s) >= 0) {"
+    buf_printf(b, "; sp_StrArray *_t%d = sp_StrArray_new(); SP_GC_ROOT(_t%d);"
+                  " if (sp_re_match(_t%d, _t%d) >= 0) {"
                   " sp_StrArray_push(_t%d, sp_re_pre_match()); sp_StrArray_push(_t%d, sp_re_match_str);"
                   " sp_StrArray_push(_t%d, sp_re_post_match()); }\nelse {"
-                  " sp_StrArray_push(_t%d, sp_str_dup(%s)); sp_StrArray_push(_t%d, sp_str_dup(sp_str_empty));"
+                  " sp_StrArray_push(_t%d, sp_str_dup(_t%d)); sp_StrArray_push(_t%d, sp_str_dup(sp_str_empty));"
                   " sp_StrArray_push(_t%d, sp_str_dup(sp_str_empty)); }"
                   " _t%d; })",
-               tr, tr, re_lit_index(c, argv[0]), r, tr, tr, tr, tr, r, tr, tr, tr);
+               tr, tr, tp, ts, tr, tr, tr, tr, ts, tr, tr, tr);
   }
   else if (sp_streq(name, "rpartition") && argc == 1 && re_lit_index(c, argv[0]) >= 0) {
     buf_printf(b, "sp_re_rpartition(sp_re_pat_%d, %s)", re_lit_index(c, argv[0]), r);
+  }
+  else if (sp_streq(name, "rpartition") && argc == 1 && comp_ntype(c, argv[0]) == TY_REGEX) {
+    int ts = ++g_tmp;
+    buf_printf(b, "({ const char *_t%d = %s; SP_GC_ROOT(_t%d); sp_re_rpartition(", ts, r, ts);
+    emit_expr(c, argv[0], b); buf_printf(b, ", _t%d); })", ts);
   }
   else if (sp_streq(name, "rindex") && argc == 1 && re_lit_index(c, argv[0]) >= 0) {
     buf_printf(b, "sp_re_rindex_opt(sp_re_pat_%d, %s)", re_lit_index(c, argv[0]), r);
@@ -7404,7 +7420,7 @@ static int str_arms_pattern(Compiler *c, int id, Buf *b, const NodeTable *nt, co
   }
   else if (sp_streq(name, "split") && argc == 2 && re_lit_index(c, argv[0]) >= 0) {
     buf_printf(b, "sp_re_split_limit(sp_re_pat_%d, %s, ", re_lit_index(c, argv[0]), r);
-    emit_expr(c, argv[1], b); buf_puts(b, ")");
+    emit_int_expr(c, argv[1], b); buf_puts(b, ")");
   }
   else if (sp_streq(name, "split") && argc == 1 && comp_ntype(c, argv[0]) == TY_REGEX) {
     buf_puts(b, "sp_re_split("); emit_expr(c, argv[0], b);
@@ -7412,7 +7428,7 @@ static int str_arms_pattern(Compiler *c, int id, Buf *b, const NodeTable *nt, co
   }
   else if (sp_streq(name, "split") && argc == 2 && comp_ntype(c, argv[0]) == TY_REGEX) {
     buf_puts(b, "sp_re_split_limit("); emit_expr(c, argv[0], b);
-    buf_printf(b, ", %s, ", r); emit_expr(c, argv[1], b); buf_puts(b, ")");
+    buf_printf(b, ", %s, ", r); emit_int_expr(c, argv[1], b); buf_puts(b, ")");
   }
   else if (sp_streq(name, "scan") && argc == 1 &&
            (re_lit_index(c, argv[0]) >= 0 || comp_ntype(c, argv[0]) == TY_STRING ||
@@ -8079,6 +8095,83 @@ static int int_arms_round_divide(Compiler *c, int id, Buf *b, const NodeTable *n
   return 1;
 }
 
+/* The String arms that read only the receiver text and the arguments, in
+   emit_scalar_recv_arms's order. */
+static int str_arms_text(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv, int argc, const int *argv, const char *r) {
+  return str_arms_pattern(c, id, b, nt, name, argc, argv, r) ||
+         emit_builtin_op_text(c, id, recv, TY_STRING, name, r, b) ||
+         str_arms_case_search(c, b, nt, name, recv, argc, argv, r) ||
+         str_arms_slice_encode(c, id, b, name, recv, argc, argv, r);
+}
+
+/* split, partition, rpartition, start_with? and [] with a pattern that is
+   a Regexp or a String only at run time (an element of a mixed Array or
+   Hash, Rack's COMMON_SEP[sep]). The boxed arms took a Regexp for a String
+   and raised TypeError. The tag now picks the Regexp or the String arms;
+   any other value takes the boxed arms as before. */
+static int g_poly_pattern_open;
+static int nt_is_literal_arg(const NodeTable *nt, int n) {
+  const char *t = nt_type(nt, n);
+  return t && (sp_streq(t, "IntegerNode") || sp_streq(t, "SymbolNode") || sp_streq(t, "StringNode") ||
+               sp_streq(t, "NilNode"));
+}
+static int str_poly_pattern_name(const char *name, int argc) {
+  if (sp_streq(name, "split")) return argc == 1 || argc == 2;
+  if (is_slice_alias(name)) return argc == 1 || argc == 2;
+  return argc == 1 && (is_partition_family(name) || sp_streq(name, "start_with?"));
+}
+static int str_arms_poly_pattern(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv, int argc, const int *argv, const char *r) {
+  if (g_poly_pattern_open || !str_poly_pattern_name(name, argc) || comp_ntype(c, argv[0]) != TY_POLY) return 0;
+  int ts = ++g_tmp, tp = ++g_tmp;
+  char rs[24];
+  snprintf(rs, sizeof rs, "_t%d", ts);
+  Buf eb; memset(&eb, 0, sizeof eb);
+  /* a conversion of the pattern belongs inside its branch: hoisted to the
+     call, it would read the temp before it is declared */
+  ConvHold *held = g_conv_hold;
+  g_conv_hold = NULL;
+  size_t pre_mark = g_pre ? g_pre->len : 0;
+  buf_printf(&eb, "({ const char *_t%d = %s; SP_GC_ROOT(_t%d); sp_RbVal _t%d = ", ts, r, ts, tp);
+  emit_boxed(c, argv[0], &eb);
+  buf_printf(&eb, "; SP_GC_ROOT_RBVAL(_t%d); _t%d = sp_poly_strbuf_deref(_t%d); ", tp, tp, tp);
+  /* the limit or the second index is read once, after the pattern; every
+     branch below renders it again. A literal stays as it is, since the
+     arms read its node (s[re, :name]). */
+  int bind1 = g_n_argov;
+  if (argc == 2 && !nt_is_literal_arg(nt, argv[1])) {
+    int t1 = hold_operand(c, argv[1], comp_ntype(c, argv[1]), 0, ++g_tmp, 1, " ", &eb);
+    bind1 = view_bind(argv[1], "_t%d", t1);
+  }
+  buf_printf(&eb, "(_t%d.tag == SP_TAG_OBJ && _t%d.cls_id == SP_BUILTIN_REGEX) ? (", tp, tp);
+  int bind = view_bind(argv[0], "((mrb_regexp_pattern *)_t%d.v.p)", tp);
+  int v = view_push(c, argv[0], TY_REGEX);
+  int ok = str_arms_text(c, id, &eb, nt, name, recv, argc, argv, rs);
+  view_pop(c, v);
+  view_unbind(bind);
+  /* a String takes the String arms: s[str] read it as an Integer index */
+  buf_printf(&eb, ") : _t%d.tag == SP_TAG_STR ? (", tp);
+  bind = view_bind(argv[0], "_t%d.v.s", tp);
+  v = view_push(c, argv[0], TY_STRING);
+  ok = ok && str_arms_text(c, id, &eb, nt, name, recv, argc, argv, rs);
+  view_pop(c, v);
+  view_unbind(bind);
+  buf_puts(&eb, ") : (");
+  bind = view_bind(argv[0], "_t%d", tp);
+  g_poly_pattern_open = 1;
+  ok = ok && str_arms_text(c, id, &eb, nt, name, recv, argc, argv, rs);
+  /* only ever entered closed, so closing is restoring */
+  g_poly_pattern_open = 0;
+  view_unbind(bind);
+  view_unbind(bind1);
+  buf_puts(&eb, "); })");
+  g_conv_hold = held;
+  if (ok) buf_puts(b, eb.p);
+  /* a dropped dispatch takes back what its branches hoisted */
+  else if (g_pre && g_pre->len > pre_mark) { g_pre->len = pre_mark; g_pre->p[pre_mark] = '\0'; }
+  free(eb.p);
+  return ok;
+}
+
 /* A String, Integer or Float receiver, evaluated once into rs and spliced into each arm (emit_scalar_call_arms's arms, in their order) */
 static int emit_scalar_recv_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv, int argc, const int *argv, TyKind rt, TyKind a0, int *out) {
   /* scalar receiver methods: evaluate the receiver once into rs, then
@@ -8205,6 +8298,7 @@ static int emit_scalar_recv_arms(Compiler *c, int id, Buf *b, const NodeTable *n
     if (sp_streq(name, "upto") && argc == 1 && nt_ref(nt, id, "block") < 0) {
       buf_printf(b, "sp_StrArray_from_string_range(%s, ", r); emit_str_expr(c, argv[0], b); buf_puts(b, ", 0)");
     }
+    else if (str_arms_poly_pattern(c, id, b, nt, name, recv, argc, argv, r)) ;
     else if (str_arms_pattern(c, id, b, nt, name, argc, argv, r)) ;
     /* the receiver is a spinel string, so its own byte length is what the
        symbol's name is -- a NUL in it is a byte of the name (#nul) */
@@ -10653,12 +10747,22 @@ int emit_object_call(Compiler *c, int id, Buf *b) {
 /* The encoding a force_encoding / encode! call names as a literal: 1 for
    ASCII-8BIT, 0 for UTF-8, -1 for any other or a computed one, which only
    checks that the receiver may change. */
+/* Encoding::X or ::Encoding::X; a user constant (M::E) is a value */
+static int enc_const_path(const NodeTable *nt, int n) {
+  const char *at = nt_type(nt, n);
+  if (!at || !sp_streq(at, "ConstantPathNode")) return 0;
+  int p = nt_ref(nt, n, "parent");
+  const char *pt = p >= 0 ? nt_type(nt, p) : NULL;
+  const char *pn = p >= 0 ? nt_str(nt, p, "name") : NULL;
+  if (!pt || !pn || !sp_streq(pn, "Encoding")) return 0;
+  return sp_streq(pt, "ConstantReadNode") || (sp_streq(pt, "ConstantPathNode") && nt_ref(nt, p, "parent") < 0);
+}
 static int str_force_encoding_mode(Compiler *c, const int *argv, int argc) {
   const NodeTable *nt = c->nt;
   const char *fe_nm = NULL;
   if (argc >= 1) {
     const char *at = nt_type(nt, argv[0]);
-    if (at && sp_streq(at, "ConstantPathNode")) fe_nm = nt_str(nt, argv[0], "name");
+    if (enc_const_path(nt, argv[0])) fe_nm = nt_str(nt, argv[0], "name");
     else if (at && sp_streq(at, "StringNode")) {
       fe_nm = nt_str(nt, argv[0], "unescaped");
       if (!fe_nm) fe_nm = nt_str(nt, argv[0], "content");
@@ -10679,6 +10783,24 @@ static int str_force_encoding_mode(Compiler *c, const int *argv, int argc) {
   }
   return fe_bin ? 1 : fe_txt ? 0 : -1;
 }
+/* force_encoding(enc) with an enc that is no literal (a local, a default
+   parameter): the runtime picks the tag from the Encoding or name. */
+static int str_force_encoding_computed(Compiler *c, const char *name, const int *argv, int argc) {
+  if (!sp_streq(name, "force_encoding") || argc != 1) return 0;
+  const char *at = nt_type(c->nt, argv[0]);
+  return !enc_const_path(c->nt, argv[0]) && !(at && sp_streq(at, "StringNode"));
+}
+/* The mode argument of sp_String_force_encoding on handle `h`. A frozen
+   handle raises before the argument is looked at, as in CRuby. */
+static void emit_strbuf_force_encoding_mode(Compiler *c, const char *name, const char *h, const int *argv, int argc, Buf *b) {
+  if (!str_force_encoding_computed(c, name, argv, argc)) {
+    buf_printf(b, "%d", str_force_encoding_mode(c, argv, argc));
+    return;
+  }
+  buf_printf(b, "sp_String_is_frozen(%s) ? -1 : sp_force_encoding_mode(", h);
+  emit_boxed(c, argv[0], b);
+  buf_puts(b, ")");
+}
 void emit_str_force_encoding(Compiler *c, const char *name, const char *r, const int *argv, int argc, Buf *b) {
   int mode = str_force_encoding_mode(c, argv, argc);
   int fe_bin = mode == 1, fe_txt = mode == 0;
@@ -10687,7 +10809,13 @@ void emit_str_force_encoding(Compiler *c, const char *name, const char *r, const
      FrozenError the mutability check reads a NULL as */
   buf_printf(b, "({ const char *_t%d = %s; if (!_t%d) sp_nil_recv(\"%s\"); sp_str_check_mutable(_t%d); ",
              trc, r, trc, name, trc);
-  if (fe_bin) buf_printf(b, "sp_str_as_binary(_t%d); })", trc);
+  if (str_force_encoding_computed(c, name, argv, argc)) {
+    buf_printf(b, "int _m%d = sp_force_encoding_mode(", trc);
+    emit_boxed(c, argv[0], b);
+    buf_printf(b, "); if (_m%d == 1) sp_str_as_binary(_t%d); else if (_m%d == 0) sp_str_as_text(_t%d); _t%d; })",
+               trc, trc, trc, trc, trc);
+  }
+  else if (fe_bin) buf_printf(b, "sp_str_as_binary(_t%d); })", trc);
   else if (fe_txt) buf_printf(b, "sp_str_as_text(_t%d); })", trc);
   else buf_printf(b, "_t%d; })", trc);
 }
@@ -10698,8 +10826,10 @@ void emit_str_force_encoding(Compiler *c, const char *name, const char *r, const
    append that moved the bytes. `ref` is the handle; the value is its bytes. */
 static void emit_strbuf_force_encoding(Compiler *c, const char *name, const char *ref, const int *argv, int argc, Buf *b) {
   int th = ++g_tmp;
-  buf_printf(b, "({ sp_String *_t%d = %s; if (!_t%d) sp_nil_recv(\"%s\"); sp_String_force_encoding(_t%d, %d); sp_String_cstr(_t%d); })",
-             th, ref, th, name, th, str_force_encoding_mode(c, argv, argc), th);
+  char hv[24]; snprintf(hv, sizeof hv, "_t%d", th);
+  buf_printf(b, "({ sp_String *_t%d = %s; if (!_t%d) sp_nil_recv(\"%s\"); sp_String_force_encoding(_t%d, ", th, ref, th, name, th);
+  emit_strbuf_force_encoding_mode(c, name, hv, argv, argc, b);
+  buf_printf(b, "); sp_String_cstr(_t%d); })", th);
 }
 static void emit_str_encode_call(Compiler *c, const char *recv_txt, const int *argv, int argc, Buf *b) {
   const NodeTable *nt = c->nt;
@@ -14599,7 +14729,7 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
     for (int k = 0; k < c->nclasses && !has_user; k++)
       if (comp_poly_arm_defines_n(c, k, name, argc)) has_user = 1;
     if (!has_user) {
-      buf_puts(b, "sp_poly_case_eq(");
+      buf_puts(b, "sp_poly_case_eq_match(");
       emit_expr(c, recv, b);
       buf_puts(b, ", ");
       emit_boxed(c, argv[0], b);
@@ -14973,8 +15103,10 @@ int emit_poly_call(Compiler *c, int id, Buf *b) {
          answers the box itself */
       int tv = ++g_tmp;
       buf_printf(b, "({ sp_RbVal _t%d = ", tv); emit_expr(c, recv, b);
-      buf_printf(b, "; sp_poly_is_strbuf(_t%d) ? (sp_String_force_encoding((sp_String *)_t%d.v.p, %d), _t%d) : ",
-                 tv, tv, str_force_encoding_mode(c, argv, argc), tv);
+      char hv[48]; snprintf(hv, sizeof hv, "((sp_String *)_t%d.v.p)", tv);
+      buf_printf(b, "; sp_poly_is_strbuf(_t%d) ? (sp_String_force_encoding(%s, ", tv, hv);
+      emit_strbuf_force_encoding_mode(c, name, hv, argv, argc, b);
+      buf_printf(b, "), _t%d) : ", tv);
       char rv[64]; snprintf(rv, sizeof rv, "sp_poly_recv_s(_t%d, \"%s\")", tv, name);
       buf_puts(b, "sp_box_str(");
       emit_str_force_encoding(c, name, rv, argv, argc, b);

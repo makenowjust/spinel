@@ -1029,6 +1029,9 @@ re-lit-test: $(SPINEL)
 # compile whose inference ran to its round cap fails too: the answer can be
 # right all the same, and where the rounds stopped decided what was emitted.
 SHARE_TESTS := $(wildcard test/share/*.rb)
+ifeq ($(FFI_AVAILABLE),yes)
+SHARE_TESTS += packages/ffi/test/ffi_dynamic_owner.rb packages/ffi/test/ffi_store_string.rb
+endif
 ifneq ($(FFI_AVAILABLE),yes)
 SHARE_TESTS := $(filter-out test/share/share_strings_fiddle.rb,$(SHARE_TESTS))
 endif
@@ -3560,6 +3563,8 @@ infer-test: $(SPINEL) $(SP_RT_LIB)
 	$(SPINEL) test/begin_while_locals_not_volatile.rb -c --no-line-map -o "$$tmp/bwv.c" >/dev/null 2>&1 || { echo "infer-test: FAIL (begin_while_locals_not_volatile: -c)"; ok=0; }; \
 	grep -qE 'volatile .* lv_(sum|v|f|n) ' "$$tmp/bwv.c" && { echo "infer-test: FAIL (a local a handler-less begin ... end while writes was declared volatile)"; ok=0; }; \
 	grep -qE 'volatile sp_int lv_x ' "$$tmp/bwv.c" || { echo "infer-test: FAIL (a local a begin with a rescue writes lost its volatile)"; ok=0; }; \
+	$(SPINEL) test/poly_user_relop_no_coerce.rb -c --no-line-map -o "$$tmp/urn.c" >/dev/null 2>&1 || { echo "infer-test: FAIL (poly_user_relop_no_coerce: -c)"; ok=0; }; \
+	grep -q 'SP_INSTALL_HOOK(sp_user_binop_hook, sp_user_binop_dispatch);' "$$tmp/urn.c" || { echo "infer-test: FAIL (a class ordering itself with < and no coerce has no binop table for a boxed comparison)"; ok=0; }; \
 	$(SPINEL) test/loop_bounded_index_read.rb -c --no-line-map -o "$$tmp/lbi.c" >/dev/null 2>&1 || { echo "infer-test: FAIL (loop_bounded_index_read: -c)"; ok=0; }; \
 	grep -qE '_hcd[0-9]+_[0-9]+\[lv_i\]' "$$tmp/lbi.c" && grep -qE '_hcd[0-9]+_[0-9]+\[lv_j\]' "$$tmp/lbi.c" || { echo "infer-test: FAIL (a read bounded by its loop's own i < a.length test still tests its index)"; ok=0; }; \
 	grep -qE '_hcd[0-9]+_[0-9]+\[lv_(m|q|r|w|x|y|z)\]' "$$tmp/lbi.c" && { echo "infer-test: FAIL (a read whose index the loop does not keep in range lost its bounds test)"; ok=0; }; \
