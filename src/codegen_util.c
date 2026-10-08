@@ -6326,10 +6326,17 @@ void emit_oint_expr(Compiler *c, int node, TyKind t, Buf *b) {
   if (k == NK_NilNode) { buf_puts(b, oint_nil(t)); return; }
   Repr r = repr_of(c, node);
   TyKind vt = r.as_ty;
+  /* the call inside parentheses (`(table(x))`) */
+  int vc = node;
+  while (vc >= 0 && (nt_kind(nt, vc) == NK_ParenthesesNode || nt_kind(nt, vc) == NK_StatementsNode)) {
+    int pb = nt_kind(nt, vc) == NK_ParenthesesNode ? nt_ref(nt, vc, "body") : vc;
+    int pn = 0; const int *pv = pb >= 0 && nt_kind(nt, pb) == NK_StatementsNode ? nt_arr(nt, pb, "body", &pn) : NULL;
+    vc = pv && pn == 1 ? pv[0] : (pb >= 0 && nt_kind(nt, pb) != NK_StatementsNode ? pb : -1);
+  }
   /* a value with no C type of its own (a call on a method that answers
      nothing included): evaluated for its effect, then nil */
   if (vt == TY_NIL || vt == TY_VOID ||
-      (vt == TY_UNKNOWN && k == NK_CallNode && call_names_only_void_methods(c, node))) {
+      ((vt == TY_UNKNOWN || vt == TY_POLY) && vc >= 0 && nt_kind(nt, vc) == NK_CallNode && call_names_only_void_methods(c, vc))) {
     buf_puts(b, "((void)("); emit_expr(c, node, b); buf_printf(b, "), %s)", oint_nil(t));
     return;
   }
