@@ -241,6 +241,10 @@ int emit_call_callable_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
     /* only the unresolved-target lane can fall back to the trampoline */
     int bm_want_boxed = !tm && adapter_argc < 0 && !poly_abi && splat_at2 < 0;
     bxref = eargc ? (char (*)[24])calloc((size_t)eargc, 24) : NULL;
+    /* an Integer or Float argument holding its nil is kept boxed (its temp
+       is the sp_RbVal), and only the boxed lane can carry its nil */
+    char bxo[16] = {0};
+    int any_bxo = 0;
     /* Hoist each argument into a temp so both call arms (self-ful / self-less)
        reference it without re-evaluating (#3252). */
     for (int k = 0; k < eargc; k++) {
@@ -309,7 +313,13 @@ int emit_call_callable_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
       }
       else {
         TyKind pk = repr_of(c, argv[k]).as_ty;
-        if (bm_want_boxed && pk != TY_UNKNOWN && pk != TY_VOID && pk != TY_NIL) {
+        if (bm_want_boxed && k < 16 && oint_kind(pk) && node_has_oint_form(c, argv[k])) {
+          bxtmp[k] = ++g_tmp; bxo[k] = 1; any_bxo = 1;
+          buf_printf(b, "sp_RbVal _t%d = %s(", bxtmp[k], pk == TY_FLOAT ? "sp_box_ofloat" : "sp_box_oint");
+          emit_oint_expr(c, argv[k], pk, b); buf_puts(b, "); ");
+          buf_printf(b, "sp_int _t%d = sp_poly_to_i(_t%d)", atmp[k], bxtmp[k]);
+        }
+        else if (bm_want_boxed && pk != TY_UNKNOWN && pk != TY_VOID && pk != TY_NIL) {
           bxtmp[k] = ++g_tmp;
           emit_ctype(c, pk, b); buf_printf(b, " _t%d = ", bxtmp[k]); emit_expr(c, argv[k], b); buf_puts(b, "; ");
           emit_named_root(c, pk, "_t", bxtmp[k], b); buf_puts(b, " ");
@@ -361,7 +371,7 @@ int emit_call_callable_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
       if (bxtmp[k] < 0) { bm_boxed_ok = 0; break; }
       snprintf(bxref[k], 24, "_t%d", bxtmp[k]);
     }
-    int bm_sig_ok = bm_dyn && splat_at2 < 0 && !bm_over_arity_adapter &&
+    int bm_sig_ok = bm_dyn && splat_at2 < 0 && !bm_over_arity_adapter && !any_bxo &&
                     call_arg_sig(c, argv, eargc, bm_sig, sizeof bm_sig);
     /* the promote counterpart of the legacy gate below: a dynamic target
        under promote is only callable through the sp_RbVal casts when its
@@ -384,7 +394,7 @@ int emit_call_callable_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
         if (bm_boxed_ok) {
           for (int k = 0; k < eargc; k++) {
             buf_printf(b, "_sp_proc_poly_args[%d] = ", k);
-            emit_boxed_text(c, repr_of(c, argv[k]).as_ty, bxref[k], b);
+            emit_boxed_text(c, bxo[k] ? TY_POLY : repr_of(c, argv[k]).as_ty, bxref[k], b);
             buf_puts(b, ", ");
           }
           buf_printf(b, "sp_bm_call_boxed_kw(_t%d, %d, 1)", tr, eargc);
@@ -401,7 +411,7 @@ int emit_call_callable_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
            nothing to test at run time here: go straight to the boxed lane. */
         for (int k = 0; k < eargc; k++) {
           buf_printf(b, "_sp_proc_poly_args[%d] = ", k);
-          emit_boxed_text(c, repr_of(c, argv[k]).as_ty, bxref[k], b);
+          emit_boxed_text(c, bxo[k] ? TY_POLY : repr_of(c, argv[k]).as_ty, bxref[k], b);
           buf_puts(b, ", ");
         }
         buf_printf(b, "sp_bm_call_boxed_kw(_t%d, %d, 1); })", tr, eargc);

@@ -4499,6 +4499,14 @@ int emit_sort_cmp_expr(Compiler *c, int id, Buf *b) {
   int nil_cmp = !cmp_boxed && (cmp_ty == TY_NIL || bv_value_may_be_nil(c, block, cmp_ty));
   if (nil_cmp) cmp_boxed = 1;
   else if (cmp_ty != TY_INT && !cmp_boxed) return 0;
+  /* an element parameter holding its nil (an Integer array with nils):
+     the elements move as oints, and their nil bits with them */
+  int ono = 0;
+  if (oint_kind(et) && !hash_sort) {
+    Scope *nbs = comp_scope_of(c, block);
+    ono = nbs && ((p0 && slot_is_oint(scope_local(nbs, p0))) || (p1 && slot_is_oint(scope_local(nbs, p1))));
+  }
+  const char *gf = ono ? "oget" : "get", *sf = ono ? "oset" : "set";
   int trv = ++g_tmp, tr = ++g_tmp, tn = ++g_tmp, ti = ++g_tmp, tj = ++g_tmp, ta = ++g_tmp, tb = ++g_tmp;
   Buf rb; memset(&rb, 0, sizeof rb);
   if (hash_sort) emit_hash_pairs_expr(c, recv, rt, hn, &rb); else emit_expr(c, recv, &rb);
@@ -4522,7 +4530,8 @@ else {
      seconds.) The scratch buffer only ever holds elements the array still
      holds too, so a collection during the comparator cannot lose one. */
   int tw = ++g_tmp, tlo = ++g_tmp, tmid = ++g_tmp, thi = ++g_tmp, to = ++g_tmp, tbuf = ++g_tmp, tc = ++g_tmp;
-  Buf ect; memset(&ect, 0, sizeof ect); emit_ctype(c, et, &ect);
+  Buf ect; memset(&ect, 0, sizeof ect);
+  if (ono) buf_puts(&ect, oint_ctype(et)); else emit_ctype(c, et, &ect);
   const char *ecs = ect.p ? ect.p : "sp_int";
   emit_indent(g_pre, g_indent); buf_printf(g_pre, "sp_int _t%d = sp_%sArray_length(_t%d);\n", tn, k, tr);
   emit_indent(g_pre, g_indent);
@@ -4541,8 +4550,8 @@ else {
   buf_printf(g_pre, "sp_int _t%d = _t%d, _t%d = _t%d, _t%d = _t%d;\n", ti, tlo, tj, tmid, to, tlo);
   emit_indent(g_pre, g_indent + 2);
   buf_printf(g_pre, "while (_t%d < _t%d && _t%d < _t%d) {\n", ti, tmid, tj, thi);
-  emit_indent(g_pre, g_indent + 3); buf_printf(g_pre, "%s _t%d = sp_%sArray_get(_t%d, _t%d);\n", ecs, ta, k, tr, ti);
-  emit_indent(g_pre, g_indent + 3); buf_printf(g_pre, "%s _t%d = sp_%sArray_get(_t%d, _t%d);\n", ecs, tb, k, tr, tj);
+  emit_indent(g_pre, g_indent + 3); buf_printf(g_pre, "%s _t%d = sp_%sArray_%s(_t%d, _t%d);\n", ecs, ta, k, gf, tr, ti);
+  emit_indent(g_pre, g_indent + 3); buf_printf(g_pre, "%s _t%d = sp_%sArray_%s(_t%d, _t%d);\n", ecs, tb, k, gf, tr, tj);
   Scope *sbsc = comp_scope_of(c, block);
   LocalVar *slv0 = (sbsc && p0) ? scope_local(sbsc, p0) : NULL;
   LocalVar *slv1 = (sbsc && p1) ? scope_local(sbsc, p1) : NULL;
@@ -4555,16 +4564,28 @@ else {
   /* Shadow the outer (possibly poly) block params with et-typed locals */
   emit_indent(g_pre, g_indent); buf_puts(g_pre, "{\n"); g_indent++;
   emit_indent(g_pre, g_indent);
-  if (p0) { emit_ctype(c, et, g_pre); buf_printf(g_pre, " lv_%s = _t%d; ", p0, ta); }
-  if (p1) { emit_ctype(c, et, g_pre); buf_printf(g_pre, " lv_%s = _t%d;", p1, tb); }
+  for (int pi = 0; pi < 2; pi++) {
+    const char *pn = pi ? p1 : p0;
+    LocalVar *plv = pi ? slv1 : slv0;
+    if (!pn) continue;
+    int pto = ono && slot_is_oint(plv);
+    if (pto) buf_puts(g_pre, oint_ctype(et)); else emit_ctype(c, et, g_pre);
+    if (ono && !pto) buf_printf(g_pre, " lv_%s = %s(_t%d); ", pn, oint_arg(et), pi ? tb : ta);
+    else buf_printf(g_pre, " lv_%s = _t%d; ", pn, pi ? tb : ta);
+  }
   buf_puts(g_pre, "\n");
   IterStep st; emit_iter_step_open(c, block, nil_cmp, g_indent, &st);
   Buf cb; memset(&cb, 0, sizeof cb); emit_iter_step_tail(c, &st, &cb);
   emit_indent(g_pre, g_indent);
   /* take from the left on a tie, so equal elements keep their order */
-  char ea[32], eb[32]; snprintf(ea, sizeof ea, "_t%d", ta); snprintf(eb, sizeof eb, "_t%d", tb);
+  char ea[48], eb[48];
+  if (ono) {
+    snprintf(ea, sizeof ea, "%s(_t%d)", et == TY_FLOAT ? "sp_box_ofloat" : "sp_box_oint", ta);
+    snprintf(eb, sizeof eb, "%s(_t%d)", et == TY_FLOAT ? "sp_box_ofloat" : "sp_box_oint", tb);
+  }
+  else { snprintf(ea, sizeof ea, "_t%d", ta); snprintf(eb, sizeof eb, "_t%d", tb); }
   Buf sg; memset(&sg, 0, sizeof sg);
-  emit_cmp_block_sign(c, bn > 0 ? bb[bn - 1] : -1, cmp_ty, cmp_boxed, cb.p ? cb.p : "sp_box_nil()", et, ea, eb, &sg);
+  emit_cmp_block_sign(c, bn > 0 ? bb[bn - 1] : -1, cmp_ty, cmp_boxed, cb.p ? cb.p : "sp_box_nil()", ono ? TY_POLY : et, ea, eb, &sg);
   buf_printf(g_pre, "sp_int _t%d = %s;\n", tc, sg.p);
   free(sg.p);
   free(cb.p);
@@ -4577,11 +4598,11 @@ else {
   if (slv1) slv1->type = spt1;
   emit_indent(g_pre, g_indent + 2); buf_puts(g_pre, "}\n");   /* while merge */
   emit_indent(g_pre, g_indent + 2);
-  buf_printf(g_pre, "while (_t%d < _t%d) _t%d[_t%d++] = sp_%sArray_get(_t%d, _t%d++);\n", ti, tmid, tbuf, to, k, tr, ti);
+  buf_printf(g_pre, "while (_t%d < _t%d) _t%d[_t%d++] = sp_%sArray_%s(_t%d, _t%d++);\n", ti, tmid, tbuf, to, k, gf, tr, ti);
   emit_indent(g_pre, g_indent + 2);
-  buf_printf(g_pre, "while (_t%d < _t%d) _t%d[_t%d++] = sp_%sArray_get(_t%d, _t%d++);\n", tj, thi, tbuf, to, k, tr, tj);
+  buf_printf(g_pre, "while (_t%d < _t%d) _t%d[_t%d++] = sp_%sArray_%s(_t%d, _t%d++);\n", tj, thi, tbuf, to, k, gf, tr, tj);
   emit_indent(g_pre, g_indent + 2);
-  buf_printf(g_pre, "for (sp_int _q = _t%d; _q < _t%d; _q++) sp_%sArray_set(_t%d, _q, _t%d[_q]);\n", tlo, thi, k, tr, tbuf);
+  buf_printf(g_pre, "for (sp_int _q = _t%d; _q < _t%d; _q++) sp_%sArray_%s(_t%d, _q, _t%d[_q]);\n", tlo, thi, k, sf, tr, tbuf);
   emit_indent(g_pre, g_indent + 1); buf_puts(g_pre, "}\n");   /* for lo */
   emit_indent(g_pre, g_indent); buf_printf(g_pre, "free(_t%d);\n", tbuf);
   free(ect.p);
