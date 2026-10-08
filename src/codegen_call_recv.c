@@ -8152,7 +8152,24 @@ static int emit_scalar_recv_arms(Compiler *c, int id, Buf *b, const NodeTable *n
      nil arm is the point. */
   Buf gbody; memset(&gbody, 0, sizeof gbody);
   Buf *g_outer_b = NULL; int g_tmpid = 0; char g_rname[24];
-  if ((rt == TY_INT || rt == TY_STRING) && name && recv >= 0 && !nil_answers_name(name) &&
+  /* A String receiver that is a fresh copy (a shared slot's reader) and is
+     never nil still needs the bound, rooted temp when an argument may
+     allocate: the guard below is the only path that holds it (g_noguard:
+     the hold without the nil test) */
+  int g_noguard = 0;
+  if (rt == TY_STRING && name && recv >= 0 && operand_may_allocate(c, recv) &&
+      !((!nil_answers_name(name)) && recv_may_be_sentinel(c, recv))) {
+    for (int ai = 0; ai < argc && !g_noguard; ai++) g_noguard = operand_may_allocate(c, argv[ai]);
+    const char *sop_n = nt_str(nt, id, "call_operator");
+    if (sop_n && sp_streq(sop_n, "&.")) g_noguard = 0;
+    if (g_noguard) {
+      g_tmpid = ++g_tmp;
+      snprintf(g_rname, sizeof g_rname, "_t%d", g_tmpid);
+      g_outer_b = b; b = &gbody; r = g_rname;
+      if (g_conv_hold) g_conv_hold->guarded = 1;
+    }
+  }
+  if (!g_noguard && (rt == TY_INT || rt == TY_STRING) && name && recv >= 0 && !nil_answers_name(name) &&
       recv_may_be_sentinel(c, recv)) {
     const char *sop_g = nt_str(nt, id, "call_operator");
     if (!(sop_g && sp_streq(sop_g, "&."))) {
@@ -8633,7 +8650,7 @@ static int emit_scalar_recv_arms(Compiler *c, int id, Buf *b, const NodeTable *n
       if (rt == TY_STRING) {
         buf_printf(b, "({ const char *_t%d = (%s); ", g_tmpid, rs.p ? rs.p : "");
         if (g_root) buf_printf(b, "SP_GC_ROOT(_t%d); ", g_tmpid);
-        buf_printf(b, "if (!_t%d) sp_raise_nomethod(sp_nomethod_msg(\"%s\", sp_box_nil())); ", g_tmpid, name);
+        if (!g_noguard) buf_printf(b, "if (!_t%d) sp_raise_nomethod(sp_nomethod_msg(\"%s\", sp_box_nil())); ", g_tmpid, name);
       }
       else {
         buf_printf(b, "({ sp_int _t%d = sp_oint_val(", g_tmpid);
