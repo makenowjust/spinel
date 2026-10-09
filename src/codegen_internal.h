@@ -2152,7 +2152,7 @@ void refuse_yield_capwrap(Compiler *c, int blk, int yc, const int *yv);
    No bit pattern of an sp_int or an sp_float means nil. A nullable Integer
    or Float is carried as an sp_oint / sp_ofloat (value + nil flag) in a
    local, a parameter, a return, a temp, a static; an instance ivar keeps its
-   sp_int field and a bit in the object's iv__nilbits. One predicate decides
+   sp_int field and a byte in the object's iv__nilb. One predicate decides
    a node's C value (node_is_oint); emit_expr always yields the plain scalar
    and emit_oint_expr the oint form. */
 /* the C spellings for the Integer (TY_INT) or Float (TY_FLOAT) kind */
@@ -2169,13 +2169,14 @@ int oint_kind(TyKind t);
 int slot_is_oint(const LocalVar *lv);
 /* the C type of a local's slot: the oint type, or emit_ctype's */
 void emit_slot_ctype(Compiler *c, const LocalVar *lv, Buf *b);
-/* instance ivar iv of class cid has a bit in iv__nilbits; its bit index;
-   the number of uint64_t words the class's iv__nilbits has (0: none) */
+/* instance ivar iv of class cid has a nil byte in iv__nilb; its index;
+   the number of bytes the class's iv__nilb has (0: none), one length for
+   its whole class family */
 int ivar_has_nilbit(Compiler *c, int cid, int iv);
 int ivar_nilbit_index(Compiler *c, int cid, int iv);
-int class_nilbit_words(Compiler *c, int cid);
-/* the C text of the bit: `((o)->iv__nilbits[w] & (1ULL << k))`-style
-   test, and the set / clear statements, for the receiver text `obj`
+int class_nilbyte_count(Compiler *c, int cid);
+/* the C text of the nil: the `((o)->iv__nilb[k])` test, and the set
+   (`= 1`) / clear (`= 0`) stores, for the receiver text `obj`
    ("self->", "_t3->", "o." ...: the prefix up to the field) */
 void ivar_nilbit_test(Compiler *c, int cid, int iv, const char *obj, char *out, size_t cap);
 void ivar_nilbit_set(Compiler *c, int cid, int iv, const char *obj, char *out, size_t cap);

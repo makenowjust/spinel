@@ -5587,12 +5587,15 @@ void emit_slot_ctype(Compiler *c, const LocalVar *lv, Buf *b) {
   else emit_ctype(c, lv->type, b);
 }
 
-/* An instance ivar carries its nil as a bit in the object's iv__nilbits
-   when a write can leave nil in it (ivar_nullable_int) or initialize does
-   not assign it (an unset ivar reads nil). The bit's index is the ivar's
-   own index, which a subclass shares with its parent (inherit_members keeps
-   the prefix), so the words sit at the same offset in every struct of a
-   hierarchy and hold the largest ivar count in it. */
+/* An instance ivar carries its nil as a byte of the object's iv__nilb (1:
+   nil) when a write can leave nil in it (ivar_nullable_int) or initialize
+   does not assign it (an unset ivar reads nil). A byte of its own, not a bit
+   of a shared word: a store to one ivar's nil is a plain byte store, with no
+   read-modify-write of the word its neighbours' bits share. A subclass
+   shares its parent's ivar indexes (inherit_members keeps the prefix), and
+   the bytes are numbered over the ivar indexes the whole hierarchy keeps a
+   nil for (class_nilbyte_map), so the array sits at the same offset and with
+   the same numbering in every struct of it and is no longer than it needs. */
 static int class_root(Compiler *c, int cid);
 static int ivar_has_nilbit_own(Compiler *c, int cid, int iv);
 /* A field is one slot down its class family (a subclass lays the parent's
@@ -5651,45 +5654,70 @@ static int ivar_has_nilbit_own(Compiler *c, int cid, int iv) {
   if ((ci->is_struct || ci->is_data) && iv < ci->nmembers) return 0;
   return !ivar_assigned_in_initialize(c, cid, ci->ivars[iv]);
 }
-int ivar_nilbit_index(Compiler *c, int cid, int iv) { (void)c; (void)cid; return iv; }
 static int class_root(Compiler *c, int cid) {
   int hop = 0;
   while (cid >= 0 && c->classes[cid].parent >= 0 && hop++ < 64) cid = c->classes[cid].parent;
   return cid;
 }
-int class_nilbit_words(Compiler *c, int cid) {
-  static int *memo = NULL, memo_n = -1;
-  if (cid < 0 || cid >= c->nclasses) return 0;
-  if (memo_n != c->nclasses) {
-    free(memo); memo_n = c->nclasses;
-    memo = (int *)malloc(sizeof(int) * (size_t)(memo_n > 0 ? memo_n : 1));
+/* A class family's nil bytes: the ivar indexes some class of the family
+   keeps a nil byte for, numbered in order. Every struct of the family gets
+   the same numbering, so a byte sits at one offset across it whichever class
+   writes it. Memo per family root: map[iv] is the byte (-1: none), n its
+   length; count the bytes. */
+typedef struct { int *map; int n; int count; } NilByteMap;
+static const NilByteMap *class_nilbyte_map(Compiler *c, int cid) {
+  static NilByteMap *memo = NULL;
+  static int memo_n = -1;
+  static const Compiler *memo_c = NULL;
+  static const NilByteMap none = { NULL, 0, 0 };
+  if (cid < 0 || cid >= c->nclasses) return &none;
+  if (memo_n != c->nclasses || memo_c != c) {
+    if (memo) for (int i = 0; i < memo_n; i++) free(memo[i].map);
+    free(memo);
+    memo_n = c->nclasses; memo_c = c;
+    memo = (NilByteMap *)calloc((size_t)(memo_n > 0 ? memo_n : 1), sizeof(NilByteMap));
     if (!memo) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
-    for (int i = 0; i < memo_n; i++) memo[i] = -1;
+    for (int i = 0; i < memo_n; i++) memo[i].count = -1;
   }
-  if (memo[cid] >= 0) return memo[cid];
-  int root = class_root(c, cid), maxn = 0;
-  for (int k = 0; k < c->nclasses; k++) {
-    if (class_root(c, k) != root) continue;
-    ClassInfo *ck = &c->classes[k];
-    for (int iv = 0; iv < ck->nivars; iv++)
-      if (ivar_has_nilbit(c, k, iv) && iv + 1 > maxn) maxn = iv + 1;
-  }
-  int words = (maxn + 63) / 64;
+  int root = class_root(c, cid);
+  NilByteMap *m = &memo[root];
+  if (m->count >= 0) return m;
+  int maxn = 0;
   for (int k = 0; k < c->nclasses; k++)
-    if (class_root(c, k) == root) memo[k] = words;
-  return words;
+    if (class_root(c, k) == root && c->classes[k].nivars > maxn) maxn = c->classes[k].nivars;
+  m->n = maxn;
+  m->map = (int *)malloc(sizeof(int) * (size_t)(maxn > 0 ? maxn : 1));
+  if (!m->map) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+  for (int iv = 0; iv < maxn; iv++) m->map[iv] = -1;
+  int count = 0;
+  for (int iv = 0; iv < maxn; iv++) {
+    for (int k = 0; k < c->nclasses; k++) {
+      if (class_root(c, k) != root || iv >= c->classes[k].nivars) continue;
+      if (ivar_has_nilbit(c, k, iv)) { m->map[iv] = count++; break; }
+    }
+  }
+  m->count = count;
+  return m;
 }
+int ivar_nilbit_index(Compiler *c, int cid, int iv) {
+  const NilByteMap *m = class_nilbyte_map(c, cid);
+  return iv >= 0 && iv < m->n ? m->map[iv] : -1;
+}
+int class_nilbyte_count(Compiler *c, int cid) { return class_nilbyte_map(c, cid)->count; }
 void ivar_nilbit_test(Compiler *c, int cid, int iv, const char *obj, char *out, size_t cap) {
   int k = ivar_nilbit_index(c, cid, iv);
-  snprintf(out, cap, "(%siv__nilbits[%d] & (1ULL << %d))", obj, k / 64, k % 64);
+  if (k < 0) { snprintf(out, cap, "(0)"); return; }   /* no nil byte: never nil */
+  snprintf(out, cap, "(%siv__nilb[%d])", obj, k);
 }
 void ivar_nilbit_set(Compiler *c, int cid, int iv, const char *obj, char *out, size_t cap) {
   int k = ivar_nilbit_index(c, cid, iv);
-  snprintf(out, cap, "%siv__nilbits[%d] |= (1ULL << %d)", obj, k / 64, k % 64);
+  if (k < 0) { snprintf(out, cap, "(void)0"); return; }
+  snprintf(out, cap, "%siv__nilb[%d] = 1", obj, k);
 }
 void ivar_nilbit_clear(Compiler *c, int cid, int iv, const char *obj, char *out, size_t cap) {
   int k = ivar_nilbit_index(c, cid, iv);
-  snprintf(out, cap, "%siv__nilbits[%d] &= ~(1ULL << %d)", obj, k / 64, k % 64);
+  if (k < 0) { snprintf(out, cap, "(void)0"); return; }
+  snprintf(out, cap, "%siv__nilb[%d] = 0", obj, k);
 }
 
 /* The ivar an InstanceVariableReadNode / write names, as the read emitter

@@ -19,7 +19,7 @@ typedef enum {
   RK_NONE,      /* no value: unknown or void */
   RK_SCALAR,    /* an immediate: Integer, Float, true/false, Symbol, nil */
   RK_OPT,       /* an Integer or Float that can hold nil beside its value: an
-                   sp_oint / sp_ofloat, or an ivar with a bit in iv__nilbits */
+                   sp_oint / sp_ofloat, or an ivar with a byte in iv__nilb */
   RK_STRUCT,    /* a by-value builtin struct: Range, Time, Complex, Rational,
                    Process::Tms, a Class */
   RK_VOBJ,      /* a user object of a value-type class, held by value */

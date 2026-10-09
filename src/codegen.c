@@ -8967,9 +8967,9 @@ void emit_class_struct(Compiler *c, ClassInfo *ci, Buf *b) {
     buf_puts(b, "  sp_bool priv_call;\n");
     buf_puts(b, "  sp_StrArray *backtrace;\n");
     buf_puts(b, "  void *msg_h;\n");
-    /* the nil bits follow the base fields: the runtime reads msg_h through
+    /* the nil bytes follow the base fields: the runtime reads msg_h through
        the sp_Exception cast */
-    if (class_nilbit_words(c, cid) > 0) buf_printf(b, "  uint64_t iv__nilbits[%d];\n", class_nilbit_words(c, cid));
+    if (class_nilbyte_count(c, cid) > 0) buf_printf(b, "  uint8_t iv__nilb[%d];\n", class_nilbyte_count(c, cid));
     for (int i = 0; i < ci->nivars; i++) {
       buf_puts(b, "  ");
       emit_ivar_field_ctype(c, ci->ivar_types[i], b);
@@ -8988,10 +8988,10 @@ void emit_class_struct(Compiler *c, ClassInfo *ci, Buf *b) {
      emitter and the runtime take, and cls_id follows it. */
   if (ci->ary_root > 0) buf_printf(b, "  %s ary;\n", arysub_array_ctype(c, cid));
   buf_puts(b, "  sp_int cls_id;\n");  /* runtime class tag for virtual dispatch */
-  /* the nil bits of the Integer / Float ivars that can hold nil (bit i:
+  /* the nil bytes of the Integer / Float ivars that can hold nil (byte i:
      ivar i is nil); sized for the whole hierarchy so the fields after it
-     sit at one offset in every struct of it (class_nilbit_words) */
-  if (class_nilbit_words(c, cid) > 0) buf_printf(b, "  uint64_t iv__nilbits[%d];\n", class_nilbit_words(c, cid));
+     sit at one offset in every struct of it (class_nilbyte_count) */
+  if (class_nilbyte_count(c, cid) > 0) buf_printf(b, "  uint8_t iv__nilb[%d];\n", class_nilbyte_count(c, cid));
   for (int i = 0; i < ci->nivars; i++) {
     buf_puts(b, "  ");
     emit_ivar_field_ctype(c, ci->ivar_types[i], b);
@@ -9075,8 +9075,8 @@ static const char *ivar_scalar_nil_init(TyKind t) {
   /* Mirror the read-side nil sentinels: a symbol ivar's nil is (sp_sym)-1,
      not the memset zero pattern (symbol 0 is a real symbol), so `@x ||= v`
      on an unset ivar would otherwise keep the zero value instead of running
-     the assignment (#3210). An Integer or Float ivar's nil is its bit in
-     iv__nilbits, set by emit_ivar_nil_inits_from. */
+     the assignment (#3210). An Integer or Float ivar's nil is its byte in
+     iv__nilb, set by emit_ivar_nil_inits_from. */
   if (t == TY_SYMBOL) return "((sp_sym)-1)";
   /* a Class slot's zero pattern is class index 0, a real class: `@k ||= String`
      kept it and answered the first class of the program (#5357) */
@@ -9094,13 +9094,15 @@ static void emit_ivar_nil_inits_from(Compiler *c, Buf *b, ClassInfo *ci, int fro
                                      const char *lead, const char *term) {
 
   int cid = (int)(ci - c->classes);
-  int words = class_nilbit_words(c, cid);
-  /* every Integer / Float ivar with a nil bit starts nil: its bit set */
-  for (int w = 0; w < words; w++) {
-    unsigned long long mask = 0;
-    for (int i = from; i < ci->nivars && i < (w + 1) * 64; i++)
-      if (i >= w * 64 && ivar_has_nilbit(c, cid, i)) mask |= 1ULL << (i - w * 64);
-    if (mask || from == 0) buf_printf(b, "%s%siv__nilbits[%d] = 0x%llxULL%s", lead, lv, w, mask, term);
+  int nbytes = class_nilbyte_count(c, cid);
+  /* every Integer / Float ivar with a nil byte starts nil: its byte 1, every
+     other byte 0 (the members below `from` are the constructor's) */
+  if (nbytes > 0) {
+    buf_printf(b, "%smemset(%siv__nilb, 0, sizeof(%siv__nilb))%s", lead, lv, lv, term);
+    for (int i = from; i < ci->nivars; i++) {
+      int k = ivar_nilbit_index(c, cid, i);
+      if (k >= 0 && ivar_has_nilbit(c, cid, i)) buf_printf(b, "%s%siv__nilb[%d] = 1%s", lead, lv, k, term);
+    }
   }
   for (int i = from; i < ci->nivars; i++) {
     const char *name = iv_c(ci->ivars[i] + 1);  /* skip leading '@', mangle to a C field */
