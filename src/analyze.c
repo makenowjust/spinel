@@ -2494,8 +2494,10 @@ void build_ie_map(Compiler *c) {
       cls = ty_is_object(rt) ? ty_object_class(rt) : ie_poly_mark(c, id, rt);
       if (cls == -1 && !ty_is_object(rt)) cls = ie_class_value_target(c, id, recv, rt, blk);
       /* (a boxed receiver no class of the program's can be -- Object.new --
-         counts too: ie_poly_mark found none) */
-      if (cls == -1 && pass && rt != TY_UNKNOWN && !ty_is_object(rt) &&
+         counts too: ie_poly_mark found none, or found the self rebound with
+         no class it must be, -2 - id; either way its ivars can read nil.
+         The mark is the nil question's alone, so it only widens.) */
+      if (cls < 0 && pass && rt != TY_UNKNOWN && !ty_is_object(rt) &&
           (sp_streq(nm, "instance_eval") || sp_streq(nm, "instance_exec")) &&
           nt_kind(nt, blk) == NK_BlockNode)
         mark_ie_nonobj(c, blk);
