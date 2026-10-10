@@ -8,7 +8,7 @@ def shifted(v, n)
 end
 [5, -5, 2**40, -(2**40), :pad].each do |v|
   next unless v.is_a?(Integer)
-  p [62, 63, 64, 65, 1000].map { |n| shifted(v, n) }
+  p [31, 32, 33, 62, 63, 64, 65, 1000].map { |n| shifted(v, n) }
   p [-1, -3].map { |n| shifted(v, n) }
 end
 p shifted(:pad, 1) rescue p $!.class
