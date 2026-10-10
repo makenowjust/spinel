@@ -20,6 +20,9 @@
    require-gated stdlib (stringio, io/console, ...) so they match CRuby's
    uninitialized-constant / NoMethodError when the require is absent. */
 extern int g_require_gate;
+/* the program may load a file the compiler did not read (spinel_parse.c,
+   above resolve_requires): what that file would define is not in the node table */
+extern int g_require_unread;
 /* SPINEL_SHARE_STRINGS is on: set, not empty and not "0" (spinel_parse.c) */
 int sp_share_strings_env(void);
 void sp_feature_mark(const char *name);
@@ -288,6 +291,9 @@ typedef struct {
                        asked, 2 never holds the nil sentinel, 3 may */
   signed char hcp_int; /* (--int-overflow=promote, codegen) hcp_compute's fact: 1 the
                        boxed slot only ever holds an Integer or nil, -1 not proven */
+  TyKind body_write; /* (parameter) the join of what its own body assigns it, as
+                        infer_write_types last folded the writes; TY_UNKNOWN when
+                        nothing does */
 } LocalVar;
 #define POLY_LIFT_APPENDED 1
 #define POLY_LIFT_ZSUPER   2
@@ -412,6 +418,7 @@ typedef struct {
                                String's handle, which the callee's tail read
                                publishes (_sp_ret_strbuf); set once the
                                analysis settles (an_mark_handle_returns) */
+  unsigned char ret_channel_check; /* --repr-check: the earlier pickup proof succeeded */
   unsigned char ret_fresh; /* the same return-tail walk proves a new String
                               (or nil) on every path; no incoming handle */
   int ret_param;       /* --share-strings: every non-fresh return reads this
@@ -582,7 +589,8 @@ typedef struct {
                           once superclasses are wired can fill alias_cls */
   int   *alias_builtin; /* 1: the alias captured the builtin method of a
                            reopened primitive, which the class had not
-                           defined where the alias appeared */
+                           defined where the alias appeared.
+                           2: a captured builtin singleton method */
   int naliases, caliases;
   int enum_yield_arity; /* widest `yield` arity in this class's each, so the
                            Enumerable collector packs a multi-value yield into
@@ -614,6 +622,7 @@ typedef struct {
      struct name; free_sym its optional finalizer. Method bindings live in the
      compiler's native_methods registry, keyed by this class's index. */
   int is_native_class;
+  int is_builtin_const; /* builtin class/module name, classified at registration */
   /* --share-strings: a native class whose binding declares that its object
      keeps a String (`native_share ... "keeps"`): its objects are holders */
   int native_share_keeps;
@@ -622,13 +631,27 @@ typedef struct {
      and Array's methods dispatch on them. ary_root is the class right below
      Array in the chain, plus one (0: not an Array subclass); ary_kind, read
      on that root (comp_ary_kind), is the kind of the Array every instance of
-     the chain embeds, folded from the elements the program puts in. */
+     the chain embeds, folded from the elements the program puts in.
+     A Hash subclass is the same with its Hash: ary_root names the class
+     right below Hash, ary_kind is a Hash kind, and ary_hash is set on every
+     class of the chain. The comp_ary_* / comp_arysub_* functions answer for
+     both; the Array-only ones say so. */
   int ary_root;
   TyKind ary_kind;
+  int ary_hash;
   char *c_struct;      /* e.g. "sp_StringIO", or NULL */
   char *native_free;   /* finalizer C symbol, or NULL */
   int freeze_observed; /* freeze/frozen? reaches instances of this class: codegen
                           guards its ivar stores with the GC-header frozen bit */
+  int presence_observed; /* a read that tells an assigned ivar from one never
+                          assigned reaches instances of this class
+                          (an_presence_observe): ivar_set_kind may give
+                          its ivars an assigned flag */
+  int presence_family; /* 1 + the class that stands for the classes sharing
+                          this one's layout or methods (those above and below
+                          it, the modules they include or that include them),
+                          which agree on an ivar's assigned flag; 0 for none
+                          or one shared with Object (an_presence_families) */
   int is_value_type;   /* small immutable scalar-ivar class represented by value
                           (sp_X, not sp_X *): no heap alloc / GC. Set by
                           detect_value_types after analysis. */
@@ -902,6 +925,8 @@ typedef struct {
      is_anon_struct is set */
   int *anon_struct_ids;
   int n_anon_struct_ids, anon_struct_ids_valid;
+  int has_anonymous_classes; /* Class.new identities with execution-time names */
+  int user_define_method;    /* 0 not asked yet, 1 none, 2 the program defines or aliases its own define_method */
 
   /* local-write-by-name index; see comp_lvw_first */
   int *lvw_head;        /* [lvw_nbuckets] first write id in each name bucket */
@@ -967,6 +992,7 @@ typedef struct {
   int *vs_next;         /* [vs_count] the next entry sharing the bucket */
   unsigned char *vs_kind; /* [vs_count] an entry's site kind (VsKind) */
   int *vs_rparent;      /* [vs_nodes] the call whose receiver a node is, or -1 */
+  int *vs_whead, *vs_wnext; /* [vs_nodes] the local writes whose value a node is, in node order */
   unsigned char *vs_dropped; /* [vs_nodes] a statement the next statement follows */
   int vs_nbuckets, vs_count, vs_cap, vs_nodes, vs_toplevel;
   unsigned vs_version, vs_gen;
@@ -979,7 +1005,7 @@ typedef struct {
 
   ClassInfo *classes;
   int nclasses, cclasses;
-  int has_arysub;      /* some class is an Array subclass (ClassInfo.ary_root, #7449) */
+  int has_arysub;      /* some class is an Array or Hash subclass (ClassInfo.ary_root, #7449) */
   /* the nodes infer_type answered as an Array subclass instance's Array
      (ary_operand, an_ary_viewed_mark), indexed by node; NULL until one is */
   unsigned char *ary_viewed;
@@ -1069,6 +1095,7 @@ typedef struct {
   /* body-node id -> enclosing BlockNode id (lazy; emit_stmts block-local
      resets). Sized nt->count; -1 = not a block body. */
   int *blk_body_map;
+  struct ReprChannelCheck *repr_channel_check; /* --repr-check return-channel shadow */
   /* node id -> the number a name invented from the node carries
      (comp_node_ord), bit 0 set for a builtin's. Extended over appended
      nodes, never refilled. A builtin node counts within its base, the
@@ -1112,7 +1139,38 @@ typedef struct {
      reflective read, list or copy of an Array, a Hash or a Random asks the
      runtime's map (sp_bivar_*), and the boxed set gains its builtin arm */
   int bivar_table;
+  /* the ivar names whose writes or removals an assigned flag cannot follow
+     (an_presence_observe, read by ivar_set_kind): PRES_UNMARKED, a write no
+     emitter marks reaches one (`for @x in`, `rescue => @x`, a writer reached
+     by its name); PRES_REMOVED, the program
+     removes one. pres_any: an instance_variable_set of a computed name
+     reaches every name. pres_seen: a read of presence reaches some class
+     (an_presence_class). pres_obs: per method scope, whether the code of
+     its body may see the object's ivars (ivs_body_may_observe; the answer
+     does not depend on the ivar asked about), sized pres_obs_n. */
+  char **pres_names;
+  unsigned char *pres_flags;
+  int npres, cpres;
+  int pres_any;
+  int pres_seen;
+  unsigned char *pres_obs;
+  int pres_obs_n;
+  /* ivar_set_kind's answers, 64 ivars per class: the final kinds, then the
+     base kinds (ivs_base_kind); pres_memo_n counts both, -1 before the first */
+  int *pres_memo;
+  int pres_memo_n;
+  /* per presence family (1 + its index): whether its ivars keep the rank of
+     their first assignment (ivar_ranked); 0 not yet asked, 1 no, 2 yes */
+  unsigned char *pres_rank;
+  int pres_rank_n;
+  /* the program makes objects without initialize (allocate, Marshal.load),
+     so the order initialize assigns the ivars in says nothing of theirs; and
+     the listing order of each class (ivar_listing_order_new) */
+  int pres_noinit;
+  int **pres_ord;
+  int pres_ord_n;
 } Compiler;
+enum { PRES_UNMARKED = 1, PRES_REMOVED = 2 };
 
 Compiler *comp_new(const NodeTable *nt);
 void comp_free(Compiler *c);
@@ -1185,6 +1243,9 @@ int comp_ivarg_call(const Compiler *c, int e);
 int comp_ivarg_arg(const Compiler *c, int e);
 /* The owning class of an ivar read or write node, or -1. */
 int comp_ivar_owner(Compiler *c, int node);
+/* The PRES_* facts of an ivar name (Compiler.pres_names), and adding one */
+int comp_pres_flags(const Compiler *c, const char *ivn);
+void comp_pres_note(Compiler *c, const char *ivn, int flag);
 typedef enum { VS_READ, VS_WRITE, VS_MUT, VS_RECV, VS_STORE, VS_NKINDS } VsKind;
 /* Variable-site chains (compiler.c, see vsite_build): the entries of one
    site kind of the variable named by read kind `kind`
@@ -1204,6 +1265,10 @@ int comp_vsite_var(const Compiler *c, int e);
    whether it is a statement the next statement follows, so its value is
    dropped. */
 int comp_recv_parent(Compiler *c, int n);
+/* The local-variable writes whose value is node n, ascending: for (w =
+   comp_lwrite_of_value(c, n); w >= 0; w = comp_lwrite_next(c, w)). */
+int comp_lwrite_of_value(Compiler *c, int n);
+int comp_lwrite_next(const Compiler *c, int w);
 int comp_value_dropped(Compiler *c, int n);
 int comp_kind_first(Compiler *c, int kind);
 int comp_kind_next(const Compiler *c, int id);
@@ -1309,6 +1374,8 @@ static inline int singleton_visible_ci(Compiler *c, int ci) {
   if (ci < 0 || ci >= c->nclasses) return ci;
   return c->classes[ci].is_singleton_of ? c->classes[ci].is_singleton_of - 1 : ci;
 }
+int        comp_class_anonymous(Compiler *c, int ci);
+const char *comp_class_display_fn(Compiler *c);
 int        class_var_static_ci(Compiler *c, int node);  /* local holding one class const */
 int        class_recv_static_ci(Compiler *c, int node); /* constant or local naming one class */
 int        dynamic_new_may_reach(Compiler *c, int call_id, int cid);  /* k.new can build cid */
@@ -1373,6 +1440,7 @@ int        comp_byref_param(Compiler *c, Scope *m, int idx);
 void       propagate_borrowed_volatile(Compiler *c);
 /* Find the instance-method scope index for class_id + method name, or -1. */
 int        comp_method_in_class(Compiler *c, int class_id, const char *name);
+int        comp_method_overridden(Compiler *c, int cid, const char *name, int cmeth);
 /* The instance_exec emission runs a method's block as an instance method of
    the receiver's class by moving the method's scope there (class_id and
    is_cmethod) for the length of the block. begin records the scope's own
@@ -1429,11 +1497,16 @@ int        comp_arysub_name_is_array(Compiler *c, int cid, const char *n);
    BOPF_SELF_OR_NIL where it can be nil); and whether the call reads an
    Array argument as an Array (BOPF_ARGS_BUILTIN). */
 int        comp_arysub_call(Compiler *c, int id, TyKind rt, TyKind *kind);
-int        comp_arysub_answer(Compiler *c, int id);
-int        comp_arysub_self_result(Compiler *c, int id);
+int        comp_arysub_answer(Compiler *c, int id, int hash);
+int        comp_arysub_self_result(Compiler *c, int id, int hash);
 int        comp_arysub_args_viewed(Compiler *c, int id, TyKind rt);
 int        comp_arysub_kernel_array(Compiler *c, int id);
 int        comp_array_method_name(const char *n);
+/* the class chain of cid embeds a Hash, not an Array */
+int        comp_ary_is_hash(Compiler *c, int cid);
+/* a name the builtin cid's chain embeds answers (comp_array_method_name, or Hash's) */
+int        comp_arysub_builtin_name(Compiler *c, int cid, const char *n);
+int        comp_arysub_reopen(Compiler *c, int cid);
 int        comp_builtin_kind_reopen_mi(Compiler *c, TyKind t, const char *name);
 int        comp_builtin_name_reopened(Compiler *c, const char *name);
 int        comp_yield_chain_reopened(Compiler *c, int call);

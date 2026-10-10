@@ -39,6 +39,8 @@ int is_method_invoke(const char *n) {
   return is_call_alias(n) || sp_streq(n, "===");
 }
 
+int is_bind_call(const char *n) { return n && sp_streq(n, "bind_call"); }
+
 int is_kind_query(const char *n) {
   return sp_streq(n, "is_a?") || sp_streq(n, "kind_of?") || sp_streq(n, "instance_of?");
 }
@@ -139,6 +141,15 @@ int is_visibility_name(const char *n) {
 int is_select_bang(const char *n) {
   return sp_streq(n, "select!") || sp_streq(n, "filter!") || sp_streq(n, "keep_if") ||
          sp_streq(n, "reject!") || sp_streq(n, "delete_if");
+}
+
+int is_retaining_filter(const char *n) {
+  return is_select_bang(n) || sp_streq(n, "select") || sp_streq(n, "filter") ||
+         sp_streq(n, "find_all") || sp_streq(n, "reject");
+}
+
+int is_enum_partition_def(const char *n) {
+  return strncmp(n, "__enum_partition__", 18) == 0;
 }
 
 int is_each_walk(const char *n) {
@@ -271,6 +282,8 @@ int is_block_loop_method(const char *n) {
 int is_each_window(const char *n) {
   return sp_streq(n, "each_cons") || sp_streq(n, "each_slice");
 }
+
+int is_sum_name(const char *n) { return n && sp_streq(n, "sum"); }
 
 int is_reduce_alias(const char *n) {
   return sp_streq(n, "inject") || sp_streq(n, "reduce");
@@ -439,6 +452,39 @@ int is_object_copy(const char *n) {
 /* The reflective ivar write */
 int is_ivar_set_name(const char *n) {
   return sp_streq(n, "instance_variable_set");
+}
+
+/* Object#inspect, the text p prints */
+int is_inspect_name(const char *n) {
+  return n && sp_streq(n, "inspect");
+}
+
+/* `Marshal.dump`, by its receiver's constant name and the method */
+int is_marshal_dump(const char *recv, const char *meth) {
+  return recv && meth && sp_streq(meth, "dump") && sp_streq(recv, "Marshal");
+}
+
+/* `Marshal.load`, which builds the objects it reads without their initialize */
+int is_marshal_load(const char *recv, const char *meth) {
+  return recv && meth && sp_streq(meth, "load") && sp_streq(recv, "Marshal");
+}
+
+/* Class#allocate, an object without its initialize run */
+int is_allocate_name(const char *n) {
+  return sp_streq(n, "allocate");
+}
+
+/* The reflective ivar removal */
+int is_ivar_remove_name(const char *n) {
+  return sp_streq(n, "remove_instance_variable");
+}
+
+/* A call that tells an ivar assigned from one never assigned: the
+   reflective readers and removal, and the default inspect (inspect, and p
+   and pp, which print it) */
+int is_ivar_presence_read(const char *n) {
+  return sp_streq(n, "instance_variables") || sp_streq(n, "instance_variable_defined?") ||
+         is_ivar_remove_name(n) || is_inspect_name(n) || is_inspect_print(n);
 }
 
 /* A builtin class whose values keep their ivars in the runtime's map
@@ -757,6 +803,10 @@ int is_mod_operator(const char *n) {
   return sp_streq(n, "%");
 }
 
+int is_initialize_name(const char *n) {
+  return sp_streq(n, "initialize");
+}
+
 int is_initialize_family(const char *n) {
   return sp_streq(n, "initialize_copy") || sp_streq(n, "initialize");
 }
@@ -811,6 +861,10 @@ int is_standard_output_global(const char *n) {
 
 int is_file_class_name(const char *n) {
   return n && sp_streq(n, "File");
+}
+
+int is_filetest_module_name(const char *n) {
+  return n && sp_streq(n, "FileTest");
 }
 
 int is_io_class_name(const char *n) {
@@ -878,6 +932,23 @@ int str_mutator_str_args(const char *n, int argc, int *int_ok) {
   if (sp_streq(n, "insert") && argc == 2) return 1;
   if (sp_streq(n, "[]=") && (argc == 2 || argc == 3)) return argc - 1;
   return argc;
+}
+
+/* String methods that only read the receiver's bytes: they answer a scalar or
+   build a new string, and never retain the pointer they were handed. A
+   shared-mutable receiver can hand them its live buffer instead of a copy. */
+int is_string_read_only_method(const char *name) {
+  static const char *const ro[] = {
+    "[]", "slice", "byteslice", "getbyte", "ord", "chr",
+    "index", "rindex", "include?", "start_with?", "end_with?",
+    "count", "length", "size", "bytesize", "empty?",
+    "to_i", "to_f", "hex", "oct", "match?", "casecmp", "casecmp?",
+    "upcase", "downcase", "capitalize", "swapcase", "reverse",
+    "strip", "lstrip", "rstrip", "chomp", "chop", "center", "ljust", "rjust",
+    "each_char", "each_byte", "each_line", "chars", "bytes", "lines", "split",
+    "sum", "hash", "unpack", "unpack1", "codepoints", "scan", NULL };
+  for (int i = 0; ro[i]; i++) if (sp_streq(name, ro[i])) return 1;
+  return 0;
 }
 
 int is_string_rebind_mutator(const char *n) {
@@ -951,6 +1022,10 @@ int is_builtin_reopen_name(const char *name) {
             typedef collision before any call was reached (activesupport's
             blank.rb reopens Range and Time) */
          sp_streq(name, "Range")     || sp_streq(name, "Time") ||
+         sp_streq(name, "Rational")  || sp_streq(name, "Proc") ||
+         sp_streq(name, "Enumerator") || sp_streq(name, "MatchData") ||
+         sp_streq(name, "Complex")   || sp_streq(name, "Regexp") ||
+         sp_streq(name, "Struct")    ||
          sp_streq(name, "File")      || sp_streq(name, "Class") ||
          sp_streq(name, "Hash")      ||
          /* a thread and a fiber are runtime handles too (activesupport's
@@ -1048,3 +1123,52 @@ int is_proc_conversion_name(const char *n) { return n && (sp_streq(n, "to_proc")
 int is_aref_name(const char *n) { return n && sp_streq(n, "[]"); }
 /* `<<` alone: String#<<'s append, a chain's link */
 int is_shovel_name(const char *n) { return n && sp_streq(n, "<<"); }
+
+/* Dir's surface rewrites keep the written name distinct from the builtin
+   operation it lowers to. The iterator aliases apply only without a block. */
+const char *dir_surface_alias(const char *n, int blockless_iter) {
+  if (blockless_iter) {
+    if (sp_streq(n, "foreach")) return "entries";
+    if (sp_streq(n, "each_child")) return "children";
+  }
+  else {
+    if (sp_streq(n, "getwd")) return "pwd";
+    if (sp_streq(n, "delete") || sp_streq(n, "unlink")) return "rmdir";
+    if (is_aref_name(n)) return "glob";
+  }
+  return NULL;
+}
+
+int is_kernel_module_name(const char *n) { return n && sp_streq(n, "Kernel"); }
+
+/* Kernel's module functions, by name. A whitelist rather than "anything with
+   the Kernel receiver": Kernel is also a VALUE, so `Kernel === 5` asks whether
+   5 is in the Object hierarchy, and `Kernel.name` / `.to_s` / `.freeze` /
+   `.instance_methods` are Module's own methods on it. Dropping the receiver for
+   those would change what they mean. Only names that Module does not also
+   answer belong here. */
+int is_kernel_module_function(const char *m) {
+  static const char *const K[] = {
+    "puts", "print", "p", "pp", "printf", "sprintf", "format",
+    "raise", "fail", "exit", "exit!", "abort", "at_exit",
+    "rand", "srand", "sleep", "gets", "loop", "lambda", "proc",
+    "block_given?", "catch", "throw", "caller", "binding", "__method__",
+    "require", "require_relative", "load", "warn", "system", "exec", "spawn",
+    "Integer", "Float", "String", "Array", "Hash", "Rational", "Complex",
+    NULL
+  };
+  return m && builtin_name_in(m, K);
+}
+
+/* the builtins whose subclass instance IS the builtin (#7449) */
+int is_embedding_builtin(const char *nm) {
+  return nm && (sp_streq(nm, "Array") || sp_streq(nm, "Hash"));
+}
+
+int is_class_name_name(const char *n) { return n && sp_streq(n, "name"); }
+
+int is_alias_method_name(const char *n) { return n && sp_streq(n, "alias_method"); }
+
+int is_define_method_name(const char *n) {
+  return n && sp_streq(n, "define_method");
+}

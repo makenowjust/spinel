@@ -7,6 +7,7 @@
 
 #include "codegen_internal.h"
 
+void emit_poly_user_box(Compiler *c, int id, Scope *m, const char *call, Buf *b);
 int  class_is_prim_reopen(Compiler *c, int k);
 int  exc_arm_definer(Compiler *c, int k, const char *name);
 int  poly_arm_refuses_none(Compiler *c, int mi, char *exp, size_t n);
@@ -61,7 +62,7 @@ int  poly_kw_any_key(Compiler *c, int kwh);
 int  obj_class_unrelated(Compiler *c, int a, int b);
 int  poly_native_arm_fits(Compiler *c, int k, const char *name, int n, const int *argv,
                           const TyKind *atmp_ty, TyKind *mret);
-int  emit_poly_user_arm_n(Compiler *c, int k, const char *call, TyKind mret, Scope *ms, TyKind ret,
+int  emit_poly_user_arm_n(Compiler *c, int id, int k, const char *call, TyKind mret, Scope *ms, TyKind ret,
                           int tr, int so, int is_setter_val, Buf *b);
 void emit_poly_index_cases(TyKind ret, int tr, int tv, const char *idxref, int so, Buf *b);
 int  poly_pred_kind(const char *name, int argc);

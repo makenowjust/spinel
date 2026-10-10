@@ -14,6 +14,7 @@
 #define _GNU_SOURCE   /* statx / STATX_BTIME for File.birthtime on Linux */
 #endif
 #include <stddef.h>
+#include <stdint.h>
 #include <string.h>
 #include <strings.h>
 #include <stdio.h>
@@ -564,8 +565,10 @@ sp_StrArray *sp_dir_glob_dot(const char *pattern) {SP_GC_ROOT_STR(pattern);
   return a;
 }
 
-/* One pattern, already brace-free, into `a`. */
-static void sp_dir_glob_one(const char *pattern, sp_StrArray *a) {
+/* One pattern, already brace-free, into `a`. A relative pattern is walked
+   from `base` (NULL or "" is the current directory), and its answers are
+   spelled relative to it, as Dir.glob(pattern, base:) answers. */
+static void sp_dir_glob_one(const char *pattern, const char *base, sp_StrArray *a) {
   char buf[2048];
   snprintf(buf, sizeof buf, "%s", pattern);
   char *comps[64];
@@ -604,7 +607,8 @@ static void sp_dir_glob_one(const char *pattern, sp_StrArray *a) {
   if (dir_only && ncomp > 0 && strcmp(comps[ncomp - 1], "**") == 0 && ncomp < 64) {
     comps[ncomp++] = dstar;   /* ** + / + *  -- every entry at every depth */
   }
-  if (!dir_only) { sp_glob_walk(absolute ? SP_GLOB_ROOT : "", absolute ? SP_GLOB_ROOT : "", comps, ncomp, 0, a); return; }
+  const char *start = absolute ? SP_GLOB_ROOT : (base ? base : "");
+  if (!dir_only) { sp_glob_walk(start, absolute ? SP_GLOB_ROOT : "", comps, ncomp, 0, a); return; }
   /* A symlink to a directory IS one of the answers for a non-recursive form
      ("*" + SEP lists it) and is not for the recursive one, which does not
      follow links at all -- the same split the walk itself makes. */
@@ -612,15 +616,18 @@ static void sp_dir_glob_one(const char *pattern, sp_StrArray *a) {
     for (int i = 0; i < ncomp; i++) if (strcmp(comps[i], "**") == 0) recursive = 1;
     sp_StrArray *tmp = sp_StrArray_new();
     SP_GC_ROOT(tmp);
-    sp_glob_walk(absolute ? SP_GLOB_ROOT : "", absolute ? SP_GLOB_ROOT : "", comps, ncomp, 0, tmp);
+    sp_glob_walk(start, absolute ? SP_GLOB_ROOT : "", comps, ncomp, 0, tmp);
     for (sp_int i = 0; i < tmp->len; i++) {
       const char *e = tmp->data[i];
       /* lstat, for the reason the recursive walk uses it: a symlink to a
          directory is not one of the directories this form answers. */
       struct stat lst;
       if (!e) continue;
-      if (recursive) { if (lstat(e, &lst) != 0 || !S_ISDIR(lst.st_mode)) continue; }
-      else if (!sp_glob_is_dir(e)) continue;
+      char fspath[4096];
+      if (start[0] && !absolute) snprintf(fspath, sizeof fspath, "%s%s%s", start, SP_GLOB_SEP(start), e);
+      else snprintf(fspath, sizeof fspath, "%s", e);
+      if (recursive) { if (lstat(fspath, &lst) != 0 || !S_ISDIR(lst.st_mode)) continue; }
+      else if (!sp_glob_is_dir(fspath)) continue;
       char withslash[2048];
       snprintf(withslash, sizeof withslash, "%s/", e);
       sp_glob_push(a, withslash);
@@ -630,21 +637,21 @@ static void sp_dir_glob_one(const char *pattern, sp_StrArray *a) {
 /* CRuby expands `{a,b}` before matching, and the system matcher does not do it
    at all, so it is expanded here: one alternative at a time, recursively, so
    nested and multiple braces both work. */
-static void sp_dir_glob_braces(const char *pattern, sp_StrArray *a, int depth) {
+static void sp_dir_glob_braces(const char *pattern, const char *base, sp_StrArray *a, int depth) {
   const char *open = NULL;
   int nest = 0;
   for (const char *q = pattern; *q; q++) {
     if (*q == '\\' && q[1]) { q++; continue; }
     if (*q == '{') { open = q; break; }
   }
-  if (!open || depth > 8) { sp_dir_glob_one(pattern, a); return; }
+  if (!open || depth > 8) { sp_dir_glob_one(pattern, base, a); return; }
   const char *close = NULL;
   for (const char *q = open; *q; q++) {
     if (*q == '\\' && q[1]) { q++; continue; }
     if (*q == '{') nest++;
     else if (*q == '}') { nest--; if (nest == 0) { close = q; break; } }
   }
-  if (!close) { sp_dir_glob_one(pattern, a); return; }
+  if (!close) { sp_dir_glob_one(pattern, base, a); return; }
   size_t prelen = (size_t)(open - pattern);
   const char *alt = open + 1;
   nest = 0;
@@ -659,24 +666,26 @@ static void sp_dir_glob_braces(const char *pattern, sp_StrArray *a, int depth) {
         memcpy(expanded, pattern, prelen);
         memcpy(expanded + prelen, alt, altlen);
         strcpy(expanded + prelen + altlen, close + 1);
-        sp_dir_glob_braces(expanded, a, depth + 1);
+        sp_dir_glob_braces(expanded, base, a, depth + 1);
       }
       alt = q + 1;
     }
   }
 }
 
-sp_StrArray *sp_dir_glob(const char *pattern) {
+/* Dir.glob(pattern, base: dir) */
+sp_StrArray *sp_dir_glob_base(const char *pattern, const char *base) {
   /* the pattern is often a fresh interpolation temp, unrooted at the call
      site; the per-match sp_str_allocs below can collect it mid-walk */
   SP_GC_ROOT_STR(pattern);
+  SP_GC_ROOT_STR(base);
   sp_StrArray *a = sp_StrArray_new();
   /* every matched entry sp_str_allocs inside the walk below, and enough of
      them trigger a collection mid-build -- root the result like
      sp_dir_entries_impl or it (and its pushed names) get swept under us */
   SP_GC_ROOT(a);
   if (!pattern) return a;
-  sp_dir_glob_braces(pattern, a, 0);
+  sp_dir_glob_braces(pattern, base, a, 0);
   sp_StrArray_sort_bang(a);
   /* Two or more recursive components can reach the same path by different
      splits -- "a" + SEP + "**" + SEP + "**" + SEP + "*.rs" found each file
@@ -691,6 +700,8 @@ sp_StrArray *sp_dir_glob(const char *pattern) {
     a->len = w; }
   return a;
 }
+
+sp_StrArray *sp_dir_glob(const char *pattern) { return sp_dir_glob_base(pattern, NULL); }
 
 /* ---- File.read/size/mtime/join/readlines + Math.lgamma (cold) ---- */
 
@@ -1802,6 +1813,35 @@ static void sp_bt_lines(void **buf, int n, int *lines) {
   }
   pclose(p);
 }
+#elif defined(__APPLE__) && defined(HAVE_EXECINFO_H)
+#include <mach-o/dyld.h>
+/* The same on macOS through atos, which reads the dSYM a debug build leaves
+   beside the program (clang writes it when it compiles and links in one
+   step). The main image's load address is handed over with -l, so the
+   run-time addresses are asked as they are; each answer line ends in
+   "(file:line)". */
+static void sp_bt_lines(void **buf, int n, int *lines) {
+  char exe[1024];
+  uint32_t el = sizeof exe;
+  if (_NSGetExecutablePath(exe, &el) != 0 || strchr(exe, '\'')) return;
+  const struct mach_header *mh = _dyld_get_image_header(0);
+  if (!mh) return;
+  char cmd[4096];
+  int o = snprintf(cmd, sizeof cmd, "atos -o '%s' -l 0x%lx", exe, (unsigned long)(uintptr_t)mh);
+  for (int i = 0; i < n && o < (int)sizeof cmd - 32; i++)
+    o += snprintf(cmd + o, sizeof cmd - (size_t)o, " 0x%lx", (unsigned long)((uintptr_t)buf[i] - 1));
+  if (o < (int)sizeof cmd - 16) snprintf(cmd + o, sizeof cmd - (size_t)o, " 2>/dev/null");
+  FILE *p = popen(cmd, "r");
+  if (!p) return;
+  char line[2048];
+  for (int i = 0; i < n && fgets(line, sizeof line, p); i++) {
+    char *close = strrchr(line, ')');
+    char *open = close ? strrchr(line, '(') : NULL;
+    char *c = open ? strrchr(open, ':') : NULL;
+    if (c && c < close && c[1] >= '1' && c[1] <= '9') lines[i] = atoi(c + 1);
+  }
+  pclose(p);
+}
 #else
 static void sp_bt_lines(void **buf, int n, int *lines) { (void)buf; (void)n; (void)lines; }
 #endif
@@ -2252,14 +2292,13 @@ sp_int sp_file_write_mode(const char *path, const char *data, const char *mode) 
   }
   return (sp_int)w;
 }
+extern const char *sp_errno_class_name(int e);   /* lib/sp_exc.c: the Errno:: class for a C errno */
 /* File.open(path, flags, perm): the flag word selects the fdopen mode; the
    permission bits reach open(2) only through this entry, so a created file
    carries the bits the caller asked for rather than 0666. */
 static void sp_file_open_raise(const char *path) {
   int e = errno;
-  const char *cls = e == ENOENT ? "Errno::ENOENT" : e == EACCES ? "Errno::EACCES"
-                  : e == EEXIST ? "Errno::EEXIST" : e == EISDIR ? "Errno::EISDIR" : "SystemCallError";
-  sp_raise_cls(cls, sp_sprintf("%s @ rb_sysopen - %s", strerror(e), path ? path : ""));
+  sp_raise_cls(sp_errno_class_name(e), sp_sprintf("%s @ rb_sysopen - %s", strerror(e), path ? path : ""));
 }
 /* open(2) on a FIFO waits for the other end, and it waits in the kernel with
    no descriptor to wait on. A green thread is pinned to its OS worker, so
@@ -3429,8 +3468,9 @@ sp_RbVal sp_env_shift(void) {
   size_t n = eq ? (size_t)(eq - ent) : strlen(ent);
   char *k = sp_str_alloc(n);
   memcpy(k, ent, n); k[n] = 0;
+  ((unsigned char *)k)[-1] = 0xfa;
   SP_GC_ROOT_STR(k);
-  const char *v = sp_sprintf("%s", eq ? eq + 1 : "");
+  const char *v = sp_env_str(eq ? eq + 1 : "");
   SP_GC_ROOT_STR(v);
   sp_PolyArray *a = sp_PolyArray_new();
   SP_GC_ROOT(a);
@@ -3461,7 +3501,7 @@ sp_StrStrHash *sp_env_to_h(void) {
     /* copy the VALUE first and root it: the key below is a fresh unreachable
        heap string until the set, and the value copy may GC (#2842 -- a large
        environment collected mid-loop and swept the just-built key) */
-    const char *v = sp_str_dup_external(eq + 1);
+    const char *v = sp_env_str(eq + 1);
     SP_GC_ROOT_STR(v);
     size_t kl = (size_t)(eq - *e);
     char *k = sp_str_alloc_raw(kl + 1);
@@ -3484,17 +3524,27 @@ sp_StrStrHash *sp_env_clear(void) {
   }
   return sp_env_to_h();
 }
-/* ENV.update/merge!/replace with a string-pair hash */
+/* ENV.update/merge!/replace with a string-pair hash. The pairs are stored
+   in order, so the ones before a name or value CRuby rejects stay set;
+   replace then deletes every variable the hash does not name, as
+   sp_env_update_v does. */
 sp_StrStrHash *sp_env_update_h(sp_StrStrHash *h, int replace) {
-  if (replace) sp_env_clear();
   if (h) {
     SP_GC_ROOT(h);
     for (sp_int i = 0; i < h->len; i++) {
       const char *v = sp_StrStrHash_get(h, h->order[i]);
-      if (v) setenv(h->order[i], v, 1); else unsetenv(h->order[i]);
+      sp_env_chk(h->order[i], 0);
+      if (v) setenv(h->order[i], sp_env_chk(v, 1), 1); else unsetenv(h->order[i]);
     }
   }
-  return sp_env_to_h();
+  sp_StrStrHash *env = sp_env_to_h();
+  if (replace) {
+    SP_GC_ROOT(env);
+    for (sp_int i = 0; i < env->len; i++)
+      if (!h || !sp_StrStrHash_has_key(h, env->order[i])) unsetenv(env->order[i]);
+    env = sp_env_to_h();
+  }
+  return env;
 }
 /* Keys are spinel rodata literals (SPL: 0xff marker prefix) so the str-hash
    header cache's s[-1] read is in-bounds -- a bare C literal here would
@@ -4012,9 +4062,16 @@ const char *sp_srange_to_s(sp_StrRange r) {
   return sp_sprintf("%s%s%s", r.first ? r.first : sp_str_empty,
                     r.excl ? "..." : "..", r.last ? r.last : sp_str_empty);
 }
+/* The begin's inspect is a new String the end's inspect can collect, and
+   the caller's range is a by-value pair nothing may root (#8322): both
+   ends and the first answer are held here. */
 const char *sp_srange_inspect(sp_StrRange r) {
-  const char *lo = r.first ? sp_str_inspect(r.first) : sp_str_empty;
-  const char *hi = r.last ? sp_str_inspect(r.last) : sp_str_empty;
+  const char *f = r.first, *l = r.last;
+  SP_GC_ROOT_STR(f); SP_GC_ROOT_STR(l);
+  const char *lo = f ? sp_str_inspect(f) : sp_str_empty;
+  SP_GC_ROOT_STR(lo);
+  const char *hi = l ? sp_str_inspect(l) : sp_str_empty;
+  SP_GC_ROOT_STR(hi);
   return sp_sprintf("%s%s%s", lo, r.excl ? "..." : "..", hi);
 }
 /* A boxed String range holds its two endpoint strings: the box marks them,
@@ -4059,10 +4116,17 @@ sp_RbVal sp_float_numerator(sp_float f) {
    until the promotion plan covers statically-int results (#2024), raise
    loudly instead of saturating silently. NaN/Inf raise FloatDomainError. */
 sp_int sp_float_to_i_checked_slow(sp_float f) {
-  if (isnan(f) || isinf(f)) sp_raise_cls("FloatDomainError", sp_sprintf("%g", f));
+  if (isnan(f) || isinf(f)) sp_raise_cls("FloatDomainError", isnan(f) ? "NaN" : f > 0 ? "Infinity" : "-Infinity");
   if (f >= -(sp_float)INTPTR_MIN || f < (sp_float)INTPTR_MIN)  /* exact at either sp_int width */
     sp_raise_cls("RangeError", "float out of Integer range (Bignum promotion pending)");
   return (sp_int)f;
+}
+
+void sp_float_arg_range_error(sp_float f) {
+  if (!isfinite(f))
+    sp_raise_cls("RangeError", sp_sprintf("float %s out of range of integer",
+                 isnan(f) ? "NaN" : f > 0 ? "Inf" : "-Inf"));
+  sp_raise_cls("RangeError", sp_sprintf("float %.10g out of range of integer", f));
 }
 
 /* ---- Box helpers (0 optcarrot uses) -- relocated from spinel_rt.h. ---- */
@@ -4284,11 +4348,15 @@ const char *sp_str_gsub_str_str_hash(const char *str, const char *pat, sp_StrStr
 /* Array#sum with a String initial value: concatenation fold ("abc" from
    ["a","b","c"].sum("")), CRuby's + on each element. */
 const char *sp_StrArray_sum_str(sp_StrArray *a, const char *init) {SP_GC_ROOT(a);SP_GC_ROOT_STR(init);
-  size_t n = init ? strlen(init) : 0;
-  if (a) for (sp_int i = 0; i < a->len; i++) if (a->data[i]) n += strlen(a->data[i]);
+  size_t n = init ? sp_str_byte_len(init) : 0;
+  if (a) for (sp_int i = 0; i < a->len; i++) if (a->data[i]) {
+    size_t len = sp_str_byte_len(a->data[i]);
+    if (len > SIZE_MAX - n) sp_oom_die();
+    n += len;
+  }
   char *r = sp_str_alloc(n); size_t o = 0;
-  if (init) { memcpy(r, init, strlen(init)); o = strlen(init); }
-  if (a) for (sp_int i = 0; i < a->len; i++) if (a->data[i]) { size_t l = strlen(a->data[i]); memcpy(r + o, a->data[i], l); o += l; }
+  if (init) { o = sp_str_byte_len(init); memcpy(r, init, o); }
+  if (a) for (sp_int i = 0; i < a->len; i++) if (a->data[i]) { size_t l = sp_str_byte_len(a->data[i]); memcpy(r + o, a->data[i], l); o += l; }
   r[o] = 0; sp_str_set_len(r, o); return r;
 }
 sp_RbVal sp_StrArray_uniq_bangq(sp_StrArray *a) {SP_GC_ROOT(a);

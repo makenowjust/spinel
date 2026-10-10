@@ -514,6 +514,8 @@ int emit_op_hash_set_default(Compiler *c, const BopCtx *x, Buf *b) {
      nil-typed value (a nil literal, or a call that returns nil as void)
      is evaluated for its effects and stored as nil. */
   TyKind at = comp_ntype(c, argv[0]);
+  int shared_default = strbuf_hash_default_arg(c, x->id) >= 0;
+  if (shared_default) at = TY_STRBUF;
   int is_nil = at == TY_NIL || at == TY_VOID;
   int held = !is_nil && (ty_is_object(at) || c_type_name(at));
   int t = ++g_tmp, tv = ++g_tmp;
@@ -521,14 +523,18 @@ int emit_op_hash_set_default(Compiler *c, const BopCtx *x, Buf *b) {
   snprintf(av, sizeof av, is_nil ? "0" : "_t%d", tv);
   buf_printf(b, "({ %s _t%d = ", c_type_name(rt), t); emit_expr(c, recv, b);
   buf_printf(b, "; SP_GC_ROOT(_t%d);", t);
-  if (held) { buf_puts(b, " "); emit_ctype(c, at, b); buf_printf(b, " _t%d = ", tv); emit_expr(c, argv[0], b); buf_puts(b, ";"); }
+  if (shared_default) {
+    buf_printf(b, " sp_String *_t%d = ", tv); emit_strbuf_handle_of(c, argv[0], b);
+    buf_printf(b, "; SP_GC_ROOT(_t%d);", tv);
+  }
+  else if (held) { buf_puts(b, " "); emit_ctype(c, at, b); buf_printf(b, " _t%d = ", tv); emit_expr(c, argv[0], b); buf_puts(b, ";"); }
   else if (is_nil) { buf_puts(b, " (void)("); emit_expr(c, argv[0], b); buf_puts(b, ");"); }
   buf_printf(b, " if (_t%d && sp_gc_is_frozen(_t%d)) sp_raise_frozen_hash_at(_t%d, %s);",
              t, t, t, hash_box_cls(rt));
   /* --share-strings: a String the rule shares is the default itself (`h.default
      << x`, `h[:missing] << x` change it): its handle, boxed */
   char dref[1024];
-  int dhandle = held && (at == TY_STRING || at == TY_STRBUF) && strbuf_var_handle(c, argv[0], dref, sizeof dref);
+  int dhandle = !shared_default && held && (at == TY_STRING || at == TY_STRBUF) && strbuf_var_handle(c, argv[0], dref, sizeof dref);
   if (rt == TY_SYM_POLY_HASH || rt == TY_STR_POLY_HASH || rt == TY_POLY_POLY_HASH) {
     buf_printf(b, " if (_t%d) _t%d->default_v = ", t, t);
     if (is_nil) buf_puts(b, "sp_box_nil()");
@@ -570,7 +576,8 @@ int emit_op_hash_set_default(Compiler *c, const BopCtx *x, Buf *b) {
     buf_puts(b, ";");
   }
   buf_puts(b, " ");
-  if (held || is_nil) buf_puts(b, av); else emit_expr(c, argv[0], b);
+  if (shared_default && !repr_of(c, x->id).demand) buf_printf(b, "sp_strbuf_read_pub(%s)", av);
+  else if (held || is_nil) buf_puts(b, av); else emit_expr(c, argv[0], b);
   buf_puts(b, "; })"); return 1;
 }
 
@@ -635,7 +642,7 @@ int emit_op_hash_shift(Compiler *c, const BopCtx *x, Buf *b) {
   else if (vt == TY_INT) buf_printf(b, " sp_PolyArray_push(_t%d, sp_box_int(sp_%sHash_get(_t%d, _t%d)));", tp, hn, th, tk);
   else buf_printf(b, " sp_PolyArray_push(_t%d, sp_box_str(sp_%sHash_get(_t%d, _t%d)));", tp, hn, th, tk);
   buf_printf(b, " _t%d = sp_box_poly_array(_t%d);", tr, tp);
-  buf_printf(b, " sp_%sHash_delete(_t%d, _t%d); }", hn, th, tk);
+  buf_printf(b, " sp_%sHash_delete%s(_t%d, _t%d); }", hn, rt == TY_STR_POLY_HASH ? "_bytes" : "", th, tk);
   buf_printf(b, " _t%d; })", tr);
   return 1;
 }
@@ -666,7 +673,7 @@ int emit_op_hash_delete(Compiler *c, const BopCtx *x, Buf *b) {
     buf_printf(b, "; %s _t%d = sp_%sHash_has_key%s(_t%d, _t%d) ? sp_%sHash_get%s(_t%d, _t%d) : %s;",
                c_type_name(vt), tv, hn, ks, th, tk, hn, ks, th, tk,
                vt == TY_POLY ? "sp_box_nil()" : vt == TY_STRING ? "NULL" : default_value_from_compiler(c, vt));
-  buf_printf(b, " sp_%sHash_delete%s(_t%d, _t%d); ", hn, ks, th, tk);
+  buf_printf(b, " sp_%sHash_delete%s(_t%d, _t%d); ", hn, rt == TY_STR_POLY_HASH ? "_bytes" : ks, th, tk);
   if (vt == TY_INT) { oint_open(c, x->id, TY_INT, b); buf_printf(b, "_t%d", tv); oint_close(c, x->id, b); buf_puts(b, "; })"); }
   else buf_printf(b, "_t%d; })", tv);
   return 1;
@@ -845,6 +852,7 @@ int emit_op_hash_assoc(Compiler *c, const BopCtx *x, Buf *b) {
   const int *argv = call_args(c->nt, x->id, &argc);
   /* find first pair where key==arg (assoc) or value==arg (rassoc); returns [k,v] or nil */
   int is_rassoc = sp_streq(name, "rassoc");
+  int env = nt_int(c->nt, x->id, "env_snapshot", 0);
   TyKind kt = ty_hash_key(rt), vt = ty_hash_val(rt);
   int th = ++g_tmp, tr = ++g_tmp, ti = ++g_tmp, ta = ++g_tmp;
   /* PolyPolyHash's order[] holds SLOT INDEXES; keys/vals index directly.
@@ -859,6 +867,7 @@ int emit_op_hash_assoc(Compiler *c, const BopCtx *x, Buf *b) {
   else
     snprintf(vget, sizeof vget, "sp_%sHash_%s(_t%d, _t%d->order[_t%d])", hn, avn ? "vget" : "get", th, th, ti);
   buf_printf(b, "({ sp_%sHash *_t%d = ", hn, th); emit_expr(c, recv, b); buf_puts(b, ";");
+  if (env) buf_printf(b, " SP_GC_ROOT(_t%d);", th);
   /* store argument */
   if (!is_rassoc) {
     buf_printf(b, " %s _t%d = ", hash_key_ctype(c, argv[0], kt), ta); emit_hash_key_o(c, argv[0], kt, b); buf_puts(b, ";");
@@ -867,6 +876,7 @@ int emit_op_hash_assoc(Compiler *c, const BopCtx *x, Buf *b) {
     /* rassoc: arg has value type */
     buf_printf(b, " sp_RbVal _t%d = ", ta); emit_boxed(c, argv[0], b); buf_puts(b, ";");
   }
+  if (env) buf_printf(b, is_rassoc ? " SP_GC_ROOT_RBVAL(_t%d);" : " SP_GC_ROOT_STR(_t%d);", ta);
   buf_printf(b, " sp_PolyArray *_t%d = NULL;", tr);
   buf_printf(b, " for (sp_int _t%d = 0; _t%d < _t%d->len; _t%d++) {", ti, ti, th, ti);
   if (!is_rassoc) {
@@ -893,8 +903,16 @@ int emit_op_hash_assoc(Compiler *c, const BopCtx *x, Buf *b) {
   }
   /* build pair */
   buf_printf(b, " _t%d = sp_PolyArray_new();", tr);
-  emit_push_hash_key(kt, tr, th, ti, b);
-  if (vt == TY_POLY)
+  if (env) {
+    buf_printf(b, " SP_GC_ROOT(_t%d); sp_PolyArray_push(_t%d, sp_box_str(", tr, tr);
+    if (is_rassoc) buf_printf(b, "sp_str_dup_external(_t%d->order[_t%d])", th, ti);
+    else buf_printf(b, "_t%d", ta);
+    buf_puts(b, "));");
+  }
+  else emit_push_hash_key(kt, tr, th, ti, b);
+  if (env && is_rassoc)
+    buf_printf(b, " sp_PolyArray_push(_t%d, _t%d);", tr, ta);
+  else if (vt == TY_POLY)
     buf_printf(b, " sp_PolyArray_push(_t%d, %s);", tr, vget);
   else if (vt == TY_INT)
     buf_printf(b, " sp_PolyArray_push(_t%d, %s(%s));", tr, ibox, vget);

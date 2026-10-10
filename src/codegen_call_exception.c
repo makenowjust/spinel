@@ -11,6 +11,22 @@
 #include "codegen_call_arms.h"
 
 static void emit_exc_own_render(Compiler *c, int id, int recv, int xcm, int own, Buf *b) {
+  /* NilClass#to_s answers its one frozen empty String before a nullable
+     exception's own renderer. The call plan already proves the written nil
+     arm and its builtin target. */
+  if (is_to_s_name(c->scopes[own].name) && cplan_nil(c, id) == CN_ANSWER &&
+      (TyKind)c->scopes[own].ret == TY_STRING) {
+    int t = ++g_tmp;
+    buf_printf(b, "({ sp_%s *_t%d = ", c->classes[xcm].c_name, t);
+    emit_expr(c, recv, b);
+    buf_printf(b, "; SP_GC_ROOT(_t%d); _t%d ? ", t, t);
+    int mark = view_bind(recv, "_t%d", t);
+    int tested = view_push_repr(c, recv, VR_NIL_TESTED, 1);
+    emit_exc_own_render(c, id, recv, xcm, own, b);
+    view_pop(c, tested); view_unbind(mark);
+    buf_puts(b, " : sp_str_frozen_empty; })");
+    return;
+  }
   int defc = xcm;
   (void)comp_method_in_chain(c, xcm, c->scopes[own].name, &defc);
   if (g_plan_check) ucall_observe(c, id, own, defc, 0);
@@ -655,6 +671,7 @@ int emit_call_raise_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const
       int cause_exc = cause_is_nil || (!cause_lit && (ckt == TY_NIL || ckt == TY_EXCEPTION || ckt == TY_POLY || ckt == TY_UNKNOWN ||
                       (ty_is_object(ckt) && class_is_exc_subclass(c, ty_object_class(ckt)))));
       int first_const = ac > 0 && nt_type(nt, av[0]) &&
+                        comp_ntype(c, av[0]) != TY_STRING && comp_ntype(c, av[0]) != TY_STRBUF &&
                         (sp_streq(nt_type(nt, av[0]), "ConstantReadNode") || sp_streq(nt_type(nt, av[0]), "ConstantPathNode"));
       const char *first_cn = first_const ? nt_str(nt, av[0], "name") : NULL;
       int first_xc = first_cn ? comp_class_index(c, first_cn) : -1;
@@ -720,6 +737,8 @@ int emit_call_raise_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const
     }
     else if (ac == 1 && nt_type(nt, av[0]) &&
              (sp_streq(nt_type(nt, av[0]), "ConstantReadNode") || sp_streq(nt_type(nt, av[0]), "ConstantPathNode")) &&
+             /* A String constant is the message, as a String variable is. */
+             comp_ntype(c, av[0]) != TY_STRING && comp_ntype(c, av[0]) != TY_STRBUF &&
              /* a constant holding an exception INSTANCE (`ERR = RuntimeError.new(..)`;
                 `raise ERR`) is a value, not a class name: it takes the object
                 path below, or it raised a class called "ERR" */
@@ -785,6 +804,7 @@ int emit_call_raise_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const
       }
     }
     else if (ac >= 2 && nt_type(nt, av[0]) &&
+             comp_ntype(c, av[0]) != TY_STRING && comp_ntype(c, av[0]) != TY_STRBUF &&
              (sp_streq(nt_type(nt, av[0]), "ConstantReadNode") || sp_streq(nt_type(nt, av[0]), "ConstantPathNode"))) {
       /* `raise Cls, arg` on a user exception subclass with an initialize is
          `raise Cls.new(arg)`: construct the object so its ivars are set and

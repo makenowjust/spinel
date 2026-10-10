@@ -1597,6 +1597,9 @@ static const BuiltinOp bop_rows[] = {
   { TY_STRING, "swapcase",        0, 127, BF_ANY,      TY_STRING,     BOPE_NONE },
   { TY_STRING, "delete_prefix",   1,   1, BF_ANY,      TY_STRING,     BOPE_TEMPLATE, "sp_str_delete_prefix($r, $s0)", 0 },
   { TY_STRING, "delete_suffix",   1,   1, BF_ANY,      TY_STRING,     BOPE_TEMPLATE, "sp_str_delete_suffix($r, $s0)", 0 },
+  { TY_STRING, "strip",           1, 127, BF_ANY,      TY_STRING,     BOPE_STR_SET_N, NULL, 0 },
+  { TY_STRING, "lstrip",          1, 127, BF_ANY,      TY_STRING,     BOPE_STR_SET_N, NULL, 0 },
+  { TY_STRING, "rstrip",          1, 127, BF_ANY,      TY_STRING,     BOPE_STR_SET_N, NULL, 0 },
   { TY_STRING, "lstrip",          0, 127, BF_ANY,      TY_STRING,     BOPE_TEMPLATE, "sp_str_lstrip($r)", 0 },
   { TY_STRING, "rstrip",          0, 127, BF_ANY,      TY_STRING,     BOPE_TEMPLATE, "sp_str_rstrip($r)", 0 },
   { TY_STRING, "chomp",           2, 127, BF_ANY,      TY_STRING,     BOPE_TEMPLATE, "sp_str_chomp($r)", 0 },
@@ -2111,6 +2114,8 @@ static const BuiltinOp bop_rows[] = {
   { BOP_ANY_ARRAY, "minmax",                0, 127, BF_ANY,      BOPR_SELF,     BOPE_NONE },  /* [min, max], same element kind */
   { BOP_ANY_ARRAY, "join",                  0, 127, BF_ANY,      TY_STRING,     BOPE_NONE },
   { BOP_ANY_ARRAY, "pack",                  1,   1, BF_ANY,      TY_STRING,     BOPE_TEMPLATE, "sp_$AArray_pack($h, $s0)" },
+  { BOP_ANY_ARRAY, "pack",                  2,   2, BF_ANY,      TY_POLY,       BOPE_ARRAY_PACK_BUFFER },
+  { TY_POLY, "pack",                       2,   2, BF_ANY,      TY_POLY,       BOPE_ARRAY_PACK_BUFFER },
   { BOP_ANY_ARRAY, "inspect",               0, 127, BF_ANY,      TY_STRING,     BOPE_NONE },
   { BOP_ANY_ARRAY, "to_s",                  0, 127, BF_ANY,      TY_STRING,     BOPE_NONE },
   { BOP_ANY_ARRAY, "empty?",                0, 127, BF_ANY,      TY_BOOL,       BOPE_NONE },
@@ -2534,7 +2539,7 @@ TyKind bop_result(const BuiltinOp *op, TyKind rt) {
   case (int)BOPR_ELEM:      return ty_array_elem(rt);
   case (int)BOPR_HASH_KEY_OF: return rt == TY_SYM_POLY_HASH ? TY_SYMBOL : TY_POLY;
   case (int)BOPR_HASH_INVERT: return rt == TY_STR_STR_HASH ? TY_STR_STR_HASH : TY_POLY_POLY_HASH;
-  case (int)BOPR_ARRAY_SUM: return rt == TY_STR_ARRAY ? TY_POLY : ty_array_elem(rt);
+  case (int)BOPR_ARRAY_SUM: return rt == TY_INT_ARRAY ? TY_UNKNOWN : fold_sum_type(TY_INT, ty_array_elem(rt), 0);
   case (int)BOPR_ARRAY_INDEX:
     return rt == TY_INT_ARRAY || rt == TY_STR_ARRAY || rt == TY_FLOAT_ARRAY ? TY_POLY : TY_INT;
   case (int)BOPR_ARRAY_TUPLES: return rt == TY_POLY_ARRAY ? TY_POLY_ARRAY : TY_ENUMERATOR;
@@ -2555,25 +2560,27 @@ int bop_covers(TyKind rt) {
 
 /* ---- What a builtin call does with the Strings it is handed (#6765) ---- */
 
-typedef struct { TyKind fam; const char *name; unsigned char share; } BopShareRow;
+typedef struct { TyKind fam; const char *name; unsigned char share, generated; } BopShareRow;
 
 static const BopShareRow bop_share_rows[] = {
+  /* Exact names from CRuby observations leave unobserved names unknown. */
   /* A String method copies the bytes of a String argument and answers a
      String of its own, except the ones that answer the receiver itself
      (str_self_call names the rest of them). A block a String method runs
      is handed substrings, which are new Strings. */
-  { TY_STRING, "*",          BSH_PURE },
   { TY_STRING, "<<",         BSH_RECV },
   { TY_STRING, "concat",     BSH_RECV },
   { TY_STRING, "prepend",    BSH_RECV },
   { TY_STRING, "insert",     BSH_RECV },
   { TY_STRING, "replace",    BSH_RECV },
+  { TY_STRING, "[]=",        BSH_FETCH },
   { TY_STRING, "+@",         BSH_RECV },
   { TY_STRING, "freeze",     BSH_FROZEN },
   { TY_STRING, "-@",         BSH_FROZEN },
   { TY_STRING, "dedup",      BSH_FROZEN },
   { TY_STRING, "dup",        BSH_PURE },
   { TY_STRING, "clone",      BSH_PURE },
+  { TY_STRING, "clamp",      BSH_CLAMP },
   /* Explicit rows also describe a String read through a box. */
   { TY_STRING, "delete_prefix", BSH_PURE },
   { TY_STRING, "delete_suffix", BSH_PURE },
@@ -2613,7 +2620,7 @@ static const BopShareRow bop_share_rows[] = {
   { BOP_ANY_ARRAY, "pop",       BSH_ELEM_N },
   { BOP_ANY_ARRAY, "shift",     BSH_ELEM_N },
   { BOP_ANY_ARRAY, "sample",    BSH_ELEM_N },
-  { BOP_ANY_ARRAY, "delete",    BSH_ELEM },
+  { BOP_ANY_ARRAY, "delete",    BSH_FETCH },
   { BOP_ANY_ARRAY, "delete_at", BSH_ELEM },
   { BOP_ANY_ARRAY, "slice!",    BSH_ELEM_N },
   { BOP_ANY_ARRAY, "slice",     BSH_ELEM_N },
@@ -2624,7 +2631,7 @@ static const BopShareRow bop_share_rows[] = {
   { BOP_ANY_ARRAY, "prepend",   BSH_STORE_ALL },
   { BOP_ANY_ARRAY, "[]=",       BSH_STORE_LAST },
   { BOP_ANY_ARRAY, "insert",    BSH_STORE_TAIL },
-  { BOP_ANY_ARRAY, "fill",      BSH_STORE_ALL },
+  { BOP_ANY_ARRAY, "fill",      BSH_FILL },
   { BOP_ANY_ARRAY, "concat",    BSH_MERGE },
   { BOP_ANY_ARRAY, "replace",   BSH_MERGE },
   { BOP_ANY_ARRAY, "+",         BSH_MERGE },
@@ -2655,16 +2662,16 @@ static const BopShareRow bop_share_rows[] = {
   { BOP_ANY_ARRAY, "to_a",      BSH_SUB },
   { BOP_ANY_ARRAY, "entries",   BSH_SUB },
   { BOP_ANY_ARRAY, "transpose", BSH_SUB },
-  { BOP_ANY_ARRAY, "sum",       BSH_PURE },
+  { BOP_ANY_ARRAY, "sum",       BSH_SUM },
   { BOP_ANY_ARRAY, "join",      BSH_PURE },
-  { BOP_ANY_ARRAY, "pack",      BSH_PURE },
+  { BOP_ANY_ARRAY, "pack",      BSH_PACK },
   { BOP_ANY_ARRAY, "to_s",      BSH_PURE },
   { BOP_ANY_ARRAY, "inspect",   BSH_PURE },
   { BOP_ANY_ARRAY, "include?",  BSH_PURE },
   { BOP_ANY_ARRAY, "member?",   BSH_PURE },
-  { BOP_ANY_ARRAY, "index",     BSH_PURE },
-  { BOP_ANY_ARRAY, "find_index", BSH_PURE },
-  { BOP_ANY_ARRAY, "rindex",    BSH_PURE },
+  { BOP_ANY_ARRAY, "index",     BSH_QUERY },
+  { BOP_ANY_ARRAY, "find_index", BSH_QUERY },
+  { BOP_ANY_ARRAY, "rindex",    BSH_QUERY },
   { BOP_ANY_ARRAY, "count",     BSH_PURE },
   { BOP_ANY_ARRAY, "size",      BSH_PURE },
   { BOP_ANY_ARRAY, "length",    BSH_PURE },
@@ -2679,7 +2686,7 @@ static const BopShareRow bop_share_rows[] = {
   { BOP_ANY_ARRAY, "<=>",       BSH_PURE },
   { BOP_ANY_ARRAY, "hash",      BSH_PURE },
   { BOP_ANY_ARRAY, "frozen?",   BSH_PURE },
-  { BOP_ANY_ARRAY, "clear",     BSH_PURE },
+  { BOP_ANY_ARRAY, "clear",     BSH_RECV },
 
   /* A Hash: a String key is dup'd and frozen as it is stored, so only the
      values are elements; keys and key queries answer fresh Strings. */
@@ -2688,11 +2695,11 @@ static const BopShareRow bop_share_rows[] = {
   /* the default value, or what the default proc answers for the key */
   { BOP_ANY_HASH, "default",    BSH_ELEM },
   { BOP_ANY_HASH, "fetch",      BSH_FETCH },
-  { BOP_ANY_HASH, "delete",     BSH_ELEM },
+  { BOP_ANY_HASH, "delete",     BSH_FETCH },
   { BOP_ANY_HASH, "shift",      BSH_SUB },
   { BOP_ANY_HASH, "values",     BSH_SUB },
   { BOP_ANY_HASH, "values_at",  BSH_SUB },
-  { BOP_ANY_HASH, "fetch_values", BSH_SUB },
+  { BOP_ANY_HASH, "fetch_values", BSH_UNKNOWN },
   { BOP_ANY_HASH, "to_a",       BSH_SUB },
   { BOP_ANY_HASH, "dup",        BSH_SUB },
   { BOP_ANY_HASH, "clone",      BSH_SUB },
@@ -2708,7 +2715,7 @@ static const BopShareRow bop_share_rows[] = {
   { BOP_ANY_HASH, "merge!",     BSH_MERGE },
   { BOP_ANY_HASH, "update",     BSH_MERGE },
   { BOP_ANY_HASH, "replace",    BSH_MERGE },
-  { BOP_ANY_HASH, "sum",        BSH_PURE },
+  { BOP_ANY_HASH, "sum",        BSH_SUM },
   { BOP_ANY_HASH, "keys",       BSH_PURE },
   { BOP_ANY_HASH, "key",        BSH_PURE },
   { BOP_ANY_HASH, "key?",       BSH_PURE },
@@ -2730,16 +2737,23 @@ static const BopShareRow bop_share_rows[] = {
   { BOP_ANY_HASH, "!=",         BSH_PURE },
   { BOP_ANY_HASH, "hash",       BSH_PURE },
   { BOP_ANY_HASH, "frozen?",    BSH_PURE },
-  { BOP_ANY_HASH, "clear",      BSH_PURE },
+  { BOP_ANY_HASH, "clear",      BSH_RECV },
 
   /* An IO copies what it writes and answers new Strings for what it reads;
      the buffer forms of the reads fill their second argument in place. */
-  { TY_IO, "*",            BSH_PURE },
   { TY_IO, "read",         BSH_FILL1 },
   { TY_IO, "readpartial",  BSH_FILL1 },
   { TY_IO, "sysread",      BSH_FILL1 },
   { TY_IO, "read_nonblock", BSH_FILL1 },
   { TY_IO, "pread",        BSH_FILL2 },
+  { TY_IO, "putc",         BSH_ARGS },
+  { TY_IO, "sync=",        BSH_ARGS },
+  { TY_IO, "autoclose=",   BSH_ARGS },
+  { TY_IO, "<<",           BSH_RECV },
+  { TY_IO, "flush",        BSH_RECV },
+  { TY_IO, "binmode",      BSH_RECV },
+  { TY_IO, "reopen",       BSH_RECV },
+  { TY_IO, "set_encoding", BSH_RECV },
   /* These calls keep no caller String, also on a boxed IO or Dir. */
   { TY_IO, "write",        BSH_PURE },
   { TY_IO, "gets",         BSH_PURE },
@@ -2748,10 +2762,6 @@ static const BopShareRow bop_share_rows[] = {
 
   /* The scalars copy whatever String they are handed; their iterators hand
      a block numbers or new Strings. */
-  { TY_INT,         "*", BSH_PURE },
-  { TY_BIGINT,      "*", BSH_PURE },
-  { TY_FLOAT,       "*", BSH_PURE },
-  { TY_SYMBOL,      "*", BSH_PURE },
   { TY_CLASS,       "name", BSH_FROZEN },   /* Module#name: a frozen String */
   /* File.open and Dir.open with a block hand it the handle they open and
      answer its value */
@@ -2769,28 +2779,19 @@ static const BopShareRow bop_share_rows[] = {
   { TY_CLASS,       "waitpid2", BSH_PURE },
   { TY_CLASS,       "pid", BSH_PURE },
   { TY_CLASS,       "allocate", BSH_PURE },
-  { TY_BOOL,        "*", BSH_PURE },
-  { TY_NIL,         "*", BSH_PURE },
-  { TY_RANGE,       "*", BSH_PURE },
-  { TY_FLOAT_RANGE, "*", BSH_PURE },
-  { TY_TIME,        "*", BSH_PURE },
-  { TY_COMPLEX,     "*", BSH_PURE },
-  { TY_RATIONAL,    "*", BSH_PURE },
-  { TY_REGEX,       "*", BSH_PURE },
-  { TY_MATCHDATA,   "*", BSH_PURE },
-  { TY_RANDOM,      "*", BSH_PURE },
 
   /* An OpenStruct's fields are its elements; a field's reader and writer
      (`os.name`, `os.name = s`) are read as `[]` and `[]=` (analyze_share.c
      sh_ostruct_call). each_pair has no row: codegen refuses it. */
   { TY_OPENSTRUCT, "[]",          BSH_ELEM },
   { TY_OPENSTRUCT, "dig",         BSH_ELEM },
-  { TY_OPENSTRUCT, "delete_field", BSH_ELEM },
+  { TY_OPENSTRUCT, "delete_field", BSH_FETCH },
   { TY_OPENSTRUCT, "[]=",         BSH_STORE_LAST },
-  { TY_OPENSTRUCT, "to_h",        BSH_SUB },
+  { TY_OPENSTRUCT, "to_h",        BSH_UNKNOWN },
 
   /* Kernel's functions. A name with no row (raise, throw, define_method,
-     lambda, ...) is not followed. */
+     lambda, ...) is not followed. throw now has an argument-answer row. */
+  { BOP_KERNEL, "__env_to_h", BSH_PURE },
   { BOP_KERNEL, "puts",     BSH_PURE },
   { BOP_KERNEL, "print",    BSH_PURE },
   { BOP_KERNEL, "printf",   BSH_PURE },
@@ -2801,7 +2802,7 @@ static const BopShareRow bop_share_rows[] = {
   { BOP_KERNEL, "require_relative", BSH_PURE },
   { BOP_KERNEL, "exit",     BSH_PURE },
   { BOP_KERNEL, "exit!",    BSH_PURE },
-  { BOP_KERNEL, "abort",    BSH_PURE },
+  { BOP_KERNEL, "abort",    BSH_CALL }, /* SystemExit keeps the message */
   { BOP_KERNEL, "sleep",    BSH_PURE },
   { BOP_KERNEL, "rand",     BSH_PURE },
   { BOP_KERNEL, "srand",    BSH_PURE },
@@ -2814,9 +2815,9 @@ static const BopShareRow bop_share_rows[] = {
   { BOP_KERNEL, "`",        BSH_PURE },
   { BOP_KERNEL, "block_given?", BSH_PURE },
   { BOP_KERNEL, "frozen?",  BSH_PURE },
-  { BOP_KERNEL, "freeze",   BSH_PURE },
-  /* throw compares the tag and keeps nothing */
-  { BOP_KERNEL, "throw",    BSH_PURE },
+  { BOP_KERNEL, "freeze",   BSH_RECV },
+  /* throw compares the tag and hands its value to catch. */
+  { BOP_KERNEL, "throw",    BSH_FETCH },
   { BOP_KERNEL, "p",        BSH_ARGS },
   { BOP_KERNEL, "pp",       BSH_ARGS },
   { BOP_KERNEL, "String",   BSH_ARGS },
@@ -2857,6 +2858,9 @@ static const BopShareRow bop_share_rows[] = {
   { BOP_ANY_RECV, "<=>",         BSH_PURE },
   { BOP_ANY_RECV, "freeze",      BSH_RECV },
   { BOP_ANY_RECV, "itself",      BSH_RECV },
+  { BOP_ANY_RECV, "clamp",       BSH_CLAMP }, /* the receiver or a bound */
+  { BOP_ANY_RECV, "sum",         BSH_ARGS }, /* an empty fold keeps its seed */
+  { BOP_ANY_RECV, "zip",         BSH_MERGE },
   { BOP_ANY_RECV, "dup",         BSH_RECV },
   { BOP_ANY_RECV, "clone",       BSH_RECV },
   { BOP_ANY_RECV, "method",      BSH_METHOD_REF },
@@ -2874,6 +2878,9 @@ static const BopShareRow bop_share_rows[] = {
   { BOP_ANY_RECV, "module_exec", BSH_EXEC },
   { BOP_ANY_RECV, "module_eval", BSH_EXEC },
   { BOP_ANY_RECV, "new",         BSH_NEW },
+
+  /* Formatting an exception makes text of its own. */
+  { TY_EXCEPTION, "detailed_message", BSH_PURE },
 
   /* A builtin class's constructor keeps what it is handed in the container
      it answers. (An exception keeps its message, which #message hands back
@@ -2906,20 +2913,71 @@ static const BopShareRow bop_share_rows[] = {
   { BOP_FILE_CLASS, "directory?",  BSH_PURE },
   { BOP_FILE_CLASS, "symlink?",    BSH_PURE },
   { BOP_FILE_CLASS, "executable?", BSH_PURE },
+  { BOP_FILE_CLASS, "blockdev?",         BSH_PURE },
+  { BOP_FILE_CLASS, "chardev?",          BSH_PURE },
+  { BOP_FILE_CLASS, "empty?",            BSH_PURE },
+  { BOP_FILE_CLASS, "executable_real?",  BSH_PURE },
+  { BOP_FILE_CLASS, "grpowned?",         BSH_PURE },
+  { BOP_FILE_CLASS, "identical?",        BSH_PURE },
+  { BOP_FILE_CLASS, "owned?",            BSH_PURE },
+  { BOP_FILE_CLASS, "pipe?",             BSH_PURE },
+  { BOP_FILE_CLASS, "readable?",         BSH_PURE },
+  { BOP_FILE_CLASS, "readable_real?",    BSH_PURE },
+  { BOP_FILE_CLASS, "setgid?",           BSH_PURE },
+  { BOP_FILE_CLASS, "setuid?",           BSH_PURE },
+  { BOP_FILE_CLASS, "size",              BSH_PURE },
+  { BOP_FILE_CLASS, "size?",             BSH_PURE },
+  { BOP_FILE_CLASS, "socket?",           BSH_PURE },
+  { BOP_FILE_CLASS, "sticky?",           BSH_PURE },
+  { BOP_FILE_CLASS, "world_readable?",   BSH_PURE },
+  { BOP_FILE_CLASS, "world_writable?",   BSH_PURE },
+  { BOP_FILE_CLASS, "writable?",         BSH_PURE },
+  { BOP_FILE_CLASS, "writable_real?",    BSH_PURE },
+  { BOP_FILE_CLASS, "zero?",             BSH_PURE },
   { BOP_FILE_CLASS, "mtime",       BSH_PURE },
   { BOP_FILE_CLASS, "delete",      BSH_PURE },
   { BOP_FILE_CLASS, "unlink",      BSH_PURE },
   { BOP_FILE_CLASS, "rename",      BSH_PURE },
 
+  /* FileTest exposes only the path tests, including their numeric answers. */
+  { BOP_FILETEST, "blockdev?",           BSH_PURE },
+  { BOP_FILETEST, "chardev?",            BSH_PURE },
+  { BOP_FILETEST, "directory?",          BSH_PURE },
+  { BOP_FILETEST, "empty?",              BSH_PURE },
+  { BOP_FILETEST, "executable?",         BSH_PURE },
+  { BOP_FILETEST, "executable_real?",    BSH_PURE },
+  { BOP_FILETEST, "exist?",              BSH_PURE },
+  { BOP_FILETEST, "file?",               BSH_PURE },
+  { BOP_FILETEST, "grpowned?",           BSH_PURE },
+  { BOP_FILETEST, "identical?",          BSH_PURE },
+  { BOP_FILETEST, "owned?",              BSH_PURE },
+  { BOP_FILETEST, "pipe?",               BSH_PURE },
+  { BOP_FILETEST, "readable?",           BSH_PURE },
+  { BOP_FILETEST, "readable_real?",      BSH_PURE },
+  { BOP_FILETEST, "setgid?",             BSH_PURE },
+  { BOP_FILETEST, "setuid?",             BSH_PURE },
+  { BOP_FILETEST, "size",                BSH_PURE },
+  { BOP_FILETEST, "size?",               BSH_PURE },
+  { BOP_FILETEST, "socket?",             BSH_PURE },
+  { BOP_FILETEST, "sticky?",             BSH_PURE },
+  { BOP_FILETEST, "symlink?",            BSH_PURE },
+  { BOP_FILETEST, "world_readable?",     BSH_PURE },
+  { BOP_FILETEST, "world_writable?",     BSH_PURE },
+  { BOP_FILETEST, "writable?",           BSH_PURE },
+  { BOP_FILETEST, "writable_real?",      BSH_PURE },
+  { BOP_FILETEST, "zero?",               BSH_PURE },
+
   /* ENV answers a new String for each read, and keeps a copy of what it
-     is handed (fetch answers its default when the name is unset) */
+     is handed (fetch answers its default when the name is unset).
+     Stores answer their value argument; delete's missing-key block has
+     fetch's argument and result flow. ENV has no retained elements. */
   { BOP_ENV,        "[]",          BSH_PURE },
-  { BOP_ENV,        "[]=",         BSH_PURE },
-  { BOP_ENV,        "store",       BSH_PURE },
+  { BOP_ENV,        "[]=",         BSH_LAST },
+  { BOP_ENV,        "store",       BSH_LAST },
   { BOP_ENV,        "fetch",       BSH_FETCH },
   { BOP_ENV,        "key?",        BSH_PURE },
   { BOP_ENV,        "include?",    BSH_PURE },
-  { BOP_ENV,        "delete",      BSH_PURE },
+  { BOP_ENV,        "delete",      BSH_FETCH },
 
   /* a proc's, a lambda's or a Method's invocations */
   { BOP_CALLABLE, "call",        BSH_CALL },
@@ -2931,8 +2989,69 @@ static const BopShareRow bop_share_rows[] = {
   /* A hand row that wins over its iterator row: catch's block is handed
      its tag and the call answers the block's value (or a throw's), a
      shape no BSH_ITER_* answer has, so the row derives none. Read as
-     fresh, the analysis never names the tag or the answer (#6765). */
-  { BOP_KERNEL, "catch",    BSH_ITER_FRESH },
+     fresh, the analysis never names the tag or the answer (#6765).
+     FETCH records the tag and block result; lexical throw matching
+     continues to supply the non-local result. */
+  { BOP_KERNEL, "catch",    BSH_FETCH },
+  /* CRuby identity observations replace open-ended keeps-nothing defaults.
+     Mixed routes use the existing unknown-call treatment until a precise
+     share kind can describe every argument and block form. */
+  { TY_STRING, "[]=", BSH_LAST },
+  { TY_STRING, "append_as_bytes", BSH_RECV },
+  { TY_STRING, "bytesplice", BSH_RECV },
+  { TY_STRING, "partition", BSH_ARRAY_OF },
+  { TY_STRING, "rpartition", BSH_ARRAY_OF },
+  { TY_STRING, "each_line", BSH_LINE },
+  { TY_STRING, "lines", BSH_LINE },
+  { TY_STRING, "gsub", BSH_SUBST },
+  { TY_STRING, "gsub!", BSH_SUBST_BANG },
+  { TY_STRING, "sub", BSH_SUBST },
+  { TY_STRING, "sub!", BSH_SUBST_BANG },
+  { TY_STRING, "match", BSH_BLOCK },
+  { TY_STRING, "clear", BSH_RECV },
+  { TY_STRING, "capitalize", BSH_EMPTY_SELF },
+  { TY_STRING, "to_s", BSH_RECV },
+  { TY_STRING, "to_str", BSH_RECV },
+  { TY_STRING, "force_encoding", BSH_RECV },
+  { TY_SYMBOL, "match", BSH_BLOCK },
+  { TY_REGEX, "match", BSH_BLOCK },
+  { BOP_ANY_ARRAY, "cycle", BSH_QUERY },
+  { BOP_ANY_ARRAY, "group_by", BSH_UNKNOWN },
+  { BOP_ANY_HASH, "group_by", BSH_UNKNOWN },
+  { BOP_ANY_HASH, "transform_keys", BSH_MERGE },
+  { TY_RANGE, "sum", BSH_SUM },
+  { TY_RANGE, "chain", BSH_UNKNOWN },
+  { TY_RANGE, "tally", BSH_UNKNOWN },
+  { TY_RANGE, "zip", BSH_UNKNOWN },
+  { TY_RANGE, "chunk", BSH_UNKNOWN },
+  { TY_RANGE, "grep", BSH_UNKNOWN },
+  { TY_RANGE, "grep_v", BSH_UNKNOWN },
+  { TY_RANGE, "group_by", BSH_UNKNOWN },
+  { TY_RANGE, "to_set", BSH_UNKNOWN },
+  { TY_IO, "sum", BSH_SUM },
+  { TY_IO, "chain", BSH_UNKNOWN },
+  { TY_IO, "tally", BSH_UNKNOWN },
+  { TY_IO, "zip", BSH_UNKNOWN },
+  { TY_IO, "autoclose=", BSH_LAST },
+  { TY_IO, "sync=", BSH_LAST },
+  { TY_IO, "putc", BSH_LAST },
+  { TY_IO, "chunk", BSH_UNKNOWN },
+  { TY_IO, "collect", BSH_UNKNOWN },
+  { TY_IO, "collect_concat", BSH_UNKNOWN },
+  { TY_IO, "each_with_object", BSH_UNKNOWN },
+  { TY_IO, "filter_map", BSH_UNKNOWN },
+  { TY_IO, "flat_map", BSH_UNKNOWN },
+  { TY_IO, "grep", BSH_UNKNOWN },
+  { TY_IO, "grep_v", BSH_UNKNOWN },
+  { TY_IO, "group_by", BSH_UNKNOWN },
+  { TY_IO, "inject", BSH_UNKNOWN },
+  { TY_IO, "map", BSH_UNKNOWN },
+  { TY_IO, "reduce", BSH_UNKNOWN },
+  { TY_IO, "to_h", BSH_UNKNOWN },
+  { TY_IO, "to_set", BSH_UNKNOWN },
+
+#include "builtin_share_pure.inc"
+
 };
 #define BOP_NSHARE ((int)(sizeof bop_share_rows / sizeof bop_share_rows[0]))
 
@@ -2983,6 +3102,12 @@ static const BopShareRow bop_share_rows[] = {
      run as a boxed Array (IRF_GAP_RUN_BOXED), combination's as the
      receiver's kind; ty_block_yield leaves a run untyped. */
 static const IterRow iter_rows[] = {
+  { TY_STRING, "bytes", 0, 0, 1, { YS_NUM }, IA_RECV, IRF_GAP_SHAPE | IRF_GAP_FWD },
+  { TY_STRING, "chars", 0, 0, 1, { YS_FRESH }, IA_RECV, IRF_GAP_SHAPE | IRF_GAP_FWD },
+  { TY_STRING, "codepoints", 0, 0, 1, { YS_NUM }, IA_RECV, IRF_GAP_SHAPE | IRF_GAP_FWD },
+  { TY_STRING, "each_codepoint", 0, 0, 1, { YS_NUM }, IA_RECV, IRF_GAP_SHAPE | IRF_GAP_FWD },
+  { TY_STRING, "grapheme_clusters", 0, 0, 1, { YS_FRESH }, IA_RECV, IRF_GAP_SHAPE | IRF_GAP_FWD },
+
   { TY_STRING, "each_char",  0, 0, 1, { YS_FRESH }, IA_RECV, 0 },
   { TY_STRING, "each_line",  0, 0, 1, { YS_FRESH }, IA_RECV, 0 },
   { TY_STRING, "each_line",  1, 2, 1, { YS_FRESH }, IA_RECV, IRF_GAP_SHAPE },
@@ -2994,7 +3119,7 @@ static const IterRow iter_rows[] = {
   { TY_STRING, "gsub!",      1, 1, 1, { YS_FRESH }, IA_RECV, IRF_GAP_SHAPE },
   { TY_STRING, "sub!",       1, 1, 1, { YS_FRESH }, IA_RECV, IRF_GAP_SHAPE },
   { TY_STRING, "upto",       1, 2, 1, { YS_FRESH }, IA_RECV, IRF_GAP_SHAPE },
-  { TY_STRING, "split",      0, 2, 1, { YS_FRESH }, IA_RECV, IRF_GAP_SHARE | IRF_GAP_SHAPE },
+  { TY_STRING, "split",      0, 2, 1, { YS_FRESH }, IA_RECV, IRF_GAP_SHAPE },
 
   { BOP_ANY_ARRAY, "each",            0, 0, 1, { YS_ELEM }, IA_RECV, 0 },
   { BOP_ANY_ARRAY, "each_entry",      0, 0, 1, { YS_ELEM }, IA_RECV, 0 },
@@ -3184,7 +3309,11 @@ static const IterRow iter_rows[] = {
   { BOP_ANY_RECV, "yield_self", 0, 0, 1, { YS_RECV }, IA_BLOCKVAL, 0 },
   /* Enumerable's, read by the shape desugar on any receiver */
   { BOP_ANY_RECV, "each_with_index",  0, 0, 2, { YS_ELEM, YS_INDEX }, IA_RECV, IRF_GAP_SHARE },
-  { BOP_ANY_RECV, "each_with_object", 1, 1, 2, { YS_ELEM, YS_MEMO }, IA_MEMO, IRF_GAP_SHARE },
+  { BOP_ANY_RECV, "each_with_object", 1, 1, 2, { YS_ELEM, YS_MEMO }, IA_MEMO, 0 },
+  { BOP_ANY_RECV, "inject", 1, 1, 2, { YS_MEMO, YS_ELEM }, IA_MEMO, IRF_GAP_SHAPE | IRF_GAP_FWD },
+  { BOP_ANY_RECV, "inject", 0, 0, 2, { YS_MEMO, YS_ELEM }, IA_MEMO, IRF_GAP_SHAPE | IRF_GAP_FWD },
+  { BOP_ANY_RECV, "reduce", 1, 1, 2, { YS_MEMO, YS_ELEM }, IA_MEMO, IRF_GAP_SHAPE | IRF_GAP_FWD },
+  { BOP_ANY_RECV, "reduce", 0, 0, 2, { YS_MEMO, YS_ELEM }, IA_MEMO, IRF_GAP_SHAPE | IRF_GAP_FWD },
 };
 #define ITER_NROWS ((int)(sizeof iter_rows / sizeof iter_rows[0]))
 
@@ -3279,10 +3408,11 @@ int iter_keeps_no_block_value(TyKind fam, const char *name, int argc) {
 
 /* The families whose iterator rows the share analysis reads: a number's or
    a Range's iterators hand their blocks numbers, and the family's "*" row
-   answers for them. */
+   answers for them. Numeric and Range rows now participate too: a memo
+   or a block's answer can hold Strings even when yielded elements cannot. */
 static int iter_share_family(TyKind fam) {
   return fam == TY_STRING || fam == BOP_ANY_ARRAY || fam == BOP_ANY_HASH || fam == BOP_KERNEL ||
-         fam == BOP_ANY_RECV;
+         fam == BOP_ANY_RECV || fam == TY_RANGE || fam == TY_FLOAT_RANGE || fam == TY_INT || fam == TY_FLOAT;
 }
 
 /* the hand row's answer for the name, or 0 */
@@ -3307,6 +3437,14 @@ static int bop_share_find(TyKind fam, const char *name) {
   return s ? s : iter_share(fam, name);
 }
 
+int bop_share_boxed(TyKind fam, const char *name) {
+  if (!name) return 0;
+  for (int i = bop_share_chain(fam, name); i >= 0 && i < BOP_NSHARE; i = bop_share_next[i])
+    if (!bop_share_rows[i].generated && bop_share_rows[i].fam == fam && sp_streq(bop_share_rows[i].name, name))
+      return bop_share_rows[i].share;
+  return iter_share(fam, name);
+}
+
 int bop_share_named(TyKind fam, const char *name) {
   return name ? bop_share_find(fam, name) : 0;
 }
@@ -3315,17 +3453,47 @@ int bop_share_self_answer(const char *name, int has_block) {
   size_t n = name ? strlen(name) : 0;
   if (n == 0) return 0;
   int s = bop_share_find(TY_STRING, name);
-  if (n >= 2 && name[n - 1] == '!') return s == BSH_RECV || s == BSH_ITER_FRESH_RECV;
+  if (n >= 2 && name[n - 1] == '!') return s == BSH_RECV || s == BSH_ITER_FRESH_RECV || s == BSH_SUBST_BANG;
   if (!has_block) return 0;
   /* the analysis reads the any-receiver row after the String one (tap) */
   if (!s) s = bop_share_find(BOP_ANY_RECV, name);
-  return s == BSH_ITER_FRESH_RECV || s == BSH_ITER_SELF;
+  return s == BSH_ITER_FRESH_RECV || s == BSH_ITER_SELF || s == BSH_LINE || s == BSH_SUBST_BANG;
+}
+
+/* A family whose builtin methods keep no String they are handed and answer
+   none the receiver holds, unless a row says otherwise: the scalars, a
+   String (its methods copy their arguments' bytes), and IO (it writes them
+   out). An unobserved name there is one the CRuby observations do not
+   list: a method of a class they do not cover (Socket's connect), or no
+   method at all, which raises NoMethodError and hands nothing on. */
+static int bop_share_pure_family(TyKind fam) {
+  switch (fam) {
+  case TY_STRING: case TY_IO: case TY_INT: case TY_BIGINT: case TY_FLOAT: case TY_SYMBOL:
+  case TY_BOOL: case TY_NIL: case TY_RANGE: case TY_FLOAT_RANGE: case TY_TIME: case TY_COMPLEX:
+  case TY_RATIONAL: case TY_REGEX: case TY_MATCHDATA: case TY_RANDOM:
+    return 1;
+  default:
+    return 0;
+  }
+}
+/* ...except the reflective names, which run any method, or code, on the
+   receiver: what those hand on is unknown */
+static int bop_share_reflective(const char *name) {
+  static const char *const names[] = {
+    "send", "__send__", "public_send", "instance_eval", "instance_exec", "extend",
+    "instance_variable_get", "instance_variable_set", "remove_instance_variable",
+    "method", "public_method", "singleton_method", "define_singleton_method",
+    "tap", "then", "yield_self", NULL };
+  for (int i = 0; names[i]; i++) if (sp_streq(name, names[i])) return 1;
+  return 0;
 }
 
 int bop_share(TyKind fam, const char *name) {
   if (!name) return 0;
+  /* "*" is an operator; the family default is bop_share_pure_family's */
   int s = bop_share_find(fam, name);
-  return s ? s : bop_share_find(fam, "*");
+  if (!s && bop_share_pure_family(fam) && !bop_share_reflective(name)) s = BSH_PURE;
+  return s;
 }
 
 TyKind iter_yield_kind(const IterRow *r, int k, TyKind rt) {
@@ -3413,10 +3581,11 @@ void iter_rows_check(void) {
   }
   /* a hand row with an iterator's answer overrides its row's: one with no
      row to override is no iterator, and one that repeats the derived
-     answer is stale */
+     answer is stale. Families not read by iter_share keep independent
+     hand rows rather than overriding iterator rows. */
   for (int i = 0; i < BOP_NSHARE; i++) {
     const BopShareRow *h = &bop_share_rows[i];
-    if (h->share < BSH_ITER || h->share > BSH_ITER_THEN) continue;
+    if (!iter_share_family(h->fam) || h->share < BSH_ITER || h->share > BSH_ITER_THEN) continue;
     const char *why = !iter_row(h->fam, h->name, -1, IRF_GAP_SHARE) ? "names no iterator row"
                     : h->share == iter_share(h->fam, h->name) ? "repeats the answer its iterator row derives"
                     : NULL;
@@ -3424,3 +3593,181 @@ void iter_rows_check(void) {
                      h->name, (int)h->fam, why);
   }
 }
+
+#ifdef SP_BOP_SHARE_CHECK
+/* The probe records identity edges, not Ruby value equality. These are the
+   conservative projections of sh_builtin's existing share kinds. Receiver
+   mutation is a separate fact (bop_name_mutates), not a promise of BSH_PURE.
+   An unobserved edge is only an optimisation candidate: finite probing does
+   not prove that no other argument shape can take it. */
+static void bop_share_effects(int s, int container, int argc, int block, unsigned out[4]) {
+  unsigned r = 1, e = 2, a = ((1u << argc) - 1) << 2, b = block ? 32 : 0;
+  unsigned last = argc ? 1u << (argc + 1) : 0;
+  out[0] = out[1] = out[2] = out[3] = 0;
+  switch (s) {
+  case BSH_PURE: out[2] = container ? e : 0; break;
+  case BSH_FROZEN: out[3] = r; break;
+  case BSH_RECV: case BSH_EMPTY_SELF: case BSH_ITER_FRESH_RECV: out[0] = r | e; break;
+  case BSH_CLAMP: out[0] = r | e | a; break;
+  case BSH_ELEM: case BSH_ELEM_N: case BSH_SUB: case BSH_FLATTEN:
+    out[0] = e; break;
+  case BSH_FETCH: out[0] = e | (argc >= 2 ? last : 0) | b; out[2] = block && argc ? 4 : 0; break;
+  case BSH_SUBST: case BSH_SUBST_BANG:
+    out[0] = !block && argc < 2 ? r | e | 4 : s == BSH_SUBST_BANG ? r | e : 0;
+    out[2] = block && argc ? 4 : 0;
+    break;
+  case BSH_LINE: out[0] = r | e; out[2] = argc ? r | e : 0; break;
+  case BSH_BLOCK: out[0] = b; break;
+  case BSH_LAST: out[0] = last; break;
+  case BSH_SUM: out[0] = e | (argc ? 4 : 0) | b; out[2] = e; break;
+  case BSH_FILL:
+    out[0] = r | e | (block ? b : a); out[1] = block ? b : a; break;
+  case BSH_QUERY: out[0] = block ? 0 : r | e; out[2] = e; break;
+  case BSH_STORE_LAST: out[0] = last; out[1] = last; break;
+  case BSH_STORE_ALL: case BSH_STORE_TAIL:
+    out[0] = r | e | a; out[1] = s == BSH_STORE_TAIL ? a & ~4u : a; break;
+  case BSH_MERGE: out[0] = r | e | a | b; out[1] = a | b; out[2] = e | a; break;
+  case BSH_ARGS: case BSH_ARRAY_OF: out[0] = a; break;
+  /* The second argument holds the optional buffer keyword. */
+  case BSH_PACK: out[0] = out[3] = argc >= 2 ? 8 : 0; break;
+  case BSH_FILL1: out[0] = out[3] = 8; break;
+  case BSH_FILL2: out[0] = out[3] = 16; break;
+  case BSH_ITER: case BSH_ITER_SEL: case BSH_ITER_FIND: case BSH_ITER_SUB:
+    out[0] = r | e; out[2] = e; break;
+  case BSH_ITER_MAP: case BSH_ITER_MAP_BANG:
+    out[0] = !block || s == BSH_ITER_MAP_BANG ? r | e | b : b; out[2] = e;
+    if (s == BSH_ITER_MAP_BANG) out[1] = b;
+    break;
+  case BSH_ITER_MEMO0: case BSH_ITER_MEMO1:
+    out[0] = e | 4 | (s == BSH_ITER_MEMO0 ? b : 0); out[2] = e | 4; break;
+  case BSH_ITER_SELF: out[0] = r | e; out[2] = r | e; break;
+  case BSH_ITER_THEN: out[0] = block ? b : r | e; out[2] = r | e; break;
+  case BSH_ITER_FRESH: break;
+  case BSH_IVAR_GET: out[0] = e; break;
+  case BSH_IVAR_SET: out[0] = 8; out[1] = 8; break;
+  case BSH_EXEC: out[0] = b; out[1] = a; out[2] = a; break;
+  case BSH_NEW_FILL: out[0] = (argc ? 4 : 0) | (argc >= 2 ? 8 : 0) | b; break;
+  case BSH_NEW_DEFAULT: out[0] = (argc ? 4 : 0) | b; out[2] = b; break;
+  case BSH_NEW_FIELDS: out[0] = argc ? 4 : 0; break;
+  case BSH_CALL: case BSH_METHOD_REF: case BSH_NEW: case BSH_NEW_YIELDER: case BSH_UNKNOWN:
+    out[0] = out[1] = out[2] = out[3] = 63; break;
+  default:
+    fprintf(stderr, "bop-share-check: share kind %d has no effect contract\n", s);
+    exit(1);
+  }
+  if (!block) out[2] = 0;
+}
+
+static const char *bop_share_kind_name(int s) {
+  switch (s) {
+  case BSH_PURE: return "BSH_PURE";
+  case BSH_FROZEN: return "BSH_FROZEN";
+  case BSH_RECV: return "BSH_RECV";
+  case BSH_CLAMP: return "BSH_CLAMP";
+  case BSH_ELEM: return "BSH_ELEM";
+  case BSH_SUB: return "BSH_SUB";
+  case BSH_STORE_LAST: return "BSH_STORE_LAST";
+  case BSH_STORE_ALL: return "BSH_STORE_ALL";
+  case BSH_STORE_TAIL: return "BSH_STORE_TAIL";
+  case BSH_MERGE: return "BSH_MERGE";
+  case BSH_ARGS: return "BSH_ARGS";
+  case BSH_ARRAY_OF: return "BSH_ARRAY_OF";
+  case BSH_PACK: return "BSH_PACK";
+  case BSH_FILL1: return "BSH_FILL1";
+  case BSH_FILL2: return "BSH_FILL2";
+  case BSH_ITER_THEN: return "BSH_ITER_THEN";
+  case BSH_ITER: return "BSH_ITER";
+  case BSH_ITER_SEL: return "BSH_ITER_SEL";
+  case BSH_ITER_MAP: return "BSH_ITER_MAP";
+  case BSH_ITER_MAP_BANG: return "BSH_ITER_MAP_BANG";
+  case BSH_ITER_SUB: return "BSH_ITER_SUB";
+  case BSH_ITER_FIND: return "BSH_ITER_FIND";
+  case BSH_ITER_FRESH: return "BSH_ITER_FRESH";
+  case BSH_ITER_FRESH_RECV: return "BSH_ITER_FRESH_RECV";
+  case BSH_ITER_MEMO0: return "BSH_ITER_MEMO0";
+  case BSH_ITER_MEMO1: return "BSH_ITER_MEMO1";
+  case BSH_ITER_SELF: return "BSH_ITER_SELF";
+  case BSH_FETCH: return "BSH_FETCH";
+  case BSH_ELEM_N: return "BSH_ELEM_N";
+  case BSH_CALL: return "BSH_CALL";
+  case BSH_METHOD_REF: return "BSH_METHOD_REF";
+  case BSH_IVAR_GET: return "BSH_IVAR_GET";
+  case BSH_IVAR_SET: return "BSH_IVAR_SET";
+  case BSH_EXEC: return "BSH_EXEC";
+  case BSH_NEW: return "BSH_NEW";
+  case BSH_FLATTEN: return "BSH_FLATTEN";
+  case BSH_NEW_FILL: return "BSH_NEW_FILL";
+  case BSH_NEW_DEFAULT: return "BSH_NEW_DEFAULT";
+  case BSH_NEW_YIELDER: return "BSH_NEW_YIELDER";
+  case BSH_NEW_FIELDS: return "BSH_NEW_FIELDS";
+  case BSH_LAST: return "BSH_LAST";
+  case BSH_SUM: return "BSH_SUM";
+  case BSH_FILL: return "BSH_FILL";
+  case BSH_QUERY: return "BSH_QUERY";
+  case BSH_SUBST: return "BSH_SUBST";
+  case BSH_SUBST_BANG: return "BSH_SUBST_BANG";
+  case BSH_LINE: return "BSH_LINE";
+  case BSH_BLOCK: return "BSH_BLOCK";
+  case BSH_EMPTY_SELF: return "BSH_EMPTY_SELF";
+  case BSH_UNKNOWN: return "BSH_UNKNOWN";
+  default: return "unknown";
+  }
+}
+
+static int bop_share_spec_one(TyKind fam, const char *cls, const char *name,
+                              int argc, int block, int object, unsigned origins, unsigned wrapped,
+                              unsigned ret, unsigned store, unsigned yield, unsigned mut,
+                              int *more, int *unknown) {
+  int s = bop_share_named(fam, name);
+  int container = fam == BOP_ANY_ARRAY || fam == BOP_ANY_HASH;
+  if (!s) s = bop_share_named(BOP_ANY_RECV, name);
+  if (!s && !container) s = bop_share(fam, name);
+  if (!s) { (*unknown)++; return 0; }
+  unsigned want[4], got[4] = { ret, store, yield, mut };
+  bop_share_effects(s, container, argc, block, want);
+  if ((object || (wrapped & 4)) && fam == BOP_ANY_HASH && s == BSH_STORE_LAST && argc >= 2) want[1] |= 4;
+  /* String identity and mutation also have existing operation-row facts.
+     The report keeps mutation separate; only argument mutation belongs to
+     the share kind's buffer contract. */
+  if (fam == TY_STRING) {
+    if (bop_name_mutates(name, 0)) want[3] |= 1;
+  }
+  unsigned missing = 0, extra = 0;
+  for (int k = 0; k < 3; k++) {
+    missing |= got[k] & ~want[k];
+    extra |= want[k] & origins & ~got[k];
+  }
+  missing |= (mut & 28) & ~want[3];
+  if (extra && !missing) (*more)++;
+  if (missing || (extra && getenv("SPINEL_SHARE_CHECK_VERBOSE"))) {
+    printf("%s\t%s\t%s\t%s\t%d/%d/%s\t%u/%u/%u/%u\t%u/%u/%u/%u\n",
+           missing ? "LESS" : "MORE", cls, name, bop_share_kind_name(s), argc, block, object ? "Object" : "String",
+           got[0], got[1], got[2], got[3], want[0], want[1], want[2], want[3]);
+  }
+  return missing != 0;
+}
+
+int builtin_ops_share_check(void) {
+  static const struct {
+    TyKind fam;
+    const char *cls, *name;
+    unsigned char argc, block, object, origins, wrapped, ret, store, yield, mut;
+  } specs[] = {
+#define BSS(fam, cls, name, argc, block, object, origins, wrapped, ret, store, yield, mut) \
+    { fam, cls, name, argc, block, object, origins, wrapped, ret, store, yield, mut },
+#include "builtin_share_spec.inc"
+#undef BSS
+  };
+  int bad = 0, more = 0, unknown = 0;
+  int count = (int)(sizeof specs / sizeof specs[0]);
+  if (getenv("SPINEL_SHARE_CHECK_VERBOSE")) puts("comparison\tclass\tmethod\tshare-kind\targc/block/marker\tobserved R/S/Y/M\tallowed R/S/Y/M");
+  for (int i = 0; i < count; i++)
+    bad += bop_share_spec_one(specs[i].fam, specs[i].cls, specs[i].name,
+                             specs[i].argc, specs[i].block, specs[i].object, specs[i].origins, specs[i].wrapped,
+                             specs[i].ret, specs[i].store, specs[i].yield, specs[i].mut, &more, &unknown);
+  printf("bop-share-check: %d observed shapes, %d less conservative, %d potential opportunities, %d unknown contracts\n",
+         count, bad, more, unknown);
+  return bad;
+}
+
+#endif

@@ -507,6 +507,10 @@ static inline void sp_str_set_len(char *s, size_t len) {
    `io.read(0)` the binary encoding, and the shared empty string cannot carry
    it -- marking that would tag it for every other holder of the same pointer.
    So these allocate, and only on that path. */
+static inline char *sp_str_bin_like(const char *s, char *r) {
+  if (sp_str_is_binary(s)) sp_str_mark_binary(r);
+  return r;
+}
 static inline char *sp_str_empty_binary(void) {
   char *r = sp_str_alloc_raw(1);
   r[0] = 0;
@@ -540,6 +544,13 @@ static inline const char *sp_str_dup_external(const char *s) {
   size_t n = strlen(s);
   char *r = sp_str_alloc(n);
   memcpy(r, s, n);
+  return r;
+}
+
+/* ENV copies are frozen but remain collectible, like frozen Hash keys. */
+static inline const char *sp_env_str(const char *s) {
+  char *r = (char *)sp_str_dup_external(s);
+  if (r) ((unsigned char *)r)[-1] = 0xfa;
   return r;
 }
 
@@ -876,6 +887,14 @@ SP_NORETURN void sp_raise_frozen_str(const char *s);              /* lib/sp_str.
    marked by the GC (sp_mark_string reads s[-1]), so a bare literal -- whose
    [-1] is out of bounds -- would be UB when it lands at a section edge. */
 static SP_NOINLINE SP_COLD void sp_raise_frozen_array(void) { sp_raise_cls("FrozenError", (&("\xff" "can't modify frozen Array")[1])); }
+/* An ENV name or value (value != 0) with an embedded NUL cannot reach the
+   C environment: CRuby raises ArgumentError rather than cut it short. */
+static inline const char *sp_env_chk(const char *s, int value) {
+  if (s && memchr(s, 0, sp_str_byte_len(s)))
+    sp_raise_cls("ArgumentError", value ? (&("\xff" "bad environment variable value: contains null byte")[1])
+                                        : (&("\xff" "bad environment variable name: contains null byte")[1]));
+  return s;
+}
 /* Same, but stages the receiver so FrozenError#receiver answers the frozen
    object itself (identity-preserving boxing of the mutation target) (#3002).
    sp_exc_stage_recv lives in the generated TU; the ctor transfers the staged
@@ -970,7 +989,7 @@ static SP_NOINLINE void sp_PolyArray_grow(sp_PolyArray *a) {
   a->cap = nc;
   h->size += sizeof(sp_RbVal) * a->cap; sp_gc_bytes_add(sizeof(sp_RbVal) * a->cap);
 }
-static inline void sp_PolyArray_push(sp_PolyArray *a, sp_RbVal v) { if (!a) return; sp_gc_wb((void*)a); if (a->frozen) { sp_raise_frozen_array(); return; } if (a->len >= a->cap) sp_PolyArray_grow(a); a->data[a->len++] = v; }
+static inline void sp_PolyArray_push(sp_PolyArray *a, sp_RbVal v) { if (!a) return; sp_gc_wb((void*)a); if (a->frozen) { sp_raise_frozen_array_at(a, SP_BUILTIN_POLY_ARRAY); return; } if (a->len >= a->cap) sp_PolyArray_grow(a); a->data[a->len++] = v; }
 static inline sp_RbVal sp_PolyArray_get(sp_PolyArray *a, sp_int i) { if (!a) return sp_box_nil(); if ((unsigned long long)i < (unsigned long long)a->len) return a->data[i]; if (i < 0) i += a->len; if (i < 0 || i >= a->len) return sp_box_nil(); return a->data[i]; }
 /* ---- relocated from spinel_rt.h: frozen-string check primitives used
    by lib/sp_cold.c's sp_str_setbyte_cow, and the SPL frozen-literal macro
@@ -1048,6 +1067,17 @@ sp_int sp_float_to_i_checked_slow(sp_float f);
 static inline sp_int sp_float_to_i_checked(sp_float f) {
   if (SP_LIKELY(f >= (sp_float)INTPTR_MIN && f < -(sp_float)INTPTR_MIN)) return (sp_int)f;
   return sp_float_to_i_checked_slow(f);
+}
+
+/* Machine-integer arguments use NUM2LONG's RangeError, unlike Float#to_i. */
+SP_NORETURN SP_COLD void sp_float_arg_range_error(sp_float f);
+static inline void sp_float_arg_check(sp_float f) {
+  if (SP_UNLIKELY(!(f >= (sp_float)INTPTR_MIN && f < -(sp_float)INTPTR_MIN)))
+    sp_float_arg_range_error(f);
+}
+static inline sp_int sp_float_arg_i(sp_float f) {
+  sp_float_arg_check(f);
+  return (sp_int)f;
 }
 
 /* ---- forward declarations for pointer-only box params (full types stay
@@ -1132,6 +1162,9 @@ static inline sp_RbVal sp_box_bigint_or_nil(sp_Bigint *b) { return b ? sp_box_bi
    it does not (a checksum, an unpacked quad, a parsed literal on a 32-bit
    sp_int). What a package answers as :any for a value that may be wide. */
 sp_RbVal sp_box_i64(int64_t v);
+/* A proven Integer: its own box. A nil is out of band (sp_oint), so no word
+   of an sp_int is reserved for it and the minimum word boxes as any other. */
+static inline sp_RbVal sp_box_int_nn(sp_int v) { return sp_box_int(v); }
 /* the inverse: a boxed Integer (or Float) as a 64-bit value, a Bignum through
    its low 64 bits, for a package parameter that may be wider than sp_int */
 int64_t sp_unbox_i64(sp_RbVal v);

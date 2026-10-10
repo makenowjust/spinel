@@ -581,6 +581,17 @@ int emit_call_file_dir_time_arms(Compiler *c, int id, Buf *b, const NodeTable *n
         nt_str(nt, argv[1], "name") && sp_streq(nt_str(nt, argv[1], "name"), "FNM_DOTMATCH")) {
       buf_puts(b, "sp_dir_glob_dot("); emit_path_expr(c, argv[0], b); buf_puts(b, ")"); return 1;
     }
+    /* Dir.glob(pattern, base: dir): a lone base: keyword; nil is the current directory */
+    if (sp_streq(name, "glob") && argc == 2 && nt_kind(nt, argv[1]) == NK_KeywordHashNode &&
+        !ty_is_array(comp_ntype(c, argv[0]))) {
+      int en = 0; (void)nt_arr(nt, argv[1], "elements", &en);
+      int bv = kwh_lookup(nt, argv[1], "base");
+      if (en == 1 && bv >= 0) {
+        buf_puts(b, "sp_dir_glob_base("); emit_path_expr(c, argv[0], b); buf_puts(b, ", ");
+        if (comp_ntype(c, bv) == TY_NIL) buf_puts(b, "NULL"); else emit_path_expr(c, bv, b);
+        buf_puts(b, ")"); return 1;
+      }
+    }
     if (sp_streq(name, "glob") && argc == 1 && ty_is_array(comp_ntype(c, argv[0]))) {
       buf_puts(b, "sp_dir_glob_multi("); emit_boxed(c, argv[0], b); buf_puts(b, ")"); return 1;
     }
@@ -1201,6 +1212,14 @@ int emit_call_builtin_cmethod_arms(Compiler *c, int id, Buf *b, const NodeTable 
     /* IO.popen is not implemented: refused at compile time, as an
        unsupported API is, rather than a NoMethodError the first time the
        line runs (#7199). A program's own IO.popen is its own. */
+    /* Time.parse / Time.strptime, refused here under --defer-refusals (the
+       pass ahead of emission refuses them otherwise; see reject_time_parse) */
+    { char tpm[320];
+      if (defer_refusals() && time_parse_refusal(c, id, tpm, sizeof tpm)) {
+        unsupported_feature(c, id, tpm);
+        buf_puts(b, "sp_box_nil()");
+        return 1;
+      } }
     if (tcn && (sp_streq(tcn, "IO") || sp_streq(tcn, "File")) && sp_streq(name, "popen")) {
       int ioc = comp_class_index(c, tcn);
       if (ioc < 0 || comp_cmethod_in_chain(c, ioc, name, NULL) < 0) {
@@ -1305,6 +1324,12 @@ int emit_call_builtin_cmethod_arms(Compiler *c, int id, Buf *b, const NodeTable 
       }
       if (sp_streq(name, "unpack_sockaddr_in") && argc == 1) {
         buf_puts(b, "sp_sock_unpack_sockaddr_in(");
+        emit_str_expr(c, argv[0], b);
+        buf_puts(b, ")");
+        return 1;
+      }
+      if (sp_streq(name, "unpack_sockaddr_un") && argc == 1) {
+        buf_puts(b, "sp_sock_unpack_sockaddr_un(");
         emit_str_expr(c, argv[0], b);
         buf_puts(b, ")");
         return 1;
@@ -1456,7 +1481,7 @@ int emit_call_builtin_cmethod_arms(Compiler *c, int id, Buf *b, const NodeTable 
       }
       buf_puts(b, "sp_signal_signame(");
       /* a Float argument truncates toward zero, as CRuby's to_int does (#3105) */
-      if (sa0 == TY_FLOAT) { buf_puts(b, "(sp_int)("); emit_float_expr(c, argv[0], b); buf_puts(b, ")"); }
+      if (sa0 == TY_FLOAT) { buf_puts(b, "sp_float_arg_i("); emit_float_expr(c, argv[0], b); buf_puts(b, ")"); }
       else emit_int_expr(c, argv[0], b);
       buf_puts(b, ")");
       return 1;
@@ -1554,6 +1579,18 @@ int emit_call_builtin_cmethod_arms(Compiler *c, int id, Buf *b, const NodeTable 
           emit_boxed(c, argv[k], b);
           buf_puts(b, ");");
         }
+      }
+      /* a leading Hash is the child's environment and the command follows
+         it; through a splat or a boxed value it is told apart only at run
+         time, so the test is made there */
+      int tenv = 0;
+      TyKind tfirst = nt_kind(nt, argv[0]) == NK_SplatNode ? TY_POLY : comp_ntype(c, argv[0]);
+      if (!is_exec && (ty_is_hash(tfirst) || tfirst == TY_POLY || tfirst == TY_UNKNOWN)) {
+        tenv = ++g_tmp;
+        buf_printf(b, " sp_RbVal _t%d = sp_box_nil(); SP_GC_ROOT_RBVAL(_t%d);", tenv, tenv);
+        buf_printf(b, " if (sp_json_kind(_t%d) == 2) { if (_t%d->len == 0) sp_raise_cls(\"ArgumentError\", \"wrong number of arguments (given 0, expected 1+)\");"
+                      " _t%d = _t%d; _t%d = sp_PolyArray_shift(_t%d); }",
+                   tcmd, targs, tenv, tcmd, tcmd, targs);
       }
       /* a [program, argv0] pair of Strings arrives as a String array: the
          runtime reads it as a general one */
@@ -1694,6 +1731,8 @@ int emit_call_builtin_cmethod_arms(Compiler *c, int id, Buf *b, const NodeTable 
          slot, so it closes the parent's copies and never a caller's IO. */
       buf_printf(b, " sp_PolyArray_push(_t%d, sp_box_int((_t%d[0] >= 0) | ((_t%d[1] >= 0) << 1) | ((_t%d[2] >= 0) << 2)));",
                  topts, town, town, town);
+      /* Slot 8, when the call can have one: the environment Hash, or nil */
+      if (tenv) buf_printf(b, " sp_PolyArray_push(_t%d, _t%d);", topts, tenv);
       if (is_exec)   /* Kernel#exec: the process becomes the command, or raises its Errno */
         buf_printf(b, " sp_process_exec(_t%d, sp_box_poly_array(_t%d)); sp_int _r = 0; (void)_t%d;", tcmd, targs, topts);
       else
@@ -1854,7 +1893,7 @@ int emit_call_enum_random_arms(Compiler *c, int id, Buf *b, const NodeTable *nt,
     }
     if (sp_streq(name, "bytes") && argc == 1) {
       buf_puts(b, "sp_Random_bytes(sp_random_default_get(), ");
-      emit_int_expr_conv(c, argv[0], b); buf_puts(b, ")");
+      emit_to_int_expr(c, argv[0], b); buf_puts(b, ")");
       return 1;
     }
     if (sp_streq(name, "new_seed") && argc == 0) {   /* #2523 */
@@ -1867,7 +1906,7 @@ int emit_call_enum_random_arms(Compiler *c, int id, Buf *b, const NodeTable *nt,
     }
     if (sp_streq(name, "srand")) {                    /* #2525 (returns previous seed) */
       if (argc == 0) { buf_puts(b, "sp_kernel_srand((sp_int)time(NULL))"); return 1; }
-      buf_puts(b, "sp_kernel_srand("); emit_int_expr_conv(c, argv[0], b); buf_puts(b, ")");
+      buf_puts(b, "sp_kernel_srand("); emit_to_int_expr(c, argv[0], b); buf_puts(b, ")");
       return 1;
     }
   }

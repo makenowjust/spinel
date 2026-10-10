@@ -1,5 +1,6 @@
 #include "compiler.h"
 #include "share.h"
+#include "repr.h"
 #include "analyze.h"
 #include "builtin_names.h"
 
@@ -256,6 +257,7 @@ void comp_grow_node_arrays(Compiler *c) {
 void comp_free(Compiler *c) {
   if (!c) return;
   share_facts_free(c);
+  if (g_repr_check) repr_channel_free(c);
   share_routes_free(c);
   free(c->byref_elig);
   c->byref_elig = NULL;
@@ -263,14 +265,22 @@ void comp_free(Compiler *c) {
   pivs_facts_free(c);
   strbuf_arg_index_free(c);
   free(c->vs_head); free(c->vs_site); free(c->vs_var); free(c->vs_next); free(c->vs_kind);
-  free(c->vs_rparent); free(c->vs_dropped);
+  free(c->vs_rparent); free(c->vs_dropped); free(c->vs_whead); free(c->vs_wnext);
   c->vs_head = c->vs_site = c->vs_var = c->vs_next = c->vs_rparent = NULL;
+  c->vs_whead = c->vs_wnext = NULL;
   c->vs_dropped = c->vs_kind = NULL;
   c->vs_count = c->vs_cap = 0;
   c->vs_built = 0;
   free(c->hash_default_arg_memo);
   c->hash_default_arg_memo = NULL;
   free(c->blk_body_map);
+  for (int i = 0; i < c->npres; i++) free(c->pres_names[i]);
+  free(c->pres_names); free(c->pres_flags); free(c->pres_obs); free(c->pres_memo); free(c->pres_rank);
+  c->pres_obs = NULL; c->pres_obs_n = 0; c->pres_memo = NULL; c->pres_memo_n = 0;
+  c->pres_rank = NULL; c->pres_rank_n = 0;
+  for (int i = 0; i < c->pres_ord_n; i++) free(c->pres_ord[i]);
+  free(c->pres_ord); c->pres_ord = NULL; c->pres_ord_n = 0;
+  c->pres_names = NULL; c->pres_flags = NULL; c->npres = c->cpres = 0;
   free(c->nil_fact);
   free(c->nil_elem_fact);
   free(c->node_ord); free(c->node_base);
@@ -559,7 +569,9 @@ ClassInfo *comp_class_new(Compiler *c, const char *name, int def_node) {
   ci->ctor_reachable = 1;   /* conservatively, until compute_instantiated's early pass has looked */
   ci->name = name ? strdup(name) : NULL;
   ci->c_name = sp_class_c_name(name);
+  ci->is_builtin_const = is_builtin_class_name(name) || is_builtin_module_const_name(name);
   ci->def_node = def_node;
+  if (nt_int(c->nt, def_node, "class_new_anonymous", 0)) c->has_anonymous_classes = 1;
   ci->parent = -1;
   ci->enclosing_class = -1;
   return ci;
@@ -890,7 +902,11 @@ TyKind comp_ary_kind(Compiler *c, int cid) {
   int r = comp_ary_root(c, cid);
   if (r < 0) return TY_UNKNOWN;
   TyKind k = c->classes[r].ary_kind;
-  return k == TY_UNKNOWN && !g_infer_optimistic ? TY_POLY_ARRAY : k;
+  if (k != TY_UNKNOWN || g_infer_optimistic) return k;
+  return c->classes[r].ary_hash ? TY_POLY_POLY_HASH : TY_POLY_ARRAY;
+}
+int comp_ary_is_hash(Compiler *c, int cid) {
+  return comp_ary_root(c, cid) >= 0 && c->classes[cid].ary_hash;
 }
 
 int builtin_instance_method_known(const char *cls, const char *m);
@@ -899,13 +915,32 @@ int builtin_instance_method_known(const char *cls, const char *m);
 int comp_array_method_name(const char *n) {
   return builtin_instance_method_known("Array", n) || is_arysub_kernel_name(n);
 }
+/* The same for the builtin class cid's chain embeds, Array or Hash, and a
+   method the program's reopen of that builtin adds (`class Hash; def
+   symbolize_keys`): the builtin's dispatch takes it with self boxed. */
+int comp_arysub_builtin_name(Compiler *c, int cid, const char *n) {
+  int hash = comp_ary_is_hash(c, cid);
+  if (comp_builtin_kind_reopen_mi(c, hash ? TY_POLY_POLY_HASH : TY_POLY_ARRAY, n) >= 0) return 1;
+  if (!hash) return comp_array_method_name(n);
+  return builtin_instance_method_known("Hash", n) || is_arysub_kernel_name(n);
+}
+/* The program's reopen of the builtin cid's chain embeds, the class right
+   above the chain's root, or -1 */
+int comp_arysub_reopen(Compiler *c, int cid) {
+  int r = comp_ary_root(c, cid);
+  int p = r >= 0 ? c->classes[r].parent : -1;
+  return p >= 0 && p != r && p == comp_class_index(c, comp_ary_is_hash(c, cid) ? "Hash" : "Array") ? p : -1;
+}
 /* Whether a call named n on an instance of Array subclass cid is Array's:
    no method, reader or writer of the class chain takes the name, it asks
    nothing about the object itself, and Array (or Enumerable, which Array
    includes) has it. */
 int comp_arysub_name_is_array(Compiler *c, int cid, const char *n) {
   if (comp_ary_root(c, cid) < 0 || !n) return 0;
-  if (comp_method_in_chain(c, cid, n, NULL) >= 0 || comp_reader_in_chain(c, cid, n, NULL)) return 0;
+  /* a method of the builtin's reopen is the builtin's */
+  int dc = -1, ro = comp_arysub_reopen(c, cid);
+  if ((comp_method_in_chain(c, cid, n, &dc) >= 0 && (ro < 0 || dc != ro)) ||
+      comp_reader_in_chain(c, cid, n, NULL)) return 0;
   size_t l = strlen(n);
   if (l > 1 && n[l - 1] == '=' && n[l - 2] != '=' && n[l - 2] != '!' && n[l - 2] != '<' &&
       n[l - 2] != '>' && n[l - 2] != '[') {
@@ -913,7 +948,7 @@ int comp_arysub_name_is_array(Compiler *c, int cid, const char *n) {
     snprintf(base, sizeof base, "%.*s", (int)(l - 1), n);
     if (comp_writer_in_chain(c, cid, base, NULL)) return 0;
   }
-  return !is_arysub_object_name(n) && comp_array_method_name(n);
+  return !is_arysub_object_name(n) && comp_arysub_builtin_name(c, cid, n);
 }
 /* Whether call `id` on a receiver of type rt, an Array subclass instance, is
    Array's (comp_arysub_name_is_array), or a `super` into Array was rewritten
@@ -931,21 +966,23 @@ int comp_arysub_call(Compiler *c, int id, TyKind rt, TyKind *kind) {
    (bop_answers_self) or, with args_builtin, whether it reads an Array
    argument as an Array (bop_args_as_builtin). Every Array kind reads the
    same family rows. */
-static int arysub_call_flags(Compiler *c, int id, int args_builtin) {
+static int arysub_call_flags(Compiler *c, int id, int hash, int args_builtin) {
   const char *n = nt_str(c->nt, id, "name");
   int args = nt_ref(c->nt, id, "arguments"), argc = 0;
   if (!n) return 0;
   if (args >= 0) nt_arr(c->nt, args, "arguments", &argc);
   int blk = nt_ref(c->nt, id, "block") >= 0;
-  return args_builtin ? bop_args_as_builtin(TY_POLY_ARRAY, n, argc, blk)
-                      : bop_answers_self(TY_POLY_ARRAY, n, argc, blk);
+  /* and every Hash kind the Hash family's */
+  TyKind fam = hash ? TY_POLY_POLY_HASH : TY_POLY_ARRAY;
+  return args_builtin ? bop_args_as_builtin(fam, n, argc, blk)
+                      : bop_answers_self(fam, n, argc, blk);
 }
-int comp_arysub_answer(Compiler *c, int id) { return arysub_call_flags(c, id, 0); }
+int comp_arysub_answer(Compiler *c, int id, int hash) { return arysub_call_flags(c, id, hash, 0); }
 /* Array's answer to call `id` is its receiver -- always (BOPF_SELF) or when
    it changed it (BOPF_SELF_OR_NIL) -- so on an Array subclass instance it
    is the instance (#7449). */
-int comp_arysub_self_result(Compiler *c, int id) {
-  return (comp_arysub_answer(c, id) & (BOPF_SELF | BOPF_SELF_OR_NIL)) != 0;
+int comp_arysub_self_result(Compiler *c, int id, int hash) {
+  return (comp_arysub_answer(c, id, hash) & (BOPF_SELF | BOPF_SELF_OR_NIL)) != 0;
 }
 
 /* Whether the arguments of call `id`, on a receiver of type rt (-1: none),
@@ -960,7 +997,7 @@ int comp_arysub_args_viewed(Compiler *c, int id, TyKind rt) {
   if (!n || nt_kind(nt, id) != NK_CallNode) return 0;
   if (nt_ref(nt, id, "receiver") < 0)
     return sp_streq(n, "puts") && comp_method_index(c, n) < 0;
-  return array_new_copies(rt) && arysub_call_flags(c, id, 1);
+  return (array_new_copies(rt) || ty_is_hash(rt)) && arysub_call_flags(c, id, ty_is_hash(rt), 1);
 }
 
 /* `Array(x)`: of an Array subclass instance x it is x itself (Kernel#Array
@@ -1098,6 +1135,21 @@ int comp_method_vis_declared(Compiler *c, int class_id, const char *name, int *a
   name = comp_resolve_alias(c, class_id, name);
   if (name != alias && (v = vis_declared_in_chain(c, class_id, name, at)) >= 0) return v;
   int mi = comp_method_in_chain(c, class_id, name, NULL);
+  /* an attribute a module declares (`attr_reader :x; private :x` in it) is
+     no method scope with an origin module: the visibility is the included
+     module's own table's (#8201) */
+  if (mi < 0) {
+    for (int cid = class_id, g = 0; cid >= 0 && cid < c->nclasses && g <= c->nclasses; cid = c->classes[cid].parent, g++) {
+      ClassInfo *ci = &c->classes[cid];
+      for (int m = 0; m < ci->nincluded_mods; m++) {
+        int mci = ci->included_mods[m];
+        if (mci < 0 || mci >= c->nclasses) continue;
+        ClassInfo *mc_ = &c->classes[mci];
+        for (int i = 0; i < mc_->nvis; i++)
+          if (sp_streq(mc_->vis_names[i], name)) { if (at) *at = mci; return mc_->vis_kinds[i]; }
+      }
+    }
+  }
   if (mi >= 0 && mi < c->nscopes && c->scopes[mi].origin_module_ci > 0) {
     int mci = c->scopes[mi].origin_module_ci - 1;
     if (mci >= 0 && mci < c->nclasses) {
@@ -1634,7 +1686,7 @@ const char *comp_resolve_alias_ex(Compiler *c, int class_id, const char *name, i
           lim_cls = cid; lim = i;
           /* it captured a primitive's builtin: that is where it ends */
           if (ci->alias_builtin && ci->alias_builtin[i]) {
-            if (builtin) *builtin = 1;
+            if (builtin) *builtin = ci->alias_builtin[i];
             return next;
           }
           break;
@@ -1829,7 +1881,7 @@ int comp_writer_in_chain(Compiler *c, int class_id, const char *name, int *def_c
    conditions that vary per call (ctor_reachable, an_builtin_only, native arity)
    stay with the consumer. A native class is always listed: its answer depends
    on the call's arity, which the consumer checks. */
-struct pc_entry { char *name; PolyCand *cands; int n; struct pc_entry *next; };
+struct pc_entry { char *name; PolyCand *cands; unsigned char *overridden; int n; struct pc_entry *next; };
 #define PC_BUCKETS 4096
 static struct pc_entry *pc_tab[PC_BUCKETS];
 static struct pc_entry *cc_tab[PC_BUCKETS];   /* class methods: comp_cmethod_candidates */
@@ -1851,7 +1903,7 @@ void comp_poly_candidates_reset(void) {
     for (struct pc_entry *e = cc_tab[b]; e; ) { struct pc_entry *nx = e->next; e->next = pc_retired; pc_retired = e; e = nx; }
     cc_tab[b] = NULL;
   }
-  for (struct pc_entry *e = pc_retired; e; ) { struct pc_entry *nx = e->next; free(e->name); free(e->cands); free(e); e = nx; }
+  for (struct pc_entry *e = pc_retired; e; ) { struct pc_entry *nx = e->next; free(e->name); free(e->cands); free(e->overridden); free(e); e = nx; }
   pc_retired = NULL;
 }
 static void pc_build(Compiler *c, const char *name, PolyCand **out, int *n_out) {
@@ -1873,35 +1925,36 @@ static void pc_build(Compiler *c, const char *name, PolyCand **out, int *n_out) 
   }
   *out = v; *n_out = n;
 }
-const PolyCand *comp_poly_candidates(Compiler *c, const char *name, int *n) {
-  if (!name) { *n = 0; return NULL; }
-  if (!sm_frozen) {
-    /* scope shape may still change: answer fresh, and keep nothing */
-    struct pc_entry *e = calloc(1, sizeof *e);
-    pc_build(c, name, &e->cands, &e->n);
-    e->next = pc_retired; pc_retired = e;
-    *n = e->n; return e->cands;
-  }
+static struct pc_entry *pc_memo(Compiler *c, const char *name) {
+  if (!sm_frozen) return NULL;
   if (pc_gen_stamp != sm_gen || pc_nscopes_stamp != c->nscopes || pc_nclasses_stamp != c->nclasses || pc_table_stamp != comp_table_gen) {
     pc_clear(); pc_gen_stamp = sm_gen; pc_nscopes_stamp = c->nscopes; pc_nclasses_stamp = c->nclasses; pc_table_stamp = comp_table_gen;
   }
   unsigned b = sp_strhash(name) % PC_BUCKETS;
   for (struct pc_entry *e = pc_tab[b]; e; e = e->next)
-    if (sp_streq(e->name, name)) {
-      *n = e->n; return e->cands;
-    }
-  struct pc_entry *e = calloc(1, sizeof *e);
+    if (sp_streq(e->name, name)) return e;
   /* While a scope is moved for an instance_exec block (comp_scope_move_begin)
      the lookups leave the moved method out, so a list made then would miss
      it after the move: answer it, but keep it off the memo. */
-  if (mv_n) {
+  if (mv_n) return NULL;
+  struct pc_entry *e = calloc(1, sizeof *e);
+  if (!e) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+  e->name = strdup(name);
+  if (!e->name) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+  e->n = -1;  /* an override query need not build the candidate list */
+  e->next = pc_tab[b]; pc_tab[b] = e;
+  return e;
+}
+const PolyCand *comp_poly_candidates(Compiler *c, const char *name, int *n) {
+  if (!name) { *n = 0; return NULL; }
+  struct pc_entry *e = pc_memo(c, name);
+  if (!e || mv_n) {
+    /* scope shape may still change: answer fresh, and keep nothing */
+    e = calloc(1, sizeof *e);
     pc_build(c, name, &e->cands, &e->n);
     e->next = pc_retired; pc_retired = e;
-    *n = e->n; return e->cands;
   }
-  e->name = strdup(name);
-  pc_build(c, name, &e->cands, &e->n);
-  e->next = pc_tab[b]; pc_tab[b] = e;
+  else if (e->n < 0) pc_build(c, name, &e->cands, &e->n);
   *n = e->n; return e->cands;
 }
 
@@ -1950,6 +2003,35 @@ const PolyCand *comp_cmethod_candidates(Compiler *c, const char *name, int *n) {
   cc_build(c, name, &e->cands, &e->n);
   e->next = cc_tab[b]; cc_tab[b] = e;
   *n = e->n; return e->cands;
+}
+
+/* The same name memo also holds whether each class has a descendant with
+   its own definition. Reader-slot queries need this fact across call sites,
+   not another descendant walk per representation query. The candidate memo's
+   stamps invalidate it too; a temporarily moved scope must answer fresh. */
+int comp_method_overridden(Compiler *c, int cid, const char *name, int cmeth) {
+  if (cid < 0 || cid >= c->nclasses || !name) return 0;
+  struct pc_entry *memo = !cmeth && !mv_n ? pc_memo(c, name) : NULL;
+  if (memo) {
+    if (!memo->overridden) {
+      memo->overridden = calloc((size_t)c->nclasses, sizeof *memo->overridden);
+      if (!memo->overridden) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+    }
+    if (memo->overridden[cid]) return memo->overridden[cid] == 2;
+  }
+  int nd = 0, overridden = 0;
+  const int *ds = comp_descendants(c, cid, &nd);
+  for (int i = 0; i < nd; i++) {
+    int k = ds[i];
+    if (k == cid) continue;
+    if (!sp_streq(comp_resolve_alias(c, k, name), name) ||
+        (cmeth ? comp_cmethod_in_class(c, k, name) : comp_method_in_class(c, k, name)) >= 0) {
+      overridden = 1;
+      break;
+    }
+  }
+  if (memo) memo->overridden[cid] = overridden ? 2 : 1;
+  return overridden;
 }
 
 /* ---- Descendants of a class ----
@@ -2300,6 +2382,27 @@ int comp_ivarg_arg(const Compiler *c, int e) {
   return (e >= 0 && e < c->ivarg_count) ? c->ivarg_arg[e] : -1;
 }
 
+/* The PRES_* facts of ivar name `ivn` (c->pres_names); comp_pres_note adds
+   to them. */
+int comp_pres_flags(const Compiler *c, const char *ivn) {
+  for (int i = 0; ivn && i < c->npres; i++)
+    if (sp_streq(c->pres_names[i], ivn)) return c->pres_flags[i];
+  return 0;
+}
+void comp_pres_note(Compiler *c, const char *ivn, int flag) {
+  if (!ivn) return;
+  for (int i = 0; i < c->npres; i++)
+    if (sp_streq(c->pres_names[i], ivn)) { c->pres_flags[i] |= (unsigned char)flag; return; }
+  if (c->npres == c->cpres) {
+    c->cpres = c->cpres ? c->cpres * 2 : 8;
+    c->pres_names = realloc(c->pres_names, sizeof(char *) * (size_t)c->cpres);
+    c->pres_flags = realloc(c->pres_flags, (size_t)c->cpres);
+    if (!c->pres_names || !c->pres_flags) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+  }
+  c->pres_names[c->npres] = strdup(ivn);
+  c->pres_flags[c->npres++] = (unsigned char)flag;
+}
+
 /* The owning class of an ivar READ/WRITE node under the same storage rules
    the emitters use (instance method -> class, top-level -> Toplevel; class
    methods / instance_eval contexts return -1). */
@@ -2407,11 +2510,13 @@ static void vsite_build(Compiler *c, int toplevel) {
   int nb = 16;
   while (nb < n && nb < (1 << 22)) nb <<= 1;
   size_t sz = (size_t)(n > 0 ? n : 1);
-  free(c->vs_head); free(c->vs_rparent); free(c->vs_dropped);
+  free(c->vs_head); free(c->vs_rparent); free(c->vs_dropped); free(c->vs_whead); free(c->vs_wnext);
   c->vs_head = malloc(sizeof(int) * (size_t)nb);
   c->vs_rparent = malloc(sz * sizeof(int));
   c->vs_dropped = calloc(sz, 1);
-  if (!c->vs_head || !c->vs_rparent || !c->vs_dropped) {
+  c->vs_whead = malloc(sz * sizeof(int));
+  c->vs_wnext = malloc(sz * sizeof(int));
+  if (!c->vs_head || !c->vs_rparent || !c->vs_dropped || !c->vs_whead || !c->vs_wnext) {
     fprintf(stderr, "spinel: out of memory\n");
     exit(1);
   }
@@ -2419,12 +2524,16 @@ static void vsite_build(Compiler *c, int toplevel) {
   c->vs_count = 0;
   c->vs_nodes = n;
   for (int b = 0; b < nb; b++) c->vs_head[b] = -1;
-  for (int i = 0; i < n; i++) c->vs_rparent[i] = -1;
+  for (int i = 0; i < n; i++) c->vs_rparent[i] = c->vs_whead[i] = c->vs_wnext[i] = -1;
   for (int u = n - 1; u >= 0; u--) {   /* reverse: chains run in node order */
     NodeKind k = nt_kind(nt, u);
     /* every store into a variable, its `||=` and `&&=` and a class
        variable's included (VS_STORE) */
     if (vsite_is_store(k)) vsite_add(c, VS_STORE, u, u);
+    if (k == NK_LocalVariableWriteNode) {
+      int v = nt_ref(nt, u, "value");
+      if (v >= 0 && v < n) { c->vs_wnext[u] = c->vs_whead[v]; c->vs_whead[v] = u; }
+    }
     if (vsite_is_read(nt, u)) vsite_add(c, VS_READ, u, u);
     else if (k == NK_LocalVariableWriteNode || k == NK_InstanceVariableWriteNode || k == NK_GlobalVariableWriteNode)
       vsite_add(c, VS_WRITE, u, u);
@@ -2485,6 +2594,13 @@ int comp_recv_parent(Compiler *c, int n) {
   vsite_sync(c);
   n = an_unparen(c->nt, n);
   return n >= 0 && n < c->vs_nodes ? c->vs_rparent[n] : -1;
+}
+int comp_lwrite_of_value(Compiler *c, int n) {
+  vsite_sync(c);
+  return n >= 0 && n < c->vs_nodes ? c->vs_whead[n] : -1;
+}
+int comp_lwrite_next(const Compiler *c, int w) {
+  return w >= 0 && w < c->vs_nodes ? c->vs_wnext[w] : -1;
 }
 int comp_value_dropped(Compiler *c, int n) {
   vsite_sync(c);
@@ -3090,4 +3206,16 @@ int comp_class_extends_any(Compiler *c, int ci) {
   for (int k = ci, d = 0; k >= 0 && k < c->nclasses && d < 64; k = c->classes[k].parent, d++)
     if (c->classes[k].nextended_mods > 0) return 1;
   return 0;
+}
+
+/* Class.new identities acquire their public name only at an executed constant write. */
+int comp_class_anonymous(Compiler *c, int ci) {
+  return ci >= 0 && ci < c->nclasses &&
+         nt_int(c->nt, c->classes[ci].def_node, "class_new_anonymous", 0);
+}
+
+/* The table that prints a class value for to_s and inspect: a Class.new class
+   has a display form of its own, and every other program reads the one name table. */
+const char *comp_class_display_fn(Compiler *c) {
+  return c->has_anonymous_classes ? "sp_class_display" : "sp_class_to_s";
 }

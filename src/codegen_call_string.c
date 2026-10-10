@@ -11,6 +11,32 @@
 #include "codegen_call_arms.h"
 
 /* a Regexp literal's match / match? / ===, the match family on a String, gsub, and String#% */
+/* The text emit_boxed gives an Integer or a Float is most often one box
+   call around the value, `FN(X)`. Where `text` has that shape its X is cut
+   out in place and FN is answered; NULL for any other shape. A yield's
+   Integer that is never nil is boxed by sp_box_int_nn. */
+static const char *boxed_number_value(char *text, TyKind at, char **val) {
+  const char *fns[3] = { ty_box_fn(at), ty_box_nil_fn(at), at == TY_INT ? "sp_box_int_nn" : NULL };
+  size_t len = text ? strlen(text) : 0;
+  for (int i = 0; i < 3; i++) {
+    size_t n = fns[i] ? strlen(fns[i]) : 0, k = n;
+    int depth = 0;
+    if (!n || len < n + 2 || strncmp(text, fns[i], n) || text[n] != '(' || text[len - 1] != ')') continue;
+    /* the call's own parenthesis has to be the one the text ends on */
+    for (; k < len; k++) {
+      char ch = text[k];
+      if (ch == '"' || ch == '\'') { for (k++; k < len && text[k] != ch; k++) if (text[k] == '\\') k++; }
+      else if (ch == '(') depth++;
+      else if (ch == ')' && --depth == 0) break;
+    }
+    if (k != len - 1) continue;
+    text[len - 1] = 0;
+    *val = text + n + 1;
+    return fns[i];
+  }
+  return NULL;
+}
+
 int emit_call_regexp_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv, int argc, const int *argv, TyKind rt, TyKind a0) {
   /* regex literal match predicates (bool-returning, no MatchData/globals):
      /re/.match?(str[, pos])  and  str.match?(/re/[, pos]) */
@@ -597,27 +623,32 @@ no_gsub_enum:
     int fck = (frty && (sp_streq(frty, "StringNode") || sp_streq(frty, "InterpolatedStringNode")))
               ? -1 : ++g_tmp;
     if (at == TY_POLY_ARRAY) {
-      if (fck >= 0) {
+      const char *fend = (operand_may_allocate(c, argv[0]) && !subtree_is_pure_read(c, argv[0])) ? emit_str_format_held(c, recv, argv[0], fck, b) : NULL;
+      if (fend) buf_puts(b, ", ");
+      else if (fck >= 0) {
         buf_printf(b, "sp_str_format_polyarr(({ const char *_t%d = ", fck);
         emit_expr(c, recv, b);
         buf_printf(b, "; if (!_t%d) sp_nil_recv(\"%%\"); _t%d; }), ", fck, fck);
       }
       else { buf_puts(b, "sp_str_format_polyarr("); emit_expr(c, recv, b); buf_puts(b, ", "); }
-      emit_expr(c, argv[0], b); buf_puts(b, ")");
+      emit_expr(c, argv[0], b); buf_puts(b, fend ? fend : ")");
       return 1;
     }
     const char *ak = array_kind(at);
     if (ak) {
       const char *kind = at == TY_STR_ARRAY ? "SP_BUILTIN_STR_ARRAY"
                        : at == TY_FLOAT_ARRAY ? "SP_BUILTIN_FLT_ARRAY" : "SP_BUILTIN_INT_ARRAY";
-      if (fck >= 0) {
+      const char *fend = emit_str_format_held(c, recv, argv[0], fck, b);
+      if (fend) {}
+      else if (fck >= 0) {
         buf_printf(b, "sp_str_format_polyarr(({ const char *_t%d = ", fck);
         emit_expr(c, recv, b);
         buf_printf(b, "; if (!_t%d) sp_nil_recv(\"%%\"); _t%d; })", fck, fck);
       }
       else { buf_puts(b, "sp_str_format_polyarr("); emit_expr(c, recv, b); }
-      buf_puts(b, ", sp_typed_to_poly((void *)("); emit_expr(c, argv[0], b);
-      buf_printf(b, "), %s))", kind);
+      buf_puts(b, typed_array_src_held(c, argv[0]) ? ", sp_typed_to_poly((void *)(" : ", sp_typed_to_poly_unheld((void *)(");
+      emit_expr(c, argv[0], b);
+      buf_printf(b, "), %s)%s", kind, fend ? fend : ")");
       return 1;
     }
     /* named references ("%<name>spec" / "%{name}") reading from a symbol-keyed
@@ -656,8 +687,9 @@ no_gsub_enum:
     /* a poly RHS may hold an Array (spread across the directives) or a scalar
        (a one-element list) -- the distinction is only known at runtime. */
     if (at == TY_POLY) {
-      buf_puts(b, "sp_str_format_polyarr("); emit_expr(c, recv, b);
-      buf_puts(b, ", sp_format_args("); emit_boxed(c, argv[0], b); buf_puts(b, "))");
+      const char *fend = emit_str_format_held(c, recv, argv[0], -1, b);
+      if (!fend) { buf_puts(b, "sp_str_format_polyarr("); emit_expr(c, recv, b); }
+      buf_puts(b, ", sp_format_args("); emit_boxed(c, argv[0], b); buf_printf(b, ")%s", fend ? fend : ")");
       return 1;
     }
     if (at == TY_UNKNOWN && emit_str_format_untyped_array(c, recv, argv[0], fck, b)) return 1;
@@ -666,9 +698,34 @@ no_gsub_enum:
        formatter's numeric directives) */
     if (at == TY_INT || at == TY_FLOAT || at == TY_STRING || at == TY_SYMBOL ||
         at == TY_NIL || at == TY_BOOL || at == TY_RATIONAL || at == TY_COMPLEX) {
-      buf_puts(b, "sp_str_format_polyarr("); emit_expr(c, recv, b);
-      buf_puts(b, ", ({ sp_PolyArray *_fa = sp_PolyArray_new(); sp_PolyArray_push(_fa, ");
-      emit_boxed(c, argv[0], b); buf_puts(b, "); _fa; }))");
+      const char *fend = emit_str_format_held(c, recv, argv[0], -1, b);
+      if (!fend) { buf_puts(b, "sp_str_format_polyarr("); emit_expr(c, recv, b); }
+      /* the one-element list is held by `_fa` alone while an argument that
+         allocates is built (`"%5s|" % ("q" + i.to_s)`); one that already
+         ran into a temp was built before the list */
+      int an = arg_ran_first(argv[0], 0) ? argv[0] : unwrap_parens(c, argv[0]);
+      /* not asked of a statement left alone, and the walk of the argument
+         (subtree_is_pure_read) last */
+      int runs = !(!fend && str_format_left_alone(c, recv, argv[0])) &&
+                 operand_may_allocate(c, argv[0]) && !arg_ran_first(an, 0) && !subtree_is_pure_read(c, argv[0]);
+      /* a number needs no holding: its value is taken ahead of the list
+         (`"%5d|" % sq(i)`) and boxed there by the call emit_boxed wrote */
+      if (runs && (at == TY_INT || at == TY_FLOAT)) {
+        Buf vb; memset(&vb, 0, sizeof vb);
+        emit_boxed(c, argv[0], &vb);
+        char *val = NULL;
+        const char *fn = vb.p ? boxed_number_value(vb.p, at, &val) : NULL;
+        if (fn)
+          buf_printf(b, ", ({ %s _fv = %s; sp_PolyArray *_fa = sp_PolyArray_new(); sp_PolyArray_push(_fa, %s(_fv)); _fa; })%s",
+                     at == TY_INT ? "sp_int" : "sp_float", val, fn, fend ? fend : ")");
+        else
+          buf_printf(b, ", ({ sp_PolyArray *_fa = sp_PolyArray_new(); SP_GC_ROOT(_fa); sp_PolyArray_push(_fa, %s); _fa; })%s",
+                     vb.p ? vb.p : "sp_box_nil()", fend ? fend : ")");
+        free(vb.p);
+        return 1;
+      }
+      buf_printf(b, ", ({ sp_PolyArray *_fa = sp_PolyArray_new(); %ssp_PolyArray_push(_fa, ", runs ? "SP_GC_ROOT(_fa); " : "");
+      emit_boxed(c, argv[0], b); buf_printf(b, "); _fa; })%s", fend ? fend : ")");
       return 1;
     }
   }
@@ -972,6 +1029,8 @@ int emit_call_symbol_bool_string_arms(Compiler *c, int id, Buf *b, const NodeTab
     int ts = ++g_tmp, ti = ++g_tmp;
     Buf rb = expr_buf(c, recv);
     int is_line = sp_streq(name, "each_line") || sp_streq(name, "lines");
+    if (is_line && argc >= 1 && repr_of(c, argv[0]).as_ty == TY_NIL && share_node_shares(c, recv))
+      unsupported_feature(c, id, "String line iteration with a nil separator cannot carry a shared receiver into its block; see docs/limitations.md");
     int is_byte = sp_streq(name, "each_byte") || sp_streq(name, "bytes");
     int is_cp = sp_streq(name, "codepoints");
     Scope *cs_ech = p0 ? comp_scope_of(c, id) : NULL;
@@ -1141,9 +1200,13 @@ int emit_op_string_scrub_block(Compiler *c, const BopCtx *x, Buf *b) {
     Scope *ps = comp_scope_of(c, block);
     LocalVar *plv = ps ? scope_local(ps, p0) : NULL;
     int box = plv && plv->type == TY_POLY;
+    /* a parameter held as a shared handle (--share-strings) takes a fresh
+       String of the match */
+    int hnd = !box && plv && repr_of_slot(c, plv).handle;
     emit_indent(g_pre, g_indent + 1);
     buf_printf(g_pre, "lv_%s = %ssp_str_substr(_t%d + _t%d, 0, _t%d)%s;\n",
-               rename_local(p0), box ? "sp_box_str(" : "", ts, tb, tn, box ? ")" : "");
+               rename_local(p0), box ? "sp_box_str(" : hnd ? "sp_String_new_fresh(" : "", ts, tb, tn,
+               (box || hnd) ? ")" : "");
   }
   int save = g_indent; g_indent++;
   IterStep st; emit_iter_step_open(c, block, 1, g_indent, &st);
@@ -1424,7 +1487,7 @@ static int str_self_chain_root(Compiler *c, int n) {
    method that answers a String of its own (no SELF-like flag on its row,
    the String family's BSH_PURE share)? A mutator's change of it is seen by
    nobody. */
-static int str_fresh_value(Compiler *c, int n) {
+int str_fresh_value(Compiler *c, int n) {
   const NodeTable *nt = c->nt;
   n = an_unparen(nt, n);
   if (nt_kind(nt, n) == NK_InterpolatedStringNode) return 1;

@@ -15,6 +15,18 @@
 /* Whether a boxed ivar setter's receiver can hold class k; an unproved
    receiver conservatively reaches every class. Shared by layout/emission. */
 int poly_ivar_set_reaches(Compiler *c, int call, int k);
+/* The classes the boxed receiver of call `call` can be an instance of, *n
+   of them, or NULL when the analysis cannot bound them (analyze_scope.c) */
+/* Kernel#String uses its argument as the conversion's implicit receiver. */
+const int *poly_recv_classes(Compiler *c, int call, int *n);
+/* The same walk for a value no call takes as its receiver (an argument of
+   `p`): the classes node v, or with elems one of its elements, can be an
+   instance of, marked in set (c->nclasses entries); 0 when it cannot bound
+   them. */
+int pivs_value_classes(Compiler *c, int v, int elems, char *set);
+/* The same for the boxed ivar ivn of class cid: the classes its stores can
+   put there, marked in set; 0 when it cannot bound them. */
+int pivs_ivar_classes(Compiler *c, int cid, const char *ivn, char *set);
 /* --share-strings: the callable literals (a lambda, a proc's literal
    block, a top-level method's `method(:name)`) the receiver of call `call`
    can be, by the same walk: into out (at most cap), their count, or -1
@@ -103,6 +115,9 @@ TyKind local_aset_key_type(Compiler *c, Scope *sc, const char *name, int *nwrite
 /* Run inference over the whole program: register locals, reach a fixpoint
    on their types, and fill the node type cache. */
 void analyze_program(Compiler *c);
+/* The program as written gives no class a method named `nm`, beyond `defs`
+   (0 or 1) defs of that name: read ahead of the desugars, by absence. */
+int an_prog_never_gives(const char *nm, int defs);
 /* True if a regex source contains a capturing group: an unescaped '(' that
    isn't the start of a non-capturing/extension group '(?...'. scan returns
    nested arrays for capturing patterns, which the str_array path can't model. */
@@ -296,6 +311,7 @@ TyKind face_of(int node);
 int face_active(void);
 void an_face_push(int node, TyKind kind);
 void an_face_pop(void);
+int an_face_pinned(int node);
 int view_face_top(int *node, TyKind *kind);   /* codegen_view.c */
 /* Name of a block's idx-th required parameter, or NULL. */
 const char *block_param_name(Compiler *c, int block, int idx);

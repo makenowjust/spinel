@@ -1,3 +1,4 @@
+# spinel: share
 # A local is typed once for its whole life, so one nil written to it makes
 # every read of it nullable: a compare tests for the sentinel, a box takes the
 # nil-aware form, and the mark spreads to whatever the value is copied into.
@@ -5,7 +6,7 @@
 # write, under a flag set beside the variable's non-nil writes, and for an
 # in-bounds index read of an array nothing can leave a nil or a hole in. Each
 # shape below has a twin where the proof must NOT hold.
-
+# spinel: decisions
 def t
   yield
 rescue => e

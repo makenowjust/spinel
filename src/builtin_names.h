@@ -13,6 +13,7 @@
 int is_zip_name(const char *n);       /* zip: tuple-yielding iteration */
 int is_call_alias(const char *n);     /* call () []: a Proc/Method's invocation */
 int is_method_invoke(const char *n);  /* call () [] ===: Method invocation */
+int is_bind_call(const char *n);  /* bind_call: an UnboundMethod bound and called in one */
 int is_kind_query(const char *n);     /* is_a? kind_of? instance_of? */
 int is_member_blind_query(const char *n); /* class object_id __id__ nil? frozen? equal? respond_to? is_a? ... */
 int is_round_family(const char *n);   /* round ceil floor truncate */
@@ -22,6 +23,9 @@ int is_basic_arith(const char *n);    /* + - * / (is_arith_op adds % and **) */
 int is_int_arith_op(const char *n);   /* + - * / %: an Integer's arithmetic that answers an Integer */
 int is_add_sub_mul(const char *n);    /* + - * */
 int is_int_bit_op(const char *n);     /* & | ^ << >>: Integer's bitwise operators */
+int is_embedding_builtin(const char *nm); /* Array Hash: subclass instances embed the builtin */
+int is_class_name_name(const char *n);   /* name */
+int is_inspect_name(const char *n);       /* inspect */
 int is_object_root(const char *n);    /* Object Kernel BasicObject: the classes every object has */
 int is_send_family(const char *n);    /* send __send__ public_send */
 int is_opaque_reaching_call(const char *n); /* send family, call, new, lambda/proc, freeze, eval, instance_/class_/module_*, *method* */
@@ -34,6 +38,8 @@ int is_set_op(const char *n);         /* & intersection | union - difference */
 int is_combination_family(const char *n);  /* combination permutation repeated_combination repeated_permutation */
 int is_visibility_name(const char *n);     /* private protected public */
 int is_select_bang(const char *n);    /* select! filter! keep_if reject! delete_if: the in-place filters */
+int is_retaining_filter(const char *n); /* select filter find_all reject, and the in-place filters: the iterators answering some of their elements */
+int is_enum_partition_def(const char *n); /* __enum_partition__N: partition's builtin definition, per call site */
 int is_each_walk(const char *n);      /* each each_entry reverse_each */
 int is_index_query(const char *n);    /* find_index index rindex */
 int is_self_copy(const char *n);      /* freeze dup clone itself: the receiver, or a copy of it */
@@ -64,6 +70,7 @@ int is_diverging_call(const char *n); /* raise fail throw exit exit! abort: a Ke
 int is_block_loop_method(const char *n); /* times each upto downto step loop each_with_index: a block run an unbounded number of times */
 
 int is_each_window(const char *n); /* each_cons each_slice: consecutive or disjoint element windows */
+int is_sum_name(const char *n);
 int is_reduce_alias(const char *n); /* inject reduce: Enumerable reduction aliases */
 int is_minmax_query(const char *n); /* min max: extrema queries */
 int is_endpoint_query(const char *n); /* first last: collection or Range endpoints */
@@ -118,6 +125,11 @@ int is_freeze_family(const char *n); /* freeze frozen? */
 int is_bivar_access(const char *n);  /* __bivar_get __bivar_set __bivar_defined */
 int is_object_copy(const char *n);   /* dup clone */
 int is_ivar_set_name(const char *n); /* instance_variable_set */
+int is_marshal_dump(const char *recv, const char *meth); /* Marshal.dump */
+int is_marshal_load(const char *recv, const char *meth); /* Marshal.load */
+int is_allocate_name(const char *n); /* allocate */
+int is_ivar_remove_name(const char *n); /* remove_instance_variable */
+int is_ivar_presence_read(const char *n); /* instance_variables instance_variable_defined? remove_instance_variable inspect p pp */
 int is_bivar_keyed_class(const char *n);  /* Array Hash Random */
 int is_string_class_name(const char *n);   /* String */
 int is_frozen_value_class(const char *n); /* Integer Float Symbol NilClass TrueClass FalseClass Range */
@@ -178,6 +190,7 @@ int is_with_object_alias(const char *n); /* each_with_object with_object */
 int is_exist_alias(const char *n); /* exist? exists? */
 int is_select_alias(const char *n); /* filter select */
 int is_format_alias(const char *n); /* format sprintf */
+int is_initialize_name(const char *n); /* initialize */
 int is_initialize_family(const char *n); /* initialize initialize_copy */
 
 int is_iso8601_alias(const char *n); /* iso8601 xmlschema */
@@ -205,6 +218,7 @@ int is_array_push_family(const char *n); /* << append prepend push unshift */
 
 int is_io_class_name(const char *n); /* File IO */
 int is_file_class_name(const char *n); /* File */
+int is_filetest_module_name(const char *n); /* FileTest */
 int is_immediate_class_name(const char *n); /* FalseClass NilClass TrueClass */
 int is_object_base_name(const char *n); /* BasicObject Object */
 int is_boolean_class_name(const char *n); /* FalseClass TrueClass */
@@ -229,6 +243,9 @@ int is_string_append(const char *n); /* << concat: appends answering the receive
 int is_replace_name(const char *n); /* replace: a String's, Array's or Hash's contents swapped for another's, which ignores a block */
 
 int is_string_rebind_mutator(const char *n); /* mutators needing argument-rebind snapshots */
+/* String methods that only read the receiver's bytes and never retain the
+   pointer: a shared-mutable receiver hands them its live buffer. */
+int is_string_read_only_method(const char *name);
 int str_mutator_str_args(const char *n, int argc, int *int_ok); /* the arguments a String mutator takes as Strings */
 
 int builtin_module_owns(const char *cls, const char *name); /* included ahead of Object */
@@ -267,5 +284,14 @@ int is_argv_const(const char *n);        /* ARGV */
 int is_proc_conversion_name(const char *n); /* to_proc curry: makes a proc */
 int is_aref_name(const char *n);         /* []: an element read */
 int is_shovel_name(const char *n);       /* <<: an append, a chain's link */
+
+const char *dir_surface_alias(const char *n, int blockless_iter);
+
+int is_kernel_module_name(const char *n);
+int is_kernel_module_function(const char *n);
+int is_builtin_module_const_name(const char *n);
+
+int is_define_method_name(const char *n); /* define_method */
+int is_alias_method_name(const char *n);  /* alias_method */
 
 #endif

@@ -590,7 +590,7 @@ sp_ofloat sp_FloatArray_max_o(sp_FloatArray*a){if(!a||a->len==0)return sp_ofloat
    [0.1,0.2,0.3] yields 0.6000000000000001 instead of 0.6). The step, with
    CRuby's NaN/Infinity arms, is sp_float_sum_step in sp_array.h -- shared with
    the boxed fold so the two cannot drift. */
-sp_float sp_FloatArray_sum(sp_FloatArray*a,sp_float init){sp_float s=init,c=0.0;for(sp_int i=0;i<a->len;i++)sp_float_sum_step(&s,&c,a->data[i]);return s+c;}
+sp_float sp_FloatArray_sum(sp_FloatArray*a,sp_float init){sp_float s=init,c=0.0;for(sp_int i=0;i<a->len;i++)sp_float_sum_step(&s,&c,a->data[i]);return a->len?s+c:init;}
 void sp_FloatArray_replace(sp_FloatArray*dst,sp_FloatArray*src){if(dst==src)return;if(dst->frozen){sp_raise_frozen_array_at(dst,SP_BUILTIN_FLT_ARRAY);return;}dst->len=0;sp_FloatArray_drop_nilbits(dst);if(src->len>dst->cap)sp_FloatArray_set_cap(dst,src->len);memcpy(dst->data,src->data,sizeof(sp_float)*src->len);dst->len=src->len;fa_bits_copy(dst,0,src,0,src->len);}
 /* a[start, len] / a[start..end] for FloatArray. Same negative-start and
    length-clamping semantics as sp_IntArray_slice. */

@@ -326,7 +326,7 @@ int emit_call_compare_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
       emit_int_bit_recv(c, recv, rt, rcv_conv, name, b);
       buf_puts(b, ", ");
       if (at0 == TY_POLY) { buf_puts(b, "sp_poly_bit_operand("); emit_expr(c, argv[0], b); buf_puts(b, ", 1)"); }
-      else if (at0 == TY_FLOAT) { buf_puts(b, "(sp_int)("); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
+      else if (at0 == TY_FLOAT) { buf_puts(b, "sp_float_to_i_checked("); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
       else emit_int_expr(c, argv[0], b);
       buf_puts(b, ")");
       return 1;
@@ -863,11 +863,13 @@ int emit_call_compare_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
       /* Comparable's relational operators are built on <=>, which answers nil
          against a non-String: that is an ArgumentError, not a comparison
          against the operand reinterpreted as a char pointer (#3592) */
+      NodeKind lk = nt_kind(c->nt, argv[0]);
+      int cls = ty_is_hash(sat) || ty_is_array(sat) || sat == TY_RANGE || lk == NK_ArrayNode || lk == NK_HashNode;
       if (sat == TY_INT || sat == TY_FLOAT || sat == TY_NIL || sat == TY_BOOL ||
-          sat == TY_SYMBOL) {
+          sat == TY_SYMBOL || cls) {
         buf_puts(b, "((void)("); emit_expr(c, recv, b);
-        buf_puts(b, "), sp_raise_cls(\"ArgumentError\", sp_sprintf("
-                    "\"comparison of String with %s failed\", sp_poly_inspect(");
+        buf_printf(b, "), sp_raise_cls(\"ArgumentError\", sp_sprintf("
+                      "\"comparison of String with %%s failed\", %s(", cls ? "sp_cmperr_desc" : "sp_poly_inspect");
         emit_boxed(c, argv[0], b);
         buf_puts(b, "))), FALSE)");
         return 1;

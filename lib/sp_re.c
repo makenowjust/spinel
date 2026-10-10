@@ -119,6 +119,17 @@ void sp_re_frame_push(sp_re_frame *f) {
   f->last_pat = sp_re_last_pat;
   f->last_lit = sp_re_last_lit;
   f->pp_span[0] = sp_re_pp_span[0]; f->pp_span[1] = sp_re_pp_span[1];
+  /* The saved strings are the only reference to the caller's matches once the
+     callee's own match overwrites the registers, and this struct is on the C
+     stack where the collector does not look. Root its string slots on the GC
+     root stack (tag 2): a rescue landing resets that stack to its try-entry
+     depth, and a fiber switch swaps it, so the entries follow the frame. */
+  f->nroots = sp_gc_nroots;
+  for (int i = 0; i < 10; i++) _sp_gc_root_push((void **)((uintptr_t)&f->captures[i] | (uintptr_t)2));
+  _sp_gc_root_push((void **)((uintptr_t)&f->last_str | (uintptr_t)2));
+  _sp_gc_root_push((void **)((uintptr_t)&f->match_str | (uintptr_t)2));
+  _sp_gc_root_push((void **)((uintptr_t)&f->match_pre | (uintptr_t)2));
+  _sp_gc_root_push((void **)((uintptr_t)&f->match_post | (uintptr_t)2));
 }
 void sp_re_frame_pop(sp_re_frame *f) {
   if (!f) return;
@@ -133,6 +144,8 @@ void sp_re_frame_pop(sp_re_frame *f) {
   sp_re_last_lit = f->last_lit;
   /* the span $` and $' are built from lazily: the caller's, not the callee's */
   sp_re_pp_span[0] = f->pp_span[0]; sp_re_pp_span[1] = f->pp_span[1];
+  /* drop the slots sp_re_frame_push rooted */
+  if (sp_gc_nroots > f->nroots) sp_gc_nroots = f->nroots;
 }
 void sp_re_set_captures(const char *str, int *caps, int ncaps) {SP_GC_ROOT_STR(str);
   sp_re_last_str = str;
@@ -371,16 +384,16 @@ sp_StrArray *sp_re_rpartition(mrb_regexp_pattern *pat, const char *str) {
   char *before = sp_str_alloc_raw(ms + 1);
   memcpy(before, str, ms); before[ms] = 0;
   sp_str_set_len(before, (size_t)ms);
+  sp_StrArray_push(r, before);
   int mlen = (int)(me - ms);
   char *mid = sp_str_alloc_raw(mlen + 1);
   memcpy(mid, str + ms, mlen); mid[mlen] = 0;
   sp_str_set_len(mid, (size_t)mlen);
+  sp_StrArray_push(r, mid);
   int alen = (int)(slen - me);
   char *after = sp_str_alloc_raw(alen + 1);
   memcpy(after, str + me, alen); after[alen] = 0;
   sp_str_set_len(after, (size_t)alen);
-  sp_StrArray_push(r, before);
-  sp_StrArray_push(r, mid);
   sp_StrArray_push(r, after);
   return r;
 }

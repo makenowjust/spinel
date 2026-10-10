@@ -418,8 +418,8 @@ int emit_call_bigint_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, cons
     if (sp_streq(name, "[]") && argc == 2) {
       /* Bignum n[start, len]: the len-bit field starting at bit `start`. */
       int tst = ++g_tmp, tln = ++g_tmp, tsh = ++g_tmp;
-      buf_printf(b, "({ sp_int _t%d = ", tst); emit_int_expr(c, argv[0], b);
-      buf_printf(b, "; sp_int _t%d = ", tln); emit_int_expr(c, argv[1], b);
+      buf_printf(b, "({ sp_int _t%d = ", tst); emit_to_int_expr(c, argv[0], b);
+      buf_printf(b, "; sp_int _t%d = ", tln); emit_to_int_expr(c, argv[1], b);
       buf_printf(b, "; sp_Bigint *_t%d = sp_bigint_shr(%s, (int64_t)_t%d);"
                     " (_t%d < 0 || _t%d < 0) ? (sp_int)0"
                     " : sp_bigint_to_int(sp_bigint_and(_t%d,"
@@ -594,7 +594,7 @@ int emit_call_iter_expr_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, c
       int lf = comp_ntype(c, argv[0]) == TY_FLOAT;
       buf_puts(b, "(sp_Range){ .first = "); emit_upto_recv(c, recv, argv[0], b);
       buf_puts(b, ", .last = ");
-      if (lf) { buf_puts(b, "(sp_int)floor("); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
+      if (lf) { buf_puts(b, "sp_flt_range_bound("); emit_expr(c, argv[0], b); buf_puts(b, ", 1)"); }
       else emit_int_expr(c, argv[0], b);
       buf_puts(b, ", .excl = 0 }");
       return 1;
@@ -606,7 +606,7 @@ int emit_call_iter_expr_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, c
       int lf = comp_ntype(c, argv[0]) == TY_FLOAT;
       buf_puts(b, "sp_range_new_step("); emit_int_recv_named(c, recv, name, b);
       buf_puts(b, ", ");
-      if (lf) { buf_puts(b, "(sp_int)ceil("); emit_expr(c, argv[0], b); buf_puts(b, ")"); }
+      if (lf) { buf_puts(b, "sp_flt_range_bound("); emit_expr(c, argv[0], b); buf_puts(b, ", 0)"); }
       else emit_int_expr(c, argv[0], b);
       buf_puts(b, ", 0, -1LL)");
       return 1;

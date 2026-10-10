@@ -8,10 +8,17 @@ runs every leg we merge on: the test corpus, the benchmarks, optcarrot, the
 ruby/spec retention gate, scale-test, spin-check and the other property
 tests. A pull request is merged only after the same gate passes here.
 
+`gate-test-shared` also runs the whole test corpus, including bundled packages,
+with `SPINEL_SHARE_STRINGS=1` and `OPT=-O1`. It reuses `GATE_CACHE` with the flag
+in the key. `test/share/known-failures.txt` lists the current failures, one
+program name per line (`#` comments allowed). An unlisted failure fails the
+gate; a listed program that passes prints a reminder to remove it. `infer-test`
+and `reject-test` run only with their default-build expectations.
+
 ```sh
 git fetch origin && git merge origin/master   # or rebase
 make gate 2>&1 | tee gate.log
-grep -E 'Tests:|scale-test|gate:' gate.log
+grep -E 'Tests:|scale-test|gate-test-shared:|gate:' gate.log
 ```
 
 **If `make gate` fails on our side, we fix it where the fix is mechanical** (a
@@ -70,14 +77,46 @@ container on this branch merged with `master`, and records the same stamp.
 it); the hooks run under `GATE_RUBY` or `ruby`. Without such a Ruby,
 `make gate` skips the stamp and passes or fails exactly as it would
 otherwise, and the `.expected` comparison is skipped with a warning. `make gate-tool-test`
-tests `tools/gate.rb` itself.
+tests `tools/gate.rb` itself and the shared corpus's known-failure summary.
+
+`make share-verify-test` compiles `test/share/*.rb`, `test/share_strings_*.rb`
+and `test/share/verify/**/*.rb` with `SPINEL_SHARE_STRINGS=1 --repr-check --plan-check`.
+It fails on a new conflict, a failed compilation, or generated C that differs
+with the checking flags, or an output mismatch. Each executable program runs
+once against its `.expected`, without GC stress. The 13 examples under
+`test/share/verify/conflicts/` remain compile-only; their expected files record
+CRuby answers that the compiler does not yet produce. Verifier fixtures have
+no `share` marker and do not join `share-strings-test`. A stale entry in `test/share/verify-conflicts.txt`
+prints a removal reminder and does not fail the target. The ratchet contains
+exact diagnostics, one per line; remove an entry when its disagreement is fixed.
+`SHARE_VERIFY_JOBS` controls parallelism (default 2).
+Use `ruby tools/share_verify.rb -v` for classified observations and coverage
+gaps, or pass Ruby files to check a focused subset. `--extra DIR` includes
+another directory's Ruby files. This target is separate from `make gate`.
+
+The String channel shadow records the existing return-tail analysis and
+observes publishing reads, fresh-tail clearing, nil guards at pickups, and
+the existing polymorphic arm records. Boxed proc/block results use their
+own value channel. `channel-unobserved` identifies a publication or target
+the shadow cannot verify; it is not a clean bill of health. In particular,
+the shadow does not yet prove channel preservation across an ensure body
+that publishes another value. The ordinary repr shadow still checks boxes
+and coercions; not every handwritten argument or element store uses it.
 
 ## What the review checks
 
-- **Same answer as CRuby.** Compare a new test's output with CRuby 4.0
-  run with `--enable-frozen-string-literal`: Spinel's string literals are
-  always frozen. A path Spinel cannot handle is refused at compile time with
-  a message; it must never give a different answer silently.
+- **Same answer as CRuby, or a refusal.** Compare a new test's output with
+  CRuby 4.0 run with `--enable-frozen-string-literal`: Spinel's string
+  literals are always frozen. A path Spinel cannot handle is refused at
+  compile time with a `spinel: FILE:LINE: ...` message naming the construct.
+  A program Spinel compiles must behave as CRuby does: it must not give a
+  different answer silently, raise an error CRuby would not raise (a
+  `NoMethodError` for a method that was never defined, a
+  `NotImplementedError` for an unsupported construct), or fail in the C
+  compiler. Turning a refusal into a runtime `NotImplementedError` is only
+  for `--defer-refusals`, which a user asks for explicitly.
+  `docs/limitations.md` describes the refusals; when a change supports or
+  refuses a construct, update its entry in the same pull request.
 - **No cost where the change does not apply.** If optcarrot's generated C
   changes, show callgrind numbers; its checksum stays 59662. A rise of more
   than 0.05 in any scale-test ratio is a finding.
@@ -92,6 +131,27 @@ tests `tools/gate.rb` itself.
   - Use `Dir.tmpdir` for temporary files, not a fixed `/tmp` path, and no
     OS-specific paths.
   - Give every new test its `.expected` file.
+  - A new test registers itself with these header lines; no Makefile edit:
+    `# spinel: share` runs it under `--share-strings`, `# spinel: gc-minor`
+    runs it with the minor mark off, on, and under the generational verifier
+    with GC stress, and `# spinel: gc-stress` runs stress level 2 with and
+    without the full verifier. Use one line per marker.
+    `# spinel: reject-share` marks a `test/reject/` program that runs under
+    `--share-strings`, with its output in `test/share/reject/`.
+    `# spinel: wasm` selects the WASI smoke tests; `# spinel: decisions`
+    selects the decision checks. In `test/rbs-seed/`, `# spinel: rbs-seed-run`
+    selects an output check and `# spinel: rbs-seed-check` selects an existing
+    named assertion in the RBS harness.
+    The other `reject-*` markers select the diagnostic assertion named in
+    `reject-test`; `rbs-seed-contradicted-return` selects its grouped refusal
+    check, and `infer-ivar-get` selects the boxed instance-variable read check.
+    A rejection marker followed by `: text` supplies the literal diagnostic
+    text to match. In `test/defer/`, `# spinel: defer-refusals: count:output`
+    gives the refusal count and stdout, with output lines separated by spaces.
+    The ordinary corpus, `test/share/*.rb`, `test/share_strings_*.rb` and
+    `test/share/refuse/*.rb` are still discovered by name. Keep `int64` on
+    its own first line when needed; platform and overflow exclusions still
+    apply.
 - **Function size.**
   - A function over 1,000 lines does not grow: add a new arm through a
     helper, or in the file for its receiver type.

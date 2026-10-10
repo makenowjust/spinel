@@ -18,12 +18,58 @@
 static void oint_open(Compiler *c, int id, TyKind t, Buf *b) { if (!node_is_oint(c, id)) buf_printf(b, "%s(", oint_arg(t)); }
 static void oint_close(Compiler *c, int id, Buf *b) { if (!node_is_oint(c, id)) buf_puts(b, ")"); }
 
+/* The parameters of an initialize_copy hook after the original it is handed
+   (`def initialize_copy(o, opts = nil)`): each optional one its default,
+   run with the copy as self as a dispatch arm runs it, a rest an empty
+   Array. A required one is CRuby's ArgumentError from dup itself, refused.
+   A default may read the first parameter, bound to arg0 (the original as
+   that parameter takes it) around it. Writes ", <arg>" per parameter; 0
+   when refused. */
+static int emit_init_copy_rest_args(Compiler *c, int id, Scope *m, const char *copyself,
+                                    const char *arg0, Buf *b) {
+  LocalVar *p0 = m->nparams >= 1 ? scope_local(m, m->pnames[0]) : NULL;
+  for (int k = 1; k < m->nparams; k++) {
+    if (k == m->kwrest_idx) continue;
+    if (k != m->rest_idx && (!m->pdefault || m->pdefault[k] < 0)) {
+      unsupported_feature(c, id, "an initialize_copy with a second required parameter (dup and clone "
+                                 "hand it one argument: CRuby raises ArgumentError)");
+      return 0;
+    }
+    const char *sv_arm_self = g_arm_self; const Scope *sv_arm_scope = g_arm_scope;
+    int sv_arm_depth = g_arm_depth;
+    g_arm_self = copyself; g_arm_scope = m; g_arm_depth = g_expr_depth;
+    Buf pre; memset(&pre, 0, sizeof pre);
+    Buf val; memset(&val, 0, sizeof val);
+    Buf *sv_pre = g_pre; int sv_ind = g_indent;
+    g_pre = &pre; g_indent = 0;
+    emit_arg_or_default(c, m, k, -1, &val);
+    g_pre = sv_pre; g_indent = sv_ind;
+    g_arm_self = sv_arm_self; g_arm_scope = sv_arm_scope; g_arm_depth = sv_arm_depth;
+    buf_puts(b, ", ({ ");
+    if (p0 && m->pnames[0]) {
+      const char *ln = rename_local(m->pnames[0]);
+      emit_ctype(c, p0->type, b);
+      buf_printf(b, " lv_%s = %s; (void)lv_%s; ", ln, arg0, ln);
+    }
+    if (pre.p) buf_puts(b, pre.p);
+    buf_printf(b, "%s; })", val.p ? val.p : "0");
+    free(pre.p); free(val.p);
+  }
+  return 1;
+}
+
+int str_cmp_bound_foreign(Compiler *c, int n) {
+  TyKind t = comp_ntype(c, n);
+  NodeKind k = nt_kind(c->nt, n);
+  return ty_is_object(t) || t == TY_INT || t == TY_FLOAT || t == TY_NIL || t == TY_BOOL || t == TY_SYMBOL ||
+         t == TY_BIGINT || t == TY_RANGE || ty_is_hash(t) || ty_is_array(t) || k == NK_ArrayNode || k == NK_HashNode;
+}
+
 /* between?, object_id / __id__, hash, nil? and === on a receiver whose kind decides them */
 int emit_call_identity_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv, int argc, const int *argv, TyKind rt) {
   /* between?(lo, hi): lo <= self <= hi */
   if (sp_streq(name, "between?") && argc == 2) {
-    if (rt == TY_STRING &&
-        (ty_is_object(comp_ntype(c, argv[0])) || ty_is_object(comp_ntype(c, argv[1])))) {
+    if (rt == TY_STRING && (str_cmp_bound_foreign(c, argv[0]) || str_cmp_bound_foreign(c, argv[1]))) {
       /* Comparable#between? is two <=>s and it STOPS at the first: when
          `self >= lo` is false CRuby never asks hi for anything, so
          `"abc".between?(W.new("abd"), Plain.new)` is false rather than the
@@ -234,7 +280,11 @@ int emit_call_identity_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
     else if (rt == TY_NIL) { buf_puts(b, "((void)("); emit_expr(c, recv, b); buf_puts(b, "), SP_NIL_OBJECT_ID)"); }
     else if (rt == TY_BOOL) { buf_puts(b, "(("); emit_expr(c, recv, b); buf_puts(b, ") ? SP_TRUE_OBJECT_ID : SP_FALSE_OBJECT_ID)"); }
     /* a boxed value: its identity is the boxed payload (heap pointer / int) */
-    else if (rt == TY_POLY) { buf_puts(b, "((sp_int)(uintptr_t)("); emit_expr(c, recv, b); buf_puts(b, ").v.p)"); }
+    else if (rt == TY_POLY) {
+      buf_puts(b, repr_share_rule(c) ? "((sp_int)(uintptr_t)sp_poly_identity_ptr(" : "((sp_int)(uintptr_t)(");
+      emit_expr(c, recv, b);
+      buf_puts(b, repr_share_rule(c) ? "))" : ").v.p)");
+    }
     /* a mutable String held as its shared sp_String: that handle is the
        identity, and the one a box of it carries; its text is a fresh copy
        on every read. A nullable String boxes NULL as nil, whose fixed id
@@ -645,6 +695,16 @@ int emit_call_instance_eval_arms(Compiler *c, int id, Buf *b, const NodeTable *n
   }
   if (ie_direct || ie_tramp) {
     int blk = nt_ref(nt, id, "block");
+    /* the block forwarded is the enclosing method's own, whose sites' blocks
+       answer different kinds, on a receiver not dispatched by class: the
+       call is boxed (infer_call's instance_exec arm), so is this site's value */
+    int ie_fwd_boxed = 0;
+    if (blk >= 0 && nt_kind(nt, blk) == NK_BlockArgumentNode && call_forwards_own_block(c, id) &&
+        (recv < 0 || comp_ntype(c, recv) != TY_POLY)) {
+      Scope *fsc = comp_scope_of(c, id);
+      int fmi = fsc ? (int)(fsc - c->scopes) : -1;
+      ie_fwd_boxed = fmi >= 0 && yield_value_diverges(c, fmi) && !node_is_scope_tail(c, fmi, id);
+    }
     /* `instance_exec(args, &b)` forwarding the enclosing (now-inlined) method's
        block param: the real block is the literal active at the inline splice,
        so resolve the BlockArgumentNode to it (as `inner(&block)` does). */
@@ -846,9 +906,9 @@ int emit_call_instance_eval_arms(Compiler *c, int id, Buf *b, const NodeTable *n
         g_ie_res_poly = (scalar_res && body_ty == TY_POLY);
         g_ie_next_oint = res_oint;   /* a `next v` stores the slot's form */
         char bvbuf[32];
-        int sv_lexc2 = g_loop_exc_base, sv_lens2 = g_loop_ensure_base;
+        int sv_lexc2 = g_loop_exc_base, sv_lexc2_rb = g_loop_rescue_base, sv_lens2 = g_loop_ensure_base;
         if (ie_bn_wrap) {
-          g_loop_exc_base = g_exc_frame_depth;   /* break/next exit the do{}while(0) */
+          g_loop_exc_base = g_exc_frame_depth; g_loop_rescue_base = g_rescue_save_depth;   /* break/next exit the do{}while(0) */
           g_loop_ensure_base = g_ensure_depth;   /* ... and run only ensures opened inside it */
           emit_indent(g_pre, g_indent); buf_puts(g_pre, "do {\n"); g_indent++;
           if (scalar_res) { snprintf(bvbuf, sizeof bvbuf, "_t%d", tres); g_loop_break_var = bvbuf; g_ie_next_var = bvbuf; }
@@ -877,7 +937,7 @@ int emit_call_instance_eval_arms(Compiler *c, int id, Buf *b, const NodeTable *n
           g_loop_break_var = sv_lb; g_ie_next_var = sv_nx;
           g_indent--; emit_indent(g_pre, g_indent); buf_puts(g_pre, "} while (0);\n");
         }
-        g_loop_exc_base = sv_lexc2; g_loop_ensure_base = sv_lens2;
+        g_loop_exc_base = sv_lexc2; g_loop_rescue_base = sv_lexc2_rb; g_loop_ensure_base = sv_lens2;
         g_ie_res_poly = sv_iep; g_ie_next_oint = sv_ieo;
         g_brk_ser_var = sv_bser;
         g_ie_discard_value = saved_discard;
@@ -889,7 +949,16 @@ int emit_call_instance_eval_arms(Compiler *c, int id, Buf *b, const NodeTable *n
       if (ie_flip) { ie_sc->is_cmethod = ie_sv_cm; ie_sc->class_id = ie_sv_cls; comp_scope_move_end(); }
       g_self = saved_self2;
       g_self_deref = saved_deref2;
-      if (scalar_res) buf_printf(b, "_t%d", tres);
+      /* The call boxed for a forwarded block whose sites answer different
+         kinds (ie_fwd_boxed) takes this site's value boxed, a nil block's as
+         nil */
+      TyKind ie_call_ty = ie_fwd_boxed ? repr_of(c, id).as_ty : TY_UNKNOWN;
+      if (scalar_res && ie_call_ty == TY_POLY && body_ty != TY_POLY) {
+        char tv[32]; snprintf(tv, sizeof tv, "_t%d", tres);
+        emit_boxed_text(c, body_ty, tv, b);
+      }
+      else if (scalar_res) buf_printf(b, "_t%d", tres);
+      else if (ie_call_ty == TY_POLY && (body_ty == TY_NIL || body_ty == TY_VOID)) buf_puts(b, "sp_box_nil()");
       else buf_printf(b, "_t%d", tr);  /* statement use: value is the receiver */
       return 1;
     }
@@ -1055,17 +1124,34 @@ int emit_call_freeze_dup_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, 
          super into Array is a replace, which the copy has already done */
       int defcls = -1;
       int ic = comp_method_in_chain(c, cid, "initialize_copy", &defcls);
-      LocalVar *icp = ic >= 0 && c->scopes[ic].nparams == 1 && !c->scopes[ic].yields
+      /* the original handed as the parameter's class, or boxed -- as its
+         Array or Hash, its class read back off its scan -- to a parameter
+         the program also hands other values; the parameters after it take
+         their defaults (emit_init_copy_rest_args) */
+      LocalVar *icp = ic >= 0 && c->scopes[ic].nparams >= 1 && !c->scopes[ic].yields
         ? scope_local(&c->scopes[ic], c->scopes[ic].pnames[0]) : NULL;
-      if (ic >= 0 && (!icp || !ty_is_object(icp->type)))
-        unsupported_feature(c, id, "an initialize_copy of an Array subclass whose parameter is not "
-                                   "typed as the class is not supported yet");
+      TyKind ictp = icp ? icp->type : TY_UNKNOWN;
+      if (ic >= 0 && !ty_is_object(ictp) && ictp != TY_POLY)
+        unsupported_feature(c, id, "an initialize_copy of an Array or Hash subclass whose parameter "
+                                   "is not typed as the class is not supported yet");
       else if (ic >= 0) {
         const char *nb = c->scopes[ic].blk_param && c->scopes[ic].blk_param[0] ? ", NULL" : "";
-        buf_printf(b, "if (_t%d) ", d);
-        emit_method_cname(c, &c->scopes[ic], b);
-        buf_printf(b, "((sp_%s *)_t%d, (sp_%s *)_t%d%s); ", c->classes[defcls].c_name, d,
-                   c->classes[ty_object_class(icp->type)].c_name, t, nb);
+        char copyself[64];
+        snprintf(copyself, sizeof copyself, "((sp_%s *)_t%d)", c->classes[defcls].c_name, d);
+        Buf a0; memset(&a0, 0, sizeof a0);
+        if (ictp == TY_POLY) {
+          buf_printf(&a0, "sp_box_obj(_t%d, ", t);
+          arysub_box_id(c, drt, &a0);
+          buf_puts(&a0, ")");
+        }
+        else buf_printf(&a0, "(sp_%s *)_t%d", c->classes[ty_object_class(ictp)].c_name, t);
+        Buf rest; memset(&rest, 0, sizeof rest);
+        if (emit_init_copy_rest_args(c, id, &c->scopes[ic], copyself, a0.p, &rest)) {
+          buf_printf(b, "if (_t%d) ", d);
+          emit_method_cname(c, &c->scopes[ic], b);
+          buf_printf(b, "(%s, %s%s%s); ", copyself, a0.p, rest.p ? rest.p : "", nb);
+        }
+        free(rest.p); free(a0.p);
       }
       buf_printf(b, "_t%d; })", d);
       return 1;
@@ -1125,13 +1211,17 @@ int emit_call_freeze_dup_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, 
           const char *nb = c->scopes[ic].blk_param && c->scopes[ic].blk_param[0] && !c->scopes[ic].yields ? ", NULL" : "";
           emit_method_cname(c, &c->scopes[ic], b); buf_puts(b, "(");
           if (defcls != cid) buf_printf(b, "(sp_%s *)", c->classes[defcls].c_name);
-          if (ictp == TY_POLY) { buf_printf(b, "_t%d, sp_box_obj(_t%d, %d)%s); ", td, to, cid, nb); }
-          else {
-            int icid = ty_object_class(ictp);
-            buf_printf(b, "_t%d, ", td);
-            if (icid != cid) buf_printf(b, "(sp_%s *)", c->classes[icid].c_name);
-            buf_printf(b, "_t%d%s); ", to, nb);
-          }
+          char copyself[64];
+          snprintf(copyself, sizeof copyself, "((sp_%s *)_t%d)", c->classes[defcls].c_name, td);
+          char a0[96];
+          if (ictp == TY_POLY) snprintf(a0, sizeof a0, "sp_box_obj(_t%d, %d)", to, cid);
+          else if (ty_object_class(ictp) != cid)
+            snprintf(a0, sizeof a0, "(sp_%s *)_t%d", c->classes[ty_object_class(ictp)].c_name, to);
+          else snprintf(a0, sizeof a0, "_t%d", to);
+          Buf rest; memset(&rest, 0, sizeof rest);
+          emit_init_copy_rest_args(c, id, &c->scopes[ic], copyself, a0, &rest);
+          buf_printf(b, "_t%d, %s%s%s); ", td, a0, rest.p ? rest.p : "", nb);
+          free(rest.p);
         }
         /* clone copies the receiver's frozen state (dup never does); an
            explicit `freeze:` overrides (#2625, #2626). A Data instance is
@@ -1363,7 +1453,7 @@ int emit_call_safe_nav_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
       TyKind rrt = rrr.as_ty;
       if (rrt == TY_NIL) {
         /* nil&.foo always returns nil */
-        TyKind ret = repr_of(c, id).as_ty;
+        TyKind ret = repr_share_rule(c) && repr_of(c, id).demand ? TY_STRBUF : repr_of(c, id).as_ty;
         const char *dv = default_value_from_compiler(c, ret);
         buf_puts(b, dv ? dv : "0");
         return 1;
@@ -1427,7 +1517,7 @@ int emit_call_safe_nav_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
            result is inferred poly, force the call boxed; for a concretely-typed
            result, emit the natural form and default the nil arm to match. */
         int tsn = ++g_tmp;
-        TyKind ret2 = repr_of(c, id).as_ty;
+        TyKind ret2 = repr_share_rule(c) && repr_of(c, id).demand ? TY_STRBUF : repr_of(c, id).as_ty;
         Buf rsn = expr_buf(c, recv);
         emit_indent(g_pre, g_indent);
         buf_printf(g_pre, "sp_RbVal _sn%d = %s; SP_GC_ROOT_RBVAL(_sn%d);\n",
@@ -1557,7 +1647,7 @@ int emit_call_safe_nav_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, co
       int sn_cont = needs_root(rrt) && rrt != TY_POLY && rrt != TY_STRING && !ty_is_object(rrt);
       if ((sn_obj || rrt == TY_STRING || sn_scalar || sn_cont) && g_sn_skip != id) {
         int tsn2 = ++g_tmp;
-        TyKind ret2 = repr_of(c, id).as_ty;
+        TyKind ret2 = repr_share_rule(c) && repr_of(c, id).demand ? TY_STRBUF : repr_of(c, id).as_ty;
         /* The temp lives in g_pre (statement scope), not an inline ({ }):
            the re-entered dispatch hoists its (substituted) receiver into
            g_pre too, which lands before the statement and must still see
@@ -1733,10 +1823,23 @@ int emit_call_object_override_arms(Compiler *c, int id, Buf *b, const NodeTable 
       buf_printf(&pb3, "({ sp_RbVal _t%d = ", tp3);
       { Buf rb3; memset(&rb3, 0, sizeof rb3); emit_boxed(c, pr, &rb3);
         buf_puts(&pb3, rb3.p ? rb3.p : "sp_box_nil()"); free(rb3.p); }
-      buf_printf(&pb3, "; _t%d.tag == SP_TAG_OBJ && _t%d.cls_id == SP_BUILTIN_PROC"
-                       " ? sp_penum_call1((sp_Proc *)_t%d.v.p, ", tp3, tp3, tp3);
-      { Buf ab3; memset(&ab3, 0, sizeof ab3); emit_boxed(c, pv[0], &ab3);
-        buf_puts(&pb3, ab3.p ? ab3.p : "sp_box_nil()");
+      buf_printf(&pb3, "; _t%d.tag == SP_TAG_OBJ && _t%d.cls_id == SP_BUILTIN_PROC ? ", tp3, tp3);
+      { Buf ab3; memset(&ab3, 0, sizeof ab3);
+        emit_boxed(c, pv[0], &ab3);
+        /* A by-value struct's box is held for the Proc it is handed to. The
+           holder is declared in the Proc's arm: a Method and a pattern that
+           is no callable take the arms below as they did. */
+        Buf hb3; memset(&hb3, 0, sizeof hb3);
+        int th3 = proc_arg_box_hold(c, comp_ntype(c, pv[0]), &hb3, 0);
+        if (th3 >= 0) {
+          buf_puts(&pb3, "({ "); buf_puts(&pb3, hb3.p);
+          buf_printf(&pb3, "_t%d = ", th3); buf_puts(&pb3, ab3.p ? ab3.p : "sp_box_nil()");
+          buf_printf(&pb3, "; sp_penum_call1((sp_Proc *)_t%d.v.p, _t%d); }", tp3, th3);
+        } else {
+          buf_printf(&pb3, "sp_penum_call1((sp_Proc *)_t%d.v.p, ", tp3);
+          buf_puts(&pb3, ab3.p ? ab3.p : "sp_box_nil()");
+        }
+        free(hb3.p);
         /* Method#=== calls the method too, as its `[]` does: compared, a
            Method read out of a container answered false (#6179) */
         if (repr_of(c, pr).kind == RK_BOXED) {
@@ -1926,9 +2029,12 @@ int emit_call_object_override_arms(Compiler *c, int id, Buf *b, const NodeTable 
           !comp_writer_in_chain(c, bsci, bsnm, NULL)) {
         const char *bscn = class_ruby_name(c, bsci) ? class_ruby_name(c, bsci) : c->classes[bsci].name;
         buf_printf(b, "({ (void)("); emit_expr(c, bsrecv, b);
-        buf_printf(b, "); sp_raise_cls(\"NoMethodError\", "
-                      "(&(\"\\xff\" \"undefined method '%s' for an instance of %s\")[1])); %s; })",
-                   bsnm, bscn, default_value_from_compiler(c, repr_of(c, id).as_ty));
+        {
+          char head[200]; snprintf(head, sizeof head, "undefined method '%s' for an instance of ", bsnm);
+          buf_puts(b, "); sp_raise_cls(\"NoMethodError\", ");
+          if (!anon_class_text(c, bsci, head, b)) buf_printf(b, "(&(\"\\xff\" \"%s%s\")[1])", head, bscn);
+          buf_printf(b, "); %s; })", default_value_from_compiler(c, repr_of(c, id).as_ty));
+        }
         return 1;
       }
     }
@@ -2096,8 +2202,9 @@ int emit_call_print_arms(Compiler *c, Buf *b, const NodeTable *nt, const char *n
       !comp_ty_value_obj(c, rt)) {
     /* default Object#to_s: #<Name:0xADDR> */
     int dcid = ty_object_class(rt);
-    const char *drn = class_ruby_name(c, dcid) ? class_ruby_name(c, dcid) : c->classes[dcid].name;
-    buf_printf(b, "sp_sprintf(\"#<%s:0x%%016llx>\", (unsigned long long)(uintptr_t)(", drn);
+    char drn[512], darg[96];
+    obj_default_name(c, dcid, drn, sizeof drn, darg, sizeof darg);
+    buf_printf(b, "sp_sprintf(\"#<%s:0x%%016llx>\", %s(unsigned long long)(uintptr_t)(", drn, darg);
     emit_expr(c, recv, b); buf_puts(b, "))");
     return 1;
   }
@@ -2290,6 +2397,60 @@ int emit_call_display_ivar_arms(Compiler *c, int id, Buf *b, const NodeTable *nt
   return 0;
 }
 
+/* The statements that put the names of the ivars of class k's object obj
+   that are assigned into the Array arr (made here when create), in the
+   order the class lists them: its rank order, or its static order. */
+void emit_ivar_list_fill(Compiler *c, int k, const char *obj, const char *arr, int create, Buf *b) {
+  ClassInfo *ivc = &c->classes[k];
+  if (create) buf_printf(b, " %s = sp_PolyArray_new();", arr);
+  /* a ranked class lists them in the order they were first assigned */
+  int ranked = ivar_ranked(c, k);
+  if (ranked) {
+    buf_puts(b, " ");
+    emit_ivar_order_open(c, k, obj, b);
+  }
+  int *ord = ivar_listing_order_new(c, k);
+  /* Data/Struct members are NOT @-instance variables in CRuby (#2849) */
+  for (int jj = ivc->is_struct ? ivc->nmembers : 0; jj < ivc->nivars; jj++) {
+    int ji = ord[jj];
+    char ex[200], tb[300];
+    snprintf(ex, sizeof ex, "%s->iv_%s", obj, iv_c(ivc->ivars[ji] + 1));
+    const char *set = ranked ? NULL : ivar_set_test(c, k, ivc->ivars[ji], ex, tb, sizeof tb);
+    if (ranked) buf_printf(b, "case %d:", ji);
+    if (set) buf_printf(b, " if %s", set);
+    buf_printf(b, " sp_PolyArray_push(%s, sp_box_sym(sp_sym_intern(\"%s\")));", arr, ivc->ivars[ji]);
+    if (ranked) buf_puts(b, " break; ");
+  }
+  free(ord);
+  if (ranked) emit_ivar_order_close(b);
+}
+
+/* A receiver typed as class cid may be an instance of a class below it, which
+   lists its own ivars, in an order of its own: does one below list more of
+   them than cid, or those of cid's in another order (a rank-ordered family
+   lists by rank in every class)? A `K.new` is an instance of K itself. */
+static int ivar_list_mixed(Compiler *c, int recv, int cid) {
+  ClassInfo *ci = &c->classes[cid];
+  if (ci->is_value_type || ci->is_struct || class_is_exc_subclass(c, cid)) return 0;
+  if (recv >= 0 && nt_kind(c->nt, recv) == NK_CallNode && is_new_name(nt_str(c->nt, recv, "name"))) {
+    int r = nt_ref(c->nt, recv, "receiver");
+    if (r >= 0 && nt_kind(c->nt, r) == NK_ConstantReadNode && comp_class_index(c, nt_str(c->nt, r, "name")) == cid &&
+        comp_cmethod_in_chain(c, cid, "new", NULL) < 0) return 0;
+  }
+  int ranked = ivar_ranked(c, cid);
+  int *base = ivar_listing_order_new(c, cid), mixed = 0;
+  for (int d = 0; d < c->nclasses && !mixed; d++) {
+    if (d == cid || !is_descendant(c, d, cid) || !c->classes[d].instantiated) continue;
+    if (c->classes[d].nivars != ci->nivars) { mixed = 1; break; }
+    if (ranked) continue;
+    int *od = ivar_listing_order_new(c, d);
+    for (int i = 0; i < ci->nivars && !mixed; i++) mixed = base[i] != od[i];
+    free(od);
+  }
+  free(base);
+  return mixed;
+}
+
 /* A presence flag is read after allocating the result Array, so its receiver
    must stay live across that allocation. */
 int emit_object_ivar_list(Compiler *c, int recv, int ivcid, Buf *b) {
@@ -2304,20 +2465,123 @@ int emit_object_ivar_list(Compiler *c, int recv, int ivcid, Buf *b) {
     tracked |= kind == 3;
   }
   int tro = any1 ? ++g_tmp : -1;
-  if (any1) { buf_printf(b, "({ sp_%s *_t%d = ", ivc->c_name, tro); emit_expr(c, recv, b); buf_puts(b, ";"); }
+  /* A class below lists in an order of its own: the object's class decides */
+  if (ivar_list_mixed(c, recv, ivcid)) {
+    tro = ++g_tmp;
+    /* the class is read before the Array is allocated; the object only after,
+       so it is rooted only if an arm tests the assignment of an ivar */
+    int reads = 0;
+    for (int d = 0; d < c->nclasses; d++) {
+      if (d != ivcid && (!is_descendant(c, d, ivcid) || !c->classes[d].instantiated)) continue;
+      reads |= ivar_ranked(c, d);
+      for (int j = 0; j < c->classes[d].nivars; j++) reads |= ivar_set_kind(c, d, c->classes[d].ivars[j]) & 1;
+    }
+    buf_printf(b, "({ sp_%s *_t%d = ", ivc->c_name, tro); emit_expr(c, recv, b);
+    buf_printf(b, "; int _t%dc = _t%d->cls_id;", tro, tro);
+    if (reads) buf_printf(b, " SP_GC_ROOT(_t%d);", tro);
+    buf_printf(b, " sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d); switch (_t%dc) {", tia, tia, tro);
+    char an[32]; snprintf(an, sizeof an, "_t%d", tia);
+    for (int d = 0; d < c->nclasses; d++) {
+      if (d != ivcid && (!is_descendant(c, d, ivcid) || !c->classes[d].instantiated)) continue;
+      char ob[64]; snprintf(ob, sizeof ob, "((sp_%s *)_t%d)", c->classes[d].c_name, tro);
+      buf_printf(b, d == ivcid ? " default:" : " case %d:", d);
+      emit_ivar_list_fill(c, d, ob, an, 0, b);
+      buf_puts(b, " break;");
+    }
+    buf_printf(b, " } _t%d; })", tia);
+    return 1;
+  }
+  /* A by-value object's tests read a local copy; self is one only outside
+     initialize, where it is passed by address. */
+  int self_ptr = recv >= 0 && nt_kind(c->nt, recv) == NK_SelfNode && g_self_deref && !strcmp(g_self_deref, "->");
+  if (any1 && ivc->is_value_type && !self_ptr) {
+    buf_printf(b, "({ sp_%s _t%dv = ", ivc->c_name, tro); emit_expr(c, recv, b);
+    buf_printf(b, "; sp_%s *_t%d = &_t%dv;", ivc->c_name, tro, tro);
+    tracked = 0;
+  }
+  else if (any1) { buf_printf(b, "({ sp_%s *_t%d = ", ivc->c_name, tro); emit_expr(c, recv, b); buf_puts(b, ";"); }
   else { buf_printf(b, "({ (void)("); emit_expr(c, recv, b); buf_puts(b, ");"); }
   if (tracked) buf_printf(b, " SP_GC_ROOT(_t%d);", tro);
   buf_printf(b, " sp_PolyArray *_t%d = sp_PolyArray_new(); SP_GC_ROOT(_t%d); ", tia, tia);
+  /* a ranked class lists them in the order they were first assigned */
+  int ranked = ivar_ranked(c, ivcid);
+  if (ranked) {
+    char ob[32]; snprintf(ob, sizeof ob, "_t%d", tro);
+    emit_ivar_order_open(c, ivcid, ob, b);
+  }
+  int *ord = ivar_listing_order_new(c, ivcid);
   /* Data/Struct members are NOT @-instance variables in CRuby (#2849) */
-  for (int ji = ivc->is_struct ? ivc->nmembers : 0; ji < ivc->nivars; ji++) {
+  for (int jj = ivc->is_struct ? ivc->nmembers : 0; jj < ivc->nivars; jj++) {
+    int ji = ord[jj];
     char ex[160], tb[256];
     snprintf(ex, sizeof ex, "_t%d->iv_%s", tro, iv_c(ivc->ivars[ji] + 1));
-    const char *set = any1 ? ivar_set_test(c, ivcid, ivc->ivars[ji], ex, tb, sizeof tb) : NULL;
+    const char *set = any1 && !ranked ? ivar_set_test(c, ivcid, ivc->ivars[ji], ex, tb, sizeof tb) : NULL;
+    if (ranked) buf_printf(b, "case %d: ", ji);
     if (set) buf_printf(b, "if %s ", set);
     buf_printf(b, "sp_PolyArray_push(_t%d, sp_box_sym(sp_sym_intern(\"%s\"))); ", tia, ivc->ivars[ji]);
+    if (ranked) buf_puts(b, "break; ");
   }
+  free(ord);
+  if (ranked) { emit_ivar_order_close(b); buf_puts(b, " "); }
   buf_printf(b, "_t%d; })", tia);
   return 1;
+}
+
+/* remove_instance_variable(:@x) of a layout slot, on a receiver of class
+   cid: the value it held. Where presence is known (ivar_set_kind 1 or 3)
+   an ivar never assigned raises NameError, as CRuby's does, and the
+   removed one reads nil and unassigned after; elsewhere the slot cannot be
+   undefined and keeps its value. An Integer or Float field with a nil byte
+   answers its value with its nil (as node id's form takes it), and a
+   removal sets the byte. */
+static void ivar_remove_oint_result(Compiler *c, int id, TyKind t, int tv, Buf *b) {
+  if (id >= 0 && repr_of(c, id).kind == RK_BOXED) buf_printf(b, "%s(_t%d); })", oint_box(t), tv);
+  else if (id >= 0 && node_is_oint(c, id)) buf_printf(b, "_t%d; })", tv);
+  else buf_printf(b, "%s(_t%d); })", oint_arg(t), tv);
+}
+void emit_object_ivar_remove(Compiler *c, int id, int recv, TyKind rt, int cid, const char *sym, Buf *b) {
+  int val = comp_ty_value_obj(c, rt);
+  int kind = val ? 2 : ivar_set_kind(c, cid, sym);
+  int iv = comp_ivar_index(&c->classes[cid], sym);
+  TyKind t = c->classes[cid].ivar_types[iv];
+  int nb = !val && oint_kind(t) && ivar_has_nilbit(c, cid, iv);
+  if (kind != 1 && kind != 3) {
+    if (nb) {
+      int to = ++g_tmp, tv = ++g_tmp;
+      char objp[40]; snprintf(objp, sizeof objp, "_t%d->", to);
+      char bt[320]; ivar_nilbit_test(c, cid, iv, objp, bt, sizeof bt);
+      buf_printf(b, "({ sp_%s *_t%d = ", c->classes[cid].c_name, to); emit_expr(c, recv, b);
+      buf_printf(b, "; %s _t%d = ((%s){ _t%d->iv_%s, (%s) != 0 }); ", oint_ctype(t), tv, oint_ctype(t), to, iv_c(sym + 1), bt);
+      ivar_remove_oint_result(c, id, t, tv, b);
+      return;
+    }
+    buf_puts(b, "("); emit_expr(c, recv, b);
+    buf_printf(b, ")%siv_%s", val ? "." : "->", iv_c(sym + 1));
+    return;
+  }
+  const char *nilv = nil_value(t) ? nil_value(t) : default_value_from_compiler(c, t);
+  int tr = ++g_tmp, tv = ++g_tmp;
+  char obj[32], ex[160], tb[256];
+  snprintf(obj, sizeof obj, "_t%d", tr);
+  snprintf(ex, sizeof ex, "_t%d->iv_%s", tr, iv_c(sym + 1));
+  buf_printf(b, "({ sp_%s *_t%d = ", c->classes[cid].c_name, tr); emit_expr(c, recv, b); buf_puts(b, "; ");
+  emit_frozen_obj_guard(c, cid, obj, b);
+  buf_printf(b, "if (!%s) sp_raise_cls(\"NameError\", \"instance variable %s not defined\"); ",
+             ivar_set_test(c, cid, sym, ex, tb, sizeof tb), sym);
+  if (nb) {
+    char objp[40]; snprintf(objp, sizeof objp, "_t%d->", tr);
+    char bt[320], bs[320];
+    ivar_nilbit_test(c, cid, iv, objp, bt, sizeof bt);
+    ivar_nilbit_set(c, cid, iv, objp, bs, sizeof bs);
+    buf_printf(b, "%s _t%d = ((%s){ %s, (%s) != 0 }); %s = 0; %s; ", oint_ctype(t), tv, oint_ctype(t), ex, bt, ex, bs);
+  }
+  else {
+    emit_ctype(c, t, b);
+    buf_printf(b, " _t%d = %s; %s = %s; ", tv, ex, ex, nilv);
+  }
+  if (kind == 3) buf_printf(b, "_t%d->_sp_set_%s = FALSE; ", tr, iv_c(sym + 1));
+  if (nb) ivar_remove_oint_result(c, id, t, tv, b);
+  else buf_printf(b, "_t%d; })", tv);
 }
 
 static int emit_data_ivar_set(Compiler *c, int id, int recv, int value, int cid, Buf *b) {
@@ -2357,14 +2621,16 @@ static void emit_reflect_ivar_set(Compiler *c, int id, int recv, int value, int 
   snprintf(val, sizeof val, "_t%d", tv);
   emit_gc_root_var(c, mt, val, b);
   emit_frozen_obj_guard(c, cid, obj, b);
+  char mk[300];
+  const char *mark = ivar_set_mark(c, cid, sym, obj, "->", mk, sizeof mk);
   if (nb) {
     char objp[40]; snprintf(objp, sizeof objp, "%s->", obj);
     /* the helper answers the value and keeps the bit; the field takes it */
     buf_printf(b, "%s->iv_%s = ", obj, iv_c(sym + 1));
     emit_ivar_text_nilbit(c, cid, iv, objp, val, b);
-    buf_printf(b, "; %s->_sp_set_%s = TRUE; ", obj, iv_c(sym + 1));
+    buf_printf(b, "; %s ", mark ? mark : "");
   }
-  else buf_printf(b, "%s->iv_%s = %s; %s->_sp_set_%s = TRUE; ", obj, iv_c(sym + 1), val, obj, iv_c(sym + 1));
+  else buf_printf(b, "%s->iv_%s = %s; %s ", obj, iv_c(sym + 1), val, mark ? mark : "");
   Repr rp = repr_of(c, id);
   /* the call answers the value: with its nil where the consumer takes the
      oint, boxed with it, or unwrapped */

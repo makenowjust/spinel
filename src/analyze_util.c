@@ -660,7 +660,8 @@ const char *sym_static_value(Compiler *c, int node) {
    its handle, through the shared-mutable shim's shadow (#4363), and a
    guard-narrowed box through its poly arm as the others do. */
 int sp_str_mutator(const char *nm, unsigned want) {
-  return bop_name_mutates(nm, want);
+  /* This byte-mutator API excludes state-only names. */
+  return bop_name_mutates(nm, want ? want : BOP_MUT_LOCAL);
 }
 /* A String call whose value is its receiver, whatever it did to it first:
    to_s, to_str, itself and freeze, and the mutators that answer self --
@@ -3172,4 +3173,14 @@ int io_reopen_leaves_builtin(Compiler *c, const char *name) {
   int ks[16], n = io_reopen_defs(c, name, 0, ks, 16);
   for (int i = 0; i < n; i++) if (sp_streq(c->classes[ks[i]].name, "IO")) return 0;
   return n > 0;
+}
+
+int is_builtin_module_const_name(const char *n) {
+  if (!n) return 0;
+  static const char *const names[] = {
+    "Kernel", "Comparable", "Enumerable", "Math", "Marshal", "FileTest", "Errno", "Warning",
+    "ObjectSpace", "Process", "GC", "Signal", NULL
+  };
+  for (int i = 0; names[i]; i++) if (sp_streq(names[i], n)) return 1;
+  return is_builtin_module_name(n);
 }

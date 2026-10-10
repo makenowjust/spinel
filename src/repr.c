@@ -3,12 +3,14 @@
    nothing. */
 
 #include <string.h>
+#include <limits.h>
 #include "repr.h"
 #include "analyze_internal.h"
 #include "codegen_internal.h"
 #include "share.h"
 #include "holder.h"
 #include "call_plan.h"
+#include "builtin_ops.h"
 
 static int repr_sealed_flag;
 
@@ -159,6 +161,14 @@ int repr_call_returns_handle(Compiler *c, int v) {
   /* a Method's call: the method `method(:m)` names */
   int recv = nt_ref(nt, v, "receiver");
   const char *nm = nt_str(nt, v, "name");
+  /* A missing ENV key answers the default handle; a present one clears
+     the return channel before making its own String. */
+  if (recv >= 0 && nt_kind(nt, recv) == NK_ConstantReadNode &&
+      is_env_const(nt_str(nt, recv, "name")) && !comp_const(c, "ENV") &&
+      bop_share_named(BOP_ENV, nm) == BSH_FETCH && nt_ref(nt, v, "block") < 0) {
+    int argc = 0; const int *argv = call_args(nt, v, &argc);
+    if (argc == 2 && repr_of(c, argv[1]).kind == RK_STRBUF) return 1;
+  }
   if (recv >= 0 && nm && comp_ntype(c, recv) == TY_METHOD && is_call_alias(nm)) {
     int mn = method_recv_node(c, recv);
     int mi = mn >= 0 ? method_obj_target_mi(c, mn) : -1;
@@ -201,7 +211,8 @@ int repr_call_returns_handle(Compiler *c, int v) {
 int repr_boxed_reader_handle(Compiler *c, int v) {
   const NodeTable *nt = c->nt;
   if (!repr_share_rule(c) || v < 0 || nt_kind(nt, v) != NK_CallNode ||
-      c->ntype[v] != TY_STRING || nt_ref(nt, v, "block") >= 0 ||
+      (c->ntype[v] != TY_STRING && !(c->ntype[v] == TY_STRBUF && c->strbuf_box[v])) ||
+      nt_ref(nt, v, "block") >= 0 ||
       nt_ref(nt, v, "arguments") >= 0) return 0;
   int recv = nt_ref(nt, v, "receiver");
   if (recv < 0 || repr_of(c, recv).kind != RK_BOXED ||
@@ -213,13 +224,12 @@ int repr_boxed_reader_handle(Compiler *c, int v) {
   return 1;
 }
 
-/* A boxed to_s can answer the String in the box itself,
-   beside user methods answering fresh Strings. Keep that handle; the
-   ordinary call still dispatches every other receiver. A String reopen
-   must run even on the handle, so cannot take this shortcut. */
-/* Exception#to_s also borrows its stored message. Its builtin arm can
-   carry that handle, but an exception override (including one supplied
-   by a module) needs the ordinary dispatch and declines this route. */
+/* A boxed to_s can answer the String in the box itself. The route takes a
+   block-less, argument-less to_s on a boxed receiver, typed as a String or
+   shared buffer, under --share-strings. Every user method the call can
+   dispatch to must return the handle or a new String; a target answering
+   anything else, or one the call cannot resolve, declines. Builtin arms
+   are not among those targets. */
 int repr_boxed_to_s_operand(Compiler *c, int v) {
   const NodeTable *nt = c->nt;
   if (!repr_share_rule(c) || v < 0 || nt_kind(nt, v) != NK_CallNode) return -1;
@@ -229,13 +239,10 @@ int repr_boxed_to_s_operand(Compiler *c, int v) {
       nt_ref(nt, v, "block") >= 0 || repr_of(c, recv).kind != RK_BOXED ||
       (c->ntype[v] != TY_STRING && c->ntype[v] != TY_STRBUF)) return -1;
   int targets[CPT_MAX], n = cplan_targets(c, v, targets, CPT_MAX);
-  int string_ci = comp_class_index(c, "String");
-  if (n <= 0 || (string_ci >= 0 && comp_method_in_chain(c, string_ci, nm, NULL) >= 0)) return -1;
-  if (any_exc_reopen(c)) return -1;
+  if (n < 0) return -1;
   for (int i = 0; i < n; i++) {
     Scope *m = &c->scopes[targets[i]];
-    if (!m->ret_fresh || m->class_id < 0 || comp_class_is_module(c, &c->classes[m->class_id]) ||
-        class_is_exc_subclass(c, m->class_id)) return -1;
+    if (m->ret != TY_STRING || (!m->ret_handle && !m->ret_fresh)) return -1;
   }
   return recv;
 }
@@ -261,6 +268,21 @@ int repr_string_conversion_operand(Compiler *c, int v) {
   return r >= 0 && is_receiver_conversion(nt_str(c->nt, v, "name")) &&
          call_plain_argc(c, v) == 0 && nt_ref(c->nt, v, "block") < 0 &&
          comp_recv_type(c, r) == TY_STRING && cplan_user(c, v)->dispatch == CP_NONE ? r : -1;
+}
+/* ENV copies its stored bytes, but a store answers its value operand.
+   A boxed operand can still hold plain bytes: an observable alias stays
+   refused. A mutable key held across value evaluation that can change it
+   must carry its handle too. */
+int repr_env_store_operand(Compiler *c, int v) {
+  const NodeTable *nt = c->nt;
+  if (!repr_share_rule(c) || v < 0 || nt_kind(nt, v) != NK_CallNode) return -1;
+  int r = nt_ref(nt, v, "receiver"), argc = 0;
+  const int *argv = call_args(nt, v, &argc);
+  return r >= 0 && nt_kind(nt, r) == NK_ConstantReadNode && is_env_const(nt_str(nt, r, "name")) &&
+         !comp_const(c, "ENV") && argc == 2 && bop_share_named(BOP_ENV, nt_str(nt, v, "name")) == BSH_LAST &&
+         (repr_of(c, argv[1]).kind != RK_BOXED || share_value_unobserved(c, argv[1])) &&
+         (!(share_node_flags(c, argv[0]) & SHF_MUT) || repr_of(c, argv[0]).handle ||
+          share_value_fresh(c, argv[0], 0) || !subtree_has_side_effect(c, argv[1])) ? argv[1] : -1;
 }
 /* Where the boxed form of a shared-mutable String comes from, as emit_boxed
    decides it for a node stored as (or holding) the handle. */
@@ -329,14 +351,24 @@ static int repr_strbuf_src(const Compiler *c, int node, TyKind t) {
     /* A boxed receiver route keeps its handle beside fresh user answers. */
     if (repr_boxed_to_s_operand(mc, node) >= 0) return RS_HANDLE;
     if (repr_string_conversion_operand(mc, node) >= 0) return RS_HANDLE;
+    int ops[3];
+    if (strbuf_route_clamp(mc, node, ops)) return RS_HANDLE;
+    if (repr_env_store_operand(mc, node) >= 0) return RS_HANDLE;
     /* A demanded call whose return route carries a handle is already that
        handle, including when operand ordering holds it in a temp. */
     if (c->strbuf_handle_demand[node] && repr_call_returns_handle(mc, node)) return RS_DEMANDED;
-    if (c->strbuf_handle_demand[node] && repr_boxed_reader_handle(mc, node)) return RS_DEMANDED;
+    /* A container store can mark the reader itself as the handle too. */
+    if (repr_boxed_reader_handle(mc, node)) return RS_DEMANDED;
+    /* The implicit-self reader boxes its slot too, not a fresh String. */
+    if (c->share_strings && (c->strbuf_box[node] || c->strbuf_handle_demand[node]) &&
+        strbuf_self_reader_slot(mc, node)) return RS_DEMANDED;
     int r = nt_ref(nt, node, "receiver");
     if (r >= 0 && ty_is_object(comp_ntype(c, r)) &&
         (strbuf_marked_yields_handle(mc, node) || c->strbuf_handle_demand[node]))
       return RS_DEMANDED;
+    /* A boxed return pickup keeps its published handle too. A demanded
+       reader above already emits the handle, including from a held temp. */
+    if (c->strbuf_box[node] && repr_call_returns_handle(mc, node)) return RS_HANDLE;
   }
   /* a String value stored where a handle is demanded: a fresh one */
   return RS_FRESH;
@@ -648,6 +680,184 @@ int g_repr_check = 0;
    open re-materialized a Range from its own temp. */
 void repr_check_ask(const Compiler *c, int node) {
   if (node >= 0 && node < c->nt->count) (void)repr_of(c, node);
+}
+
+/* Like the boxing shadow, this observes emission without changing it. The
+   existing settled return walk records leaves, not a second return walk.
+   Frames distinguish repeated emissions of a node; an enclosing frame
+   drops abandoned trial frames just as pa_end does. */
+typedef struct { int mi, active; unsigned char want, seen; } ChannelLeaf;
+typedef struct { int node, form, ensure, clearing; } ChannelFrame;
+struct ReprChannelCheck {
+  ChannelLeaf *leaf;
+  ChannelFrame *frame;
+  int count, n, cap, clearing;
+  unsigned long checked, conflicts, pickups;
+};
+
+static void channel_grow(struct ReprChannelCheck *q) {
+  if (q->n < q->cap) return;
+  if (q->cap > INT_MAX / 2) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+  q->cap = q->cap ? q->cap * 2 : 16;
+  q->frame = realloc(q->frame, (size_t)q->cap * sizeof *q->frame);
+  if (!q->frame) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+}
+
+static void channel_drop(struct ReprChannelCheck *q, int frame) {
+  q->clearing = q->frame[frame].clearing;
+  while (q->n > frame) {
+    ChannelFrame *d = &q->frame[--q->n];
+    if (!d->ensure) q->leaf[d->node].active = 0;
+  }
+}
+
+void repr_channel_predict(Compiler *c, int node, int mi, int form) {
+  if (!c->share_strings || node < 0) return;
+  struct ReprChannelCheck *q = c->repr_channel_check;
+  if (!q) {
+    q = calloc(1, sizeof *q);
+    if (!q) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+    q->count = c->nt->count;
+    q->leaf = calloc((size_t)q->count, sizeof *q->leaf);
+    if (!q->leaf) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+    c->repr_channel_check = q;
+  }
+  if (node >= q->count) {
+    int count = c->nt->count;
+    q->leaf = realloc(q->leaf, (size_t)count * sizeof *q->leaf);
+    if (!q->leaf) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+    memset(q->leaf + q->count, 0, (size_t)(count - q->count) * sizeof *q->leaf);
+    q->count = count;
+  }
+  q->leaf[node].mi = mi;
+  q->leaf[node].want = (unsigned char)form;
+}
+
+int repr_channel_begin(Compiler *c, int node) {
+  struct ReprChannelCheck *q = c->repr_channel_check;
+  if (!q || node < 0 || node >= q->count) return -1;
+  ChannelLeaf *l = &q->leaf[node];
+  if (!l->want || l->active || l->mi <= 0 || l->mi >= c->nscopes) return -1;
+  Scope *m = &c->scopes[l->mi];
+  if (!m->ret_handle && !m->ret_channel_check) return -1;
+  channel_grow(q);
+  int f = q->n++;
+  q->frame[f] = (ChannelFrame){ node, RCH_NONE, 0, q->clearing };
+  l->active = f + 1;
+  return f;
+}
+
+void repr_channel_clearing(Compiler *c, int delta) {
+  if (c->repr_channel_check) c->repr_channel_check->clearing += delta;
+}
+
+int repr_channel_ensure(Compiler *c, int node) {
+  struct ReprChannelCheck *q = c->repr_channel_check;
+  Scope *m = q ? comp_scope_of(c, node) : NULL;
+  if (!m || (!m->ret_handle && !m->ret_channel_check)) return -1;
+  channel_grow(q);
+  int f = q->n++;
+  q->frame[f] = (ChannelFrame){ node, RCH_NONE, 1, q->clearing };
+  return f;
+}
+
+void repr_channel_note(Compiler *c, int node, int form) {
+  struct ReprChannelCheck *q = c->repr_channel_check;
+  if (!q || node < 0 || node >= q->count) return;
+  /* An ensure can overwrite a saved return's channel even when its own
+     value is dropped. Report the unproved preservation separately: an
+     ensure that returns instead can deliberately supersede that value. */
+  if (form == RCH_PUBLISH || form == RCH_CLEAR)
+    for (int i = 0; i < q->n; i++) if (q->frame[i].ensure) q->frame[i].form = form;
+  int f = q->leaf[node].active - 1;
+  if (f >= 0 && f < q->n) q->frame[f].form = form;
+}
+
+static const char *channel_form(int form) {
+  const char *const names[] = { "unobserved", "publish", "clear", "nil", "handle", "bytes", "boxed" };
+  return form >= RCH_NONE && form <= RCH_BOXED ? names[form] : "?";
+}
+
+void repr_channel_end(Compiler *c, int frame) {
+  struct ReprChannelCheck *q = c->repr_channel_check;
+  if (!q || frame < 0 || frame >= q->n) return;
+  ChannelFrame f = q->frame[frame];
+  if (f.ensure) {
+    if (f.form != RCH_NONE)
+      fprintf(stderr, "repr-check: channel-gap: node %d ensure: emitted %s after saved value; preservation unproved\n",
+              f.node, channel_form(f.form));
+    channel_drop(q, frame);
+    return;
+  }
+  ChannelLeaf *l = &q->leaf[f.node];
+  if (q->clearing) f.form = RCH_CLEAR;
+  /* The early pickup walk can precede the owned-return proof. Its local
+     read still publishes, but the settled ownership fact permits clearing.
+     A call returning a fresh bound argument has the same permission once
+     its parameter-return fact has settled. */
+  int fresh = share_return_owned(c, f.node, l->mi) ||
+              share_node_fresh(c, f.node) || share_call_fresh(c, f.node);
+  int want = fresh ? RCH_CLEAR : l->want;
+  l->seen = 1;
+  q->checked++;
+  /* nil is decided by the returned bytes, before any pickup reads the
+     channel. A handle-valued view/boxed return carries the value itself. */
+  if (want != RCH_NIL && f.form != RCH_HANDLE && f.form != RCH_BOXED && f.form != want &&
+      !(fresh && f.form == RCH_PUBLISH)) {
+    int conflict = want == RCH_CLEAR || f.form != RCH_NONE;
+    const char *cls = conflict ? "channel-conflict" : "channel-unobserved";
+    if (conflict) q->conflicts++;
+    fprintf(stderr, "repr-check: %s: node %d %s method %s: emitted %s, predicted %s\n",
+            cls, f.node, nt_type(c->nt, f.node), c->scopes[l->mi].name,
+            channel_form(f.form), channel_form(want));
+  }
+  channel_drop(q, frame);
+}
+
+void repr_channel_call(Compiler *c, int node, int mi) {
+  if (mi > 0 && mi < c->nscopes && c->scopes[mi].ret_handle)
+    repr_channel_note(c, node, RCH_PUBLISH);
+}
+
+void repr_channel_boxed(Compiler *c, int node, int frame) {
+  repr_channel_note(c, node, RCH_BOXED);
+  repr_channel_end(c, frame);
+}
+
+void repr_channel_pickup(Compiler *c, int node, int nil_guard) {
+  if (!c->share_strings) return;
+  int mis[CPT_MAX], n = cplan_targets(c, node, mis, CPT_MAX);
+  if (c->repr_channel_check) c->repr_channel_check->pickups++;
+  for (int i = 0; i < n; i++) {
+    Scope *m = &c->scopes[mis[i]];
+    /* The earlier pickup proof also admits owned handles and mixed fresh
+       tails. ret_handle is the later forwarding proof, not its negation. */
+    if ((m->ret_handle || m->ret_channel_check) && (!m->ret_nil_pickup || nil_guard)) continue;
+    fprintf(stderr, "repr-check: channel-conflict: node %d pickup method %s: "
+            "ret_handle %d ret_fresh %d ret_nil_pickup %d nil_guard %d\n",
+            node, m->name, m->ret_handle, m->ret_fresh, m->ret_nil_pickup, nil_guard);
+  }
+  if (n <= 0)
+    fprintf(stderr, "repr-check: channel-unobserved: node %d pickup: targets %d\n", node, n);
+}
+
+void repr_channel_report(Compiler *c) {
+  struct ReprChannelCheck *q = c->repr_channel_check;
+  if (!q) return;
+  int unseen = 0;
+  for (int i = 0; i < q->count; i++) {
+    ChannelLeaf *l = &q->leaf[i];
+    if (l->want && !l->seen && l->mi > 0 && c->scopes[l->mi].ret_handle) unseen++;
+  }
+  fprintf(stderr, "repr-check: channel: %lu tails, %lu conflicts, %lu pickups, %d unemitted leaves\n",
+          q->checked, q->conflicts, q->pickups, unseen);
+}
+
+void repr_channel_free(Compiler *c) {
+  struct ReprChannelCheck *q = c->repr_channel_check;
+  if (!q) return;
+  free(q->leaf); free(q->frame); free(q);
+  c->repr_channel_check = NULL;
 }
 
 ReprKind repr_slot_kind(const Compiler *c, const LocalVar *lv) {

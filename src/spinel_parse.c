@@ -339,6 +339,12 @@ static size_t prism_kind_to_pascal(const char *raw, char *out, size_t out_size) 
 
 /* ---- Forward ---- */
 static int flatten(pm_node_t *node);
+/* inline RBS (inline_rbs.c): the facts of a node, written by flatten */
+static void sp_inline_rbs_emit(const pm_node_t *node, int id);
+/* --no-inline-rbs: the driver clears it, and comments are only comments */
+int sp_inline_rbs_enabled = 1;
+/* set when an inline RBS error, already reported, stopped the parse */
+int sp_inline_rbs_failed = 0;
 static int sp_in_builtin(const uint8_t *at);   /* a builtins/ splice (below) */
 
 /* ---- Emit helpers ---- */
@@ -566,6 +572,8 @@ static int g_bi_base = -1;
 static int flatten_node(pm_node_t *node);
 static int flatten(pm_node_t *node) {
   int saved = g_bi_base;
+  /* the node's inline RBS facts, under the id flatten_node gives it next */
+  if (node) sp_inline_rbs_emit(node, node_counter);
   int id = flatten_node(node);
   g_bi_base = saved;
   return id;
@@ -3031,8 +3039,9 @@ static char *sp_rewrite_computed_requires(const char *source, const char *dir) {
    compiled, so the file is loaded eagerly. In the entry file the call becomes
    the require in place; in a required file it answers nil there, and the
    requires go at the end of the file -- after the module body the autoload
-   sits in, which the loaded file usually reopens. A receiver form
-   (`Mod.autoload`) or a computed path is left as it was. */
+   sits in, which the loaded file usually reopens. A path that starts with
+   `#{__dir__}/` is literal enough: it is a require_relative. A receiver
+   form (`Mod.autoload`) or any other computed path is left as it was. */
 static int sp_autoload_is_main = 0;
 /* the autoload's file beside the one naming it (lib/foo.rb autoloading
    "foo/bar" is lib/foo/bar.rb, the gem layout): reached without a load path */
@@ -3088,6 +3097,14 @@ static char *sp_rewrite_autoloads(const char *source, const char *dir) {
             while (*q == ' ' || *q == '\t') q++;
             if (*q == '"' || *q == '\'') {
               char qq = *q++;
+              /* `"#{__dir__}/path"` (the gem layout: lib/rdoc.rb autoloading
+                 "#{__dir__}/rdoc/x"): the one interpolation a path can carry
+                 and still name a file known at compile time. It is the
+                 requiring file's own directory, so the call is
+                 `require_relative "path"`. Any other `#{` is a computed path
+                 and leaves the call as it was. */
+              int dir_rel = 0;
+              if (qq == '"' && strncmp(q, "#{__dir__}/", 11) == 0) { q += 11; dir_rel = 1; }
               const char *fs = q;
               while (*q && *q != qq && *q != '\n' && *q != '#' ) q++;
               if (*q == qq) {
@@ -3096,7 +3113,7 @@ static char *sp_rewrite_autoloads(const char *source, const char *dir) {
                 while (*q == ' ' || *q == '\t') q++;
                 if (!paren || *q == ')') {
                   if (paren) q++;
-                  const char *kw = sp_autoload_beside(dir, fs, flen) ? "require_relative" : "require";
+                  const char *kw = (dir_rel || sp_autoload_beside(dir, fs, flen)) ? "require_relative" : "require";
                   if (sp_autoload_is_main) {
                     o += (size_t)sprintf(out + o, "%s \"%.*s\"", kw, (int)flen, fs);
                   }
@@ -3301,8 +3318,49 @@ static char *sp_rewrite_dead_requires(const char *source) {
   return result;
 }
 
+/* g_require_unread: may the program load a file this compiler did not read?
+   Such a file can define or reopen anything, so a pass that asks what the
+   program gives a class has to take the answer as unknown where this is set.
+   It stays clear only where the text proves there is no such file, read as
+   written (ahead of every rewrite below) in each file handed to
+   resolve_requires:
+     - none of $LOAD_PATH, $:, $-I, $LOADED_FEATURES, $" is written, so a
+       name is looked up where this compiler looks;
+     - nothing named load or autoload is written;
+     - every require and require_relative written was resolved: a file read,
+       one read before, or a feature the runtime provides. One left as a
+       raise or a warning, blanked as unreachable, or past where the scan
+       gave up counts as written and not resolved; one a rewrite made sets
+       the flag itself.
+   Text the class macros write (sp_expand_class_macros) is read once they
+   have, for the words that set the flag: the parts a macro joins need not
+   spell one. The flag is final when the parser returns.
+   The words are counted, not parsed, and no character of the text is passed
+   over: one in a string or in a comment sets the flag, and all that gives up
+   is an optimisation. Declared extern in compiler.h. */
+int g_require_unread = 0;
+static int sp_req_written = 0, sp_req_resolved = 0;
+
+static int sp_req_word_at(const char *p, const char *w, size_t n) {
+  return strncmp(p, w, n) == 0 && !sp_req_ident_char(p[n]);
+}
+
+static void sp_require_note_text(const char *text) {
+  for (const char *p = text; *p; p++) {
+    if (*p == '$') {
+      if (p[1] == ':' || p[1] == '"' || strncmp(p + 1, "-I", 2) == 0 || strncmp(p + 1, "LOAD_PATH", 9) == 0 ||
+          strncmp(p + 1, "LOADED_FEATURES", 15) == 0) g_require_unread = 1;
+      continue;
+    }
+    if ((*p != 'r' && *p != 'l' && *p != 'a') || (p > text && sp_req_ident_char(p[-1]))) continue;
+    if (sp_req_word_at(p, "require", 7) || sp_req_word_at(p, "require_relative", 16)) sp_req_written++;
+    else if (sp_req_word_at(p, "load", 4) || sp_req_word_at(p, "autoload", 8)) g_require_unread = 1;
+  }
+}
+
 static char *resolve_requires(const char *source, const char *source_path,
                               unsigned char **fsl_out, size_t *fsl_n_out) {
+  sp_require_note_text(source);
   /* Get base directory */
   char *path_copy = strdup(source_path);
   char *dir = strdup(path_copy);
@@ -3316,8 +3374,9 @@ static char *resolve_requires(const char *source, const char *source_path,
      a literal path (#5696): each answers a fresh copy of what it reads */
   char *reachable = sp_rewrite_dead_requires(source);
   char *pre_auto = sp_rewrite_computed_requires(reachable, dir);
-  free(reachable);
   char *result = sp_rewrite_autoloads(pre_auto, dir);
+  if (strcmp(reachable, result) != 0) g_require_unread = 1;   /* a require the two made */
+  free(reachable);
   free(pre_auto);
   sp_autoload_is_main = 0;
   /* One pragma flag per line of `result`, kept in lockstep with every text
@@ -3377,6 +3436,7 @@ static char *resolve_requires(const char *source, const char *source_path,
       cfsl = sp_fsl_make(content, 0, &cfsl_n);
       free(canonical);
       req_val = "false";
+      sp_req_resolved++;
     }
 else {
       sp_mark_path_included(canonical);
@@ -3398,6 +3458,7 @@ else {
         char *resolved = resolve_requires(content, full_path, &cfsl, &cfsl_n);
         free(content);
         content = resolved;
+        sp_req_resolved++;
       }
       free(canonical);
     }
@@ -3705,6 +3766,7 @@ static char *sp_prepend_require(char *source, const char *exe_path, const char *
   char *ns = (char *)malloc(sl + hl + 1);
   if (!ns) return source;
   memcpy(ns, head, hl); memcpy(ns + hl, source, sl + 1);
+  sp_require_note_text(head);
   sp_src_lex_drop();
   free(source);
   ns = resolve_plain_requires(ns, exe_path, fsl, fsl_n);
@@ -4033,6 +4095,7 @@ static char *resolve_plain_requires(char *source, const char *exe_path,
       content = strdup("# require skipped (already included)");
       free(canonical);
       req_val = "false";
+      sp_req_resolved++;
     }
 else {
       sp_mark_path_included(canonical);
@@ -4164,6 +4227,7 @@ else {
           sp_feature_mark(lib_name);
           content = strdup("# require provided by Spinel runtime");
           req_val = "false";   /* already there: nothing was loaded */
+          sp_req_resolved++;
         }
 else if (sp_require_tolerated(lib_name)) {
           /* A core capability Spinel provides without a file (Thread,
@@ -4171,6 +4235,7 @@ else if (sp_require_tolerated(lib_name)) {
              no-op, like modern CRuby -- gate or no gate. */
           content = strdup("# require no-op (core feature)");
           req_val = "false";   /* already there: nothing was loaded */
+          sp_req_resolved++;
         }
 else if (g_require_gate) {
           /* Whole-program AOT: an unsatisfiable require can never be provided, so
@@ -4196,6 +4261,7 @@ else {
         char *resolved = resolve_requires(content, lib_path, &cfsl, &cfsl_n);
         free(content);
         content = resolved;
+        sp_req_resolved++;
       }
     }
     /* Stub arms above leave cfsl NULL: their content is a one-line comment. */
@@ -5059,6 +5125,87 @@ else {
    invoking program path (used to locate the stdlib for plain `require`s).
    Returns 0 on success, 1 on read/parse error. This is the library copy
    (the in-process lib API; no standalone CLI main). */
+/* ---- recognising an inline RBS comment (docs/inline-rbs.md) ---- */
+
+/* RDoc's directives are spelled `:name:` and none of them is a valid RBS
+ * annotation, so `#:nodoc:` and its kind are documentation, not types
+ * (RDoc 7.0: rdoc/markup/pre_process.rb, rdoc/parser/ruby.rb). */
+static int ir_rdoc_directive(const char *s, size_t n) {
+    static const char *names[] = {
+        "arg", "args", "attr", "attr_accessor", "attr_reader", "attr_writer",
+        "call-seq", "category", "doc", "enddoc", "include", "main", "method",
+        "nodoc", "notnew", "not_new", "not-new", "section", "singleton-method",
+        "startdoc", "stopdoc", "title", "yield", "yields", NULL
+    };
+    /* s points just past "#:" */
+    size_t i = 0;
+    while (i < n && (s[i] == '-' || s[i] == '_' || (s[i] >= 'a' && s[i] <= 'z'))) i++;
+    if (i == 0 || i >= n || s[i] != ':') return 0;
+    for (int k = 0; names[k]; k++)
+        if (strlen(names[k]) == i && memcmp(names[k], s, i) == 0) return 1;
+    return 0;
+}
+
+/* What kind of line a comment is, for the block grouping below. */
+typedef enum { CL_PROSE, CL_COLON, CL_RBS } ir_cline;
+
+static ir_cline ir_classify(const char *s, size_t n) {
+    if (n >= 2 && s[1] == ':') return ir_rdoc_directive(s + 2, n - 2) ? CL_PROSE : CL_COLON;
+    size_t i = 1;
+    if (i < n && s[i] == ' ') i++;
+    if (n - i >= 4 && memcmp(s + i, "@rbs", 4) == 0 &&
+        (n - i == 4 || !((s[i + 4] >= 'a' && s[i + 4] <= 'z') || (s[i + 4] >= 'A' && s[i + 4] <= 'Z') ||
+                         (s[i + 4] >= '0' && s[i + 4] <= '9') || s[i + 4] == '_')))
+        return CL_RBS;
+    return CL_PROSE;
+}
+
+#ifdef SPINEL_INLINE_RBS
+#include "rbs_map.h"
+#include "inline_rbs.c"
+#else
+/* Built without the rbs C parser (no `make deps`): an annotation cannot be
+   read, and is not applied -- which is said once, at the first one, rather
+   than nothing at all. */
+static int sp_inline_rbs_run(pm_parser_t *parser, pm_node_t *root, const char *source, size_t len) {
+  (void)root; (void)len;
+  if (!sp_inline_rbs_enabled) return 0;
+  int previous_line = 0, previous_col = -1, block_leading = 1;
+  for (const pm_comment_t *c = (const pm_comment_t *)parser->comment_list.head; c; c = (const pm_comment_t *)c->node.next) {
+    const uint8_t *s = c->location.start;
+    size_t n = (size_t)(c->location.end - s);
+    if (c->type != PM_COMMENT_INLINE || sp_in_builtin(s)) continue;
+    const uint8_t *line_start = s;
+    while (line_start > (const uint8_t *)source && line_start[-1] != '\n') line_start--;
+    int leading = 1;
+    for (const uint8_t *p = line_start; p < s; p++)
+      if (*p != ' ' && *p != '\t') { leading = 0; break; }
+    int bl = pm_newline_list_line(&parser->newline_list, s, parser->start_line);
+    int col = (int)(s - line_start);
+    int continued = leading && bl == previous_line + 1 && col == previous_col;
+    if (!continued) block_leading = leading;
+    previous_line = bl;
+    previous_col = col;
+    /* A trailing block is recognized by its first comment only. Leading
+       @rbs lines and trailing #[...] applications have distinct placements. */
+    if (n < 2 || (continued && !block_leading)) continue;
+    ir_cline kind = ir_classify((const char *)s, n);
+    if (kind == CL_COLON || (block_leading && kind == CL_RBS) || (!block_leading && s[1] == '[')) {
+      const char *file = g_source_file;
+      int line = bl;
+      if (sp_line_map_n > 0 && bl >= 1 && bl <= sp_line_map_n && sp_line_orig[bl] > 0) { file = sp_file_table[sp_line_file[bl]]; line = sp_line_orig[bl]; }
+      fprintf(stderr, "spinel: %s:%d: warning: inline RBS comments are not applied: this spinel was "
+                      "built without the rbs parser (run `make deps` and rebuild, or pass --no-inline-rbs)\n", file, line);
+      return 0;
+    }
+  }
+  return 0;
+}
+static void sp_inline_rbs_emit(const pm_node_t *node, int id) { (void)node; (void)id; }
+static void sp_inline_rbs_done(void) {}
+static void sp_inline_rbs_free(void) {}
+#endif
+
 static int sp_parse_emit(const char *source_file, const char *argv0, SpStrBuf *out) {
   char *source = read_file(source_file);
   if (!source) {
@@ -5128,11 +5275,20 @@ static int sp_parse_emit(const char *source_file, const char *argv0, SpStrBuf *o
   source = sp_splice_builtin_extras(source, argv0, &fsl, &fsl_n);
   source = sp_splice_builtin_enumerator(source, argv0, &fsl, &fsl_n);
   sp_src_lex_drop();
+  if (sp_req_written != sp_req_resolved) g_require_unread = 1;
 
   /* class-body macro calls (module_eval'd templates, computed
      attach_function / const_set names) expanded in place; line count kept */
   { char *mx = sp_expand_class_macros(source);
-    if (mx) { free(source); source = mx; } }
+    if (mx) {
+      /* what a macro wrote was in no file's text. A require it wrote is a
+         call in the node table, where the analyzer finds it; a load-path
+         statement is dropped ahead of the table, so g_require_unread reads
+         the text here, past the count (the resolver's own stubs hold the
+         word require) */
+      sp_require_note_text(mx);
+      free(source); source = mx;
+    } }
 
   /* Debug: build the buffer-line -> (file, original line) map from the
      marker-annotated buffer *before* syntax-sugar rewriting (which could
@@ -5242,6 +5398,20 @@ else {
   g_source_file = source_file;
   g_source_file_escaped = escape_str((const uint8_t *)g_source_file, strlen(g_source_file));
 
+  /* Inline RBS: the comment list and the tree are alive together only here. */
+  if (sp_inline_rbs_run(&parser, root, source, source_len) > 0) {
+    sp_inline_rbs_failed = 1;
+    sp_inline_rbs_free();
+    pm_node_destroy(&parser, root);
+    pm_parser_free(&parser);
+    free(source);
+    free(g_fsl_lines); g_fsl_lines = NULL; g_fsl_nlines = 0;
+    free(g_source_file_escaped);
+    g_source_file_escaped = NULL;
+    sp_includes_free();
+    return 2;
+  }
+
   /* Flatten AST to text */
   lines = NULL;
   line_count = 0;
@@ -5271,6 +5441,8 @@ else {
   }
   free(lines);
 
+  sp_inline_rbs_done();
+  sp_inline_rbs_free();
   pm_node_destroy(&parser, root);
   pm_parser_free(&parser);
   free(source);

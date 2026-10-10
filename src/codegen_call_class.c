@@ -11,8 +11,10 @@
 #include "codegen_call_arms.h"
 #include "share.h"
 
+/* `mark` (or NULL) is the slot's assigned mark (ivar_set_mark), set after
+   the store. */
 static void emit_attr_writer_converted(Compiler *c, int arg, TyKind ivt, int tmp,
-                                       const char *name, Buf *b) {
+                                       const char *name, const char *mark, Buf *b) {
   TyKind avk = store_value_kind(c, arg);
   /* A nil-valued argument has no C type for a temporary. Keep its
      effects, store the slot's nil, and answer nil as the writer
@@ -20,7 +22,7 @@ static void emit_attr_writer_converted(Compiler *c, int arg, TyKind ivt, int tmp
   if (avk == TY_NIL || avk == TY_VOID) {
     buf_printf(b, "_t%d->iv_%s = ", tmp, iv_c(name));
     emit_coerce(c, arg, ivt, CO_HOLD, "an attribute writer", b);
-    buf_puts(b, "; 0; })");
+    buf_printf(b, "; %s%s0; })", mark ? mark : "", mark ? " " : "");
     return;
   }
   int tv = ++g_tmp;
@@ -28,7 +30,7 @@ static void emit_attr_writer_converted(Compiler *c, int arg, TyKind ivt, int tmp
   emit_ctype(c, avk, b); buf_printf(b, " %s = ", tn); emit_expr(c, arg, b);
   buf_printf(b, "; _t%d->iv_%s = ", tmp, iv_c(name));
   emit_coerce_text(c, arg, avk, ivt, CO_HOLD, tn, "an attribute writer", b);
-  buf_printf(b, "; %s; })", tn);
+  buf_printf(b, "; %s%s%s; })", mark ? mark : "", mark ? " " : "", tn);
   return;
 }
 
@@ -1349,6 +1351,11 @@ int emit_call_cmethod_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
              before the store, even in value position (#3078) */
           int _atmp = ++g_tmp;
           char _aself[32]; snprintf(_aself, sizeof _aself, "_t%d", _atmp);
+          /* the slot's assigned mark, after each store below */
+          char _amk[300];
+          const char *_am = _aiv >= 0 ? ivar_set_mark(c, _adefc < 0 ? _arc : _adefc, _aivn, _aself, "->",
+                                                      _amk, sizeof _amk) : NULL;
+          char _amsp[304]; snprintf(_amsp, sizeof _amsp, "%s%s", _am ? _am : "", _am ? " " : "");
           buf_printf(b, "({ sp_%s *_t%d = ", c->classes[_arc].c_name, _atmp); emit_expr(c, recv, b); buf_puts(b, "; ");
           emit_frozen_obj_guard(c, _arc, _aself, b);
           if (argc >= 1 && emit_attr_writer_nilbit(c, id, _adefc < 0 ? _arc : _adefc, _aiv, _atmp, _abase, argv[0], b))
@@ -1365,8 +1372,8 @@ int emit_call_cmethod_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
             buf_printf(b, "; SP_GC_ROOT_RBVAL(%s); _t%d->iv_%s = ", _tvn, _atmp, iv_c(_abase));
             emit_unbox_text(c, _aivt, _tvn, b);
             TyKind _nt = repr_of(c, id).as_ty;
-            if (_nt == TY_POLY || _nt == TY_UNKNOWN) buf_printf(b, "; %s; })", _tvn);
-            else buf_printf(b, "; _t%d->iv_%s; })", _atmp, iv_c(_abase));
+            if (_nt == TY_POLY || _nt == TY_UNKNOWN) buf_printf(b, "; %s%s; })", _amsp, _tvn);
+            else buf_printf(b, "; %s_t%d->iv_%s; })", _amsp, _atmp, iv_c(_abase));
             return 1;
           }
           /* a String slot that is a handle (TY_STRBUF) takes the handle the
@@ -1390,10 +1397,10 @@ int emit_call_cmethod_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
               unsupported_feature(c, id, _amsg);
             buf_printf(b, "_t%d->iv_%s = ", _atmp, iv_c(_abase));
             emit_strbuf_ivar_store(c, _aci->ivar_str_shared[_aiv], argv[0], b);
-            if (_avt == TY_STRBUF) buf_printf(b, "; _t%d->iv_%s; })", _atmp, iv_c(_abase));
+            if (_avt == TY_STRBUF) buf_printf(b, "; %s_t%d->iv_%s; })", _amsp, _atmp, iv_c(_abase));
             else {
               char _asr[300]; snprintf(_asr, sizeof _asr, "_t%d->iv_%s", _atmp, iv_c(_abase));
-              buf_puts(b, "; ");
+              buf_printf(b, "; %s", _amsp);
               emit_strbuf_node_read(c, id, _asr, b);
               buf_puts(b, "; })");
             }
@@ -1405,7 +1412,7 @@ int emit_call_cmethod_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
           if (argc >= 1 && _aivt != TY_POLY && _aivt != TY_UNKNOWN &&
               !repr_of(c, argv[0]).untyped &&
               !store_fits(c, store_value_kind(c, argv[0]), _aivt)) {
-            emit_attr_writer_converted(c, argv[0], _aivt, _atmp, _abase, b);
+            emit_attr_writer_converted(c, argv[0], _aivt, _atmp, _abase, _am, b);
             return 1;
           }
           buf_printf(b, "_t%d->iv_%s = ", _atmp, iv_c(_abase));
@@ -1417,7 +1424,9 @@ int emit_call_cmethod_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
             else emit_one_arg(c, argv[0], 0, b);
           }
           else buf_puts(b, "0");
-          buf_puts(b, "; })");
+          /* the value is the slot's after its mark, as the store's is */
+          if (_am) buf_printf(b, "; %s _t%d->iv_%s; })", _am, _atmp, iv_c(_abase));
+          else buf_puts(b, "; })");
           return 1;
         }
         /* An explicit `def x=(v)` reached as `obj.x = v` in value position:
@@ -1606,7 +1615,7 @@ int emit_call_cmethod_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
               emit_args_filled(c, mi, nt_ref(nt, id, "arguments"), leadb, &cb); }
             emit_cmethod_block_arg(c, id, &c->scopes[mi], blk_tmp, &cb);
             buf_puts(&cb, ")");
-            emit_boxed_ret_call(c, &c->scopes[mi], cb.p ? cb.p : "0", b);
+            emit_poly_user_box(c, id, &c->scopes[mi], cb.p ? cb.p : "0", b);
             free(cb.p);
           }
           else {
@@ -1627,6 +1636,11 @@ int emit_call_cmethod_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, con
   }
 
   /* Class.cmethod(args) / M::Sub.cmethod(args) -> sp_<Class>_s_<method>(args) */
+  return emit_call_const_cmethod_arms(c, id, b, nt, name, recv);
+}
+
+/* The user target on a constant, also reached before builtin dispatch. */
+int emit_call_const_cmethod_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, const char *name, int recv) {
   if (recv >= 0) {
     const char *rty = nt_type(nt, recv);
     if (rty && (sp_streq(rty, "ConstantReadNode") || sp_streq(rty, "ConstantPathNode"))) {
@@ -2545,8 +2559,8 @@ int emit_call_class_value_arms(Compiler *c, int id, Buf *b, const NodeTable *nt,
         }
       }
       buf_printf(b, "({ sp_Class _cl%d = ", _clt); emit_expr(c, recv, b);
-      buf_printf(b, "; sp_class_%s(_cl%d); })",
-                 sp_streq(name, "name") ? "name_or_nil" : "to_s", _clt);
+      buf_printf(b, "; %s(_cl%d); })",
+                 is_class_name_name(name) ? "sp_class_name_or_nil" : comp_class_display_fn(c), _clt);
       return 1;
     }
     if (sp_streq(name, "nil?")) {
@@ -2626,9 +2640,9 @@ int emit_call_class_value_arms(Compiler *c, int id, Buf *b, const NodeTable *nt,
          sentinel there (#2654). A Module has no #superclass -> NoMethodError. */
       buf_printf(b, "({ sp_Class _cl%d = ", _clt); emit_expr(c, recv, b);
       buf_printf(b, "; sp_class_is_module_val(_cl%d) ? "
-                    "(sp_raise_cls(\"NoMethodError\", sp_sprintf(\"undefined method 'superclass' for module %%s\", sp_class_to_s(_cl%d))), (sp_Class){0}) : "
+                    "(sp_raise_cls(\"NoMethodError\", sp_sprintf(\"undefined method 'superclass' for module %%s\", %s(_cl%d))), (sp_Class){0}) : "
                     "(_cl%d.cls_id>=0?sp_class_superclass(_cl%d):sp_builtin_superclass(_cl%d)); })",
-                 _clt, _clt, _clt, _clt, _clt);
+                 _clt, comp_class_display_fn(c), _clt, _clt, _clt, _clt);
       return 1;
     }
     if (sp_streq(name, "ancestors") && argc == 0) {
@@ -3110,7 +3124,7 @@ int emit_call_class_value_arms(Compiler *c, int id, Buf *b, const NodeTable *nt,
             buf_puts(&cb9, ")");
             if (apre9.p && apre9.p[0]) { buf_puts(b, "{ "); buf_puts(b, apre9.p); }
             buf_printf(b, "_t%d = ", tr9);
-            if (slot9 == TY_POLY && kr != TY_POLY) emit_boxed_text(c, kr, cb9.p ? cb9.p : "", b);
+            if (slot9 == TY_POLY && kr != TY_POLY) emit_poly_user_box(c, id, &c->scopes[kmi], cb9.p ? cb9.p : "", b);
             else if (slot9 != TY_POLY && kr == TY_POLY) emit_unbox_text(c, slot9, cb9.p ? cb9.p : "", b);
             else buf_puts(b, cb9.p ? cb9.p : "");
             if (apre9.p && apre9.p[0]) buf_puts(b, "; }");
@@ -3289,7 +3303,7 @@ int emit_call_class_method_arms(Compiler *c, int id, Buf *b, const NodeTable *nt
         TyKind kr = (TyKind)ms->ret;
         if (slot_t == TY_POLY && kr != TY_POLY && kr != TY_UNKNOWN && kr != TY_VOID &&
             !method_is_void(ms))
-          emit_boxed_text(c, kr, cb.p ? cb.p : "", b);
+          emit_poly_user_box(c, id, ms, cb.p ? cb.p : "", b);
         /* ...and the other way: a user `self.new` answers a boxed object
            where the site is typed as the class it builds (#5409) */
         else if (kr == TY_POLY && slot_t != TY_POLY && slot_t != TY_UNKNOWN &&
@@ -3308,6 +3322,11 @@ int emit_call_class_method_arms(Compiler *c, int id, Buf *b, const NodeTable *nt
   /* bare call to a class method of the enclosing module/class body */
   if (recv < 0 && g_class_body_id >= 0) {
     int smi = comp_cmethod_in_chain(c, g_class_body_id, name, NULL);
+    if (smi < 0 && argc == 0 && comp_class_anonymous(c, g_class_body_id) && is_name_reader(name)) {
+      buf_printf(b, "%s((sp_Class){%d})",
+                 is_class_name_name(name) ? "sp_class_name_or_nil" : comp_class_display_fn(c), g_class_body_id);
+      return 1;
+    }
     if (smi >= 0) {
       Scope *ms = &c->scopes[smi];
       if (g_plan_check) ucall_observe(c, id, smi, g_class_body_id, 0);
@@ -3387,9 +3406,9 @@ int emit_call_class_method_arms(Compiler *c, int id, Buf *b, const NodeTable *nt
       buf_printf(b, "({ sp_Class _cl%d = ", _clt); emit_expr(c, recv, b);
       /* inspect carries a keyword-init Struct class's suffix; to_s stays the
          bare name (#3947), and name is nil for an anonymous class (#4031) */
-      buf_printf(b, "; sp_class_%s(_cl%d); })",
-                 sp_streq(name, "inspect") ? "inspect_name"
-                 : sp_streq(name, "name")  ? "name_or_nil" : "to_s", _clt);
+      buf_printf(b, "; %s(_cl%d); })",
+                 is_inspect_name(name) ? "sp_class_inspect_name"
+                 : is_class_name_name(name) ? "sp_class_name_or_nil" : comp_class_display_fn(c), _clt);
     }
     else emit_expr(c, recv, b);
     return 1;
@@ -3462,7 +3481,7 @@ int emit_call_class_method_arms(Compiler *c, int id, Buf *b, const NodeTable *nt
           const char *dc = dcb.p ? dcb.p : "";
           if (want == TY_POLY && cret != TY_POLY && cret != TY_UNKNOWN &&
               cret != TY_VOID && cret != TY_NIL)
-            emit_boxed_text(c, cret, dc, b);
+            emit_poly_user_box(c, id, &c->scopes[defmi], dc, b);
           else if (cret == TY_POLY && want != TY_POLY && want != TY_UNKNOWN &&
                    is_scalar_ret(want) && want != TY_VOID && want != TY_NIL)
             emit_unbox_text(c, want, dc, b);
@@ -3513,7 +3532,7 @@ int emit_call_class_method_arms(Compiler *c, int id, Buf *b, const NodeTable *nt
               buf_puts(&ab, ")");
               buf_printf(b, "_t%d = ", rtmp);
               if (unified == TY_POLY && kr != TY_POLY)
-                emit_boxed_text(c, kr, ab.p ? ab.p : "0", b);
+                emit_poly_user_box(c, id, &c->scopes[kmi], ab.p ? ab.p : "0", b);
               else buf_puts(b, ab.p ? ab.p : "0");
               free(ab.p);
               buf_puts(b, "; break;");
@@ -3538,7 +3557,7 @@ int emit_call_class_method_arms(Compiler *c, int id, Buf *b, const NodeTable *nt
               buf_puts(&db, ")");
               buf_printf(b, "_t%d = ", rtmp);
               if (unified == TY_POLY && dr != TY_POLY)
-                emit_boxed_text(c, dr, db.p ? db.p : "0", b);
+                emit_poly_user_box(c, id, &c->scopes[defmi], db.p ? db.p : "0", b);
               else buf_puts(b, db.p ? db.p : "0");
               free(db.p);
               buf_printf(b, "; break;");
@@ -3568,6 +3587,10 @@ int emit_call_class_method_arms(Compiler *c, int id, Buf *b, const NodeTable *nt
       nt_str(nt, recv, "name") && comp_class_index(c, nt_str(nt, recv, "name")) >= 0 &&
       comp_cmethod_in_chain(c, comp_class_index(c, nt_str(nt, recv, "name")), name, NULL) < 0) {
     { int qci = comp_class_index(c, nt_str(nt, recv, "name"));
+      if (comp_class_anonymous(c, qci)) {
+        buf_printf(b, "%s((sp_Class){%d})", is_class_name_name(name) ? "sp_class_name_or_nil" : comp_class_display_fn(c), qci);
+        return 1;
+      }
       const char *qn8 = qci >= 0 ? class_ruby_name(c, qci) : NULL;
       /* A keyword-init Struct class INSPECTS as `K(keyword_init: true)`; its
          name and to_s stay the bare name, and a positional Struct or a Data
@@ -3590,7 +3613,10 @@ int emit_call_class_method_arms(Compiler *c, int id, Buf *b, const NodeTable *nt
     if (encl && encl->is_cmethod && encl->class_id >= 0 &&
         comp_cmethod_in_chain(c, encl->class_id, name, NULL) < 0) {
       if (cmethod_takes_self_cls(c, (int)(encl - c->scopes)))
-        buf_printf(b, "sp_class_to_s(%s)", encl->yields && g_self ? g_self : "_sp_cls");
+        buf_printf(b, "%s(%s)", c->has_anonymous_classes && is_class_name_name(name) ? "sp_class_name_or_nil" : comp_class_display_fn(c),
+                   encl->yields && g_self ? g_self : "_sp_cls");
+      else if (comp_class_anonymous(c, encl->class_id))
+        buf_printf(b, "%s((sp_Class){%d})", is_class_name_name(name) ? "sp_class_name_or_nil" : comp_class_display_fn(c), encl->class_id);
       else {
         /* the Ruby-visible name: the enclosing path, with any collision
            qualification undone (`Brainfuck__Array` is `Brainfuck::Array`) */
@@ -3614,11 +3640,12 @@ int emit_call_reopen_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, cons
           pl->owner_ci == comp_class_index(c, "Random")) {
         int mi = pl->mi, ci = pl->owner_ci;
         if (g_plan_check) ucall_observe(c, id, mi, ci, 0);
+        size_t at = b->len;
         emit_method_cname(c, &c->scopes[mi], b);
         buf_puts(b, "(");
-        emit_reopen_recv_args(c, id, mi, recv, 0, NULL, b);
+        int open = emit_reopen_recv_args(c, id, mi, recv, 0, NULL, at, b);
         emit_trailing_blk_arg(c, &c->scopes[mi], id, -1, b);
-        buf_puts(b, ")");
+        buf_puts(b, open ? "); })" : ")");
         return 1;
       }
     }
@@ -3644,11 +3671,12 @@ int emit_call_reopen_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, cons
         if (oc_mi >= 0) {
           if ((rt == TY_STRING || rt == TY_STRBUF) && emit_reopen_block_call(c, id, recv, oc_mi, NULL, b)) return 1;
           if (g_plan_check) ucall_observe(c, id, oc_mi, oc_ci, 0);
+          size_t at = b->len;
           buf_printf(b, "sp_%s_%s(", mc_reopen_cls(c, oc_ci, name), mc(name));
-          emit_reopen_recv_args(c, id, oc_mi, recv, 0, NULL, b);
+          int open = emit_reopen_recv_args(c, id, oc_mi, recv, 0, NULL, at, b);
           /* a method taking `&block` takes the call's block, or NULL (#7200) */
           emit_callee_block_arg(c, id, &c->scopes[oc_mi], b);
-          buf_puts(b, ")");
+          buf_puts(b, open ? "); })" : ")");
           return 1;
         }
       }
@@ -3704,10 +3732,11 @@ int emit_call_reopen_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, cons
       if (hc_mi >= 0 && emit_reopen_block_call(c, id, recv, hc_mi, NULL, b)) return 1;
       if (hc_mi >= 0) {
         if (g_plan_check) ucall_observe(c, id, hc_mi, hc_ci, 0);
+        size_t at = b->len;
         buf_printf(b, "sp_Hash_%s(", mc(c->scopes[hc_mi].name));
-        emit_reopen_recv_args(c, id, hc_mi, recv, 1, NULL, b);
+        int open = emit_reopen_recv_args(c, id, hc_mi, recv, 1, NULL, at, b);
         emit_trailing_blk_arg(c, &c->scopes[hc_mi], id, -1, b);
-        buf_puts(b, ")");
+        buf_puts(b, open ? "); })" : ")");
         return 1;
       }
     }
@@ -3733,10 +3762,10 @@ int emit_call_reopen_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, cons
       if (nm_mi >= 0 && emit_reopen_block_call(c, id, recv, nm_mi, NULL, b)) return 1;
       if (nm_mi >= 0) {
         if (g_plan_check) ucall_observe(c, id, nm_mi, nm_ci, 0);
+        size_t at = b->len;
         buf_printf(b, "sp_Numeric_%s(", mc(c->scopes[nm_mi].name));
-        emit_boxed(c, recv, b);
-        emit_args_filled(c, nm_mi, nt_ref(nt, id, "arguments"), ", ", b);
-        buf_puts(b, ")");
+        int open = emit_reopen_recv_in_order(c, id, nm_mi, recv, 1, NULL, at, b);
+        buf_puts(b, open ? "); })" : ")");
         return 1;
       }
     }
@@ -3750,10 +3779,11 @@ int emit_call_reopen_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, cons
                                (rt == TY_STR_ARRAY) ? "sp_box_str_array" :
                                (rt == TY_FLOAT_ARRAY) ? "sp_box_float_array" : "sp_box_poly_array";
           if (emit_reopen_block_call(c, id, recv, oc_mi2, box_fn, b)) return 1;
+          size_t at = b->len;
           buf_printf(b, "sp_Array_%s(", mc(c->scopes[oc_mi2].name));
-          emit_reopen_recv_args(c, id, oc_mi2, recv, 1, box_fn, b);
+          int open = emit_reopen_recv_args(c, id, oc_mi2, recv, 1, box_fn, at, b);
           emit_trailing_blk_arg(c, &c->scopes[oc_mi2], id, -1, b);
-          buf_puts(b, ")");
+          buf_puts(b, open ? "); })" : ")");
           return 1;
         }
       }
@@ -3775,11 +3805,11 @@ int emit_call_reopen_arms(Compiler *c, int id, Buf *b, const NodeTable *nt, cons
                       want3 != TY_UNKNOWN && want3 != TY_NIL;
           if (g_plan_check) ucall_observe(c, id, oc_mi3, oc_ci3, 0);
           if (void3) buf_puts(b, "(");
+          size_t at = b->len;
           buf_printf(b, "sp_Object_%s(", mc(c->scopes[oc_mi3].name));
-          emit_boxed(c, recv, b);
-          emit_args_filled(c, oc_mi3, nt_ref(nt, id, "arguments"), ", ", b);
+          int open = emit_reopen_recv_args(c, id, oc_mi3, recv, 1, NULL, at, b);
           emit_trailing_blk_arg(c, &c->scopes[oc_mi3], id, -1, b);
-          buf_puts(b, ")");
+          buf_puts(b, open ? "); })" : ")");
           if (void3) buf_printf(b, ", %s)", want3 == TY_POLY ? "sp_box_nil()" : default_value_from_compiler(c, want3));
           return 1;
         }
