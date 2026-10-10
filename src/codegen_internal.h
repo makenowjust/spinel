@@ -2181,6 +2181,7 @@ int class_nilbyte_count(Compiler *c, int cid);
 void ivar_nilbit_test(Compiler *c, int cid, int iv, const char *obj, char *out, size_t cap);
 void ivar_nilbit_set(Compiler *c, int cid, int iv, const char *obj, char *out, size_t cap);
 void ivar_nilbit_clear(Compiler *c, int cid, int iv, const char *obj, char *out, size_t cap);
+void ivar_nilbit_assign(Compiler *c, int cid, int iv, const char *obj, const char *nil, char *out, size_t cap);
 /* the ivar slot a read / write node names: 1 the object's field (cid, iv),
    2 the class-level or top-level static civ_C_x, 0 none; whether a read's
    slot is an oint (a field with a nil bit, an oint static) */

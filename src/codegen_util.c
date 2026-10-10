@@ -5719,6 +5719,13 @@ void ivar_nilbit_clear(Compiler *c, int cid, int iv, const char *obj, char *out,
   if (k < 0) { snprintf(out, cap, "(void)0"); return; }
   snprintf(out, cap, "%siv__nilb[%d] = 0", obj, k);
 }
+/* The nil byte takes the flag `nil` (0 or 1, as an oint's .nil is): one byte
+   store, with no branch between setting and clearing it */
+void ivar_nilbit_assign(Compiler *c, int cid, int iv, const char *obj, const char *nil, char *out, size_t cap) {
+  int k = ivar_nilbit_index(c, cid, iv);
+  if (k < 0) { snprintf(out, cap, "(void)0"); return; }
+  snprintf(out, cap, "%siv__nilb[%d] = %s", obj, k, nil);
+}
 
 /* The ivar an InstanceVariableReadNode / write names, as the read emitter
    resolves it (emit_ivar_cvar_gvar_expr): the object's field of class
@@ -6298,7 +6305,10 @@ void emit_ivar_value_nilbit(Compiler *c, int cid, int iv, const char *obj, int v
     }
     else if (r.as_ty == TY_UNKNOWN) { buf_printf(b, "%s(", oint_unbox(t)); emit_expr(c, v, b); buf_puts(b, ")"); }
     else emit_oint_expr(c, v, t, b);
-    buf_printf(b, "; if (_t%d.nil) %s; else %s; _t%d.v; })", to, bs, bc, to);
+    char nf[32], ba[200];
+    snprintf(nf, sizeof nf, "_t%d.nil", to);
+    ivar_nilbit_assign(c, cid, iv, obj, nf, ba, sizeof ba);
+    buf_printf(b, "; %s; _t%d.v; })", ba, to);
     return;
   }
   buf_printf(b, "({ %s _t%d = ", c_type_name(t), to);
@@ -6308,11 +6318,11 @@ void emit_ivar_value_nilbit(Compiler *c, int cid, int iv, const char *obj, int v
 /* the same for a value already rendered as an sp_oint / sp_ofloat text */
 void emit_ivar_text_nilbit(Compiler *c, int cid, int iv, const char *obj, const char *otext, Buf *b) {
   TyKind t = c->classes[cid].ivar_types[iv];
-  char bs[160], bc[160];
-  ivar_nilbit_set(c, cid, iv, obj, bs, sizeof bs);
-  ivar_nilbit_clear(c, cid, iv, obj, bc, sizeof bc);
   int to = ++g_tmp;
-  buf_printf(b, "({ %s _t%d = %s; if (_t%d.nil) %s; else %s; _t%d.v; })", oint_ctype(t), to, otext, to, bs, bc, to);
+  char nf[32], ba[200];
+  snprintf(nf, sizeof nf, "_t%d.nil", to);
+  ivar_nilbit_assign(c, cid, iv, obj, nf, ba, sizeof ba);
+  buf_printf(b, "({ %s _t%d = %s; %s; _t%d.v; })", oint_ctype(t), to, otext, ba, to);
 }
 
 /* The right-hand side of `@x = nil` for an Integer or Float ivar named by
