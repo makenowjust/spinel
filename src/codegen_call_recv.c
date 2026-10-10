@@ -9060,9 +9060,9 @@ static int emit_scalar_recv_arms(Compiler *c, int id, Buf *b, const NodeTable *n
         if (!g_noguard) buf_printf(b, "if (!_t%d) sp_raise_nomethod(sp_nomethod_msg(\"%s\", sp_box_nil())); ", g_tmpid, name);
       }
       else {
-        buf_printf(b, "({ sp_int _t%d = sp_oint_val(", g_tmpid);
-        emit_oint_expr(c, recv, TY_INT, b);
-        buf_printf(b, ", \"%s\"); ", name);
+        buf_printf(b, "({ sp_int _t%d = ", g_tmpid);
+        emit_oint_unwrap_ck(c, recv, TY_INT, name, b);
+        buf_puts(b, "; ");
       }
       /* a nil arm that left the test to this guard (emit_nil_target_own)
          learns it was written */

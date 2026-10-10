@@ -2265,6 +2265,7 @@ int node_may_be_nil(Compiler *c, int node);
 int call_names_only_void_methods(Compiler *c, int node);   /* codegen_stmt.c */
 /* node as a plain scalar through its oint form: `sp_oint_val(<oint>, op)`
    when the node may be nil (cmp_operand_may_be_nil), else emit_expr */
+void emit_oint_unwrap_ck(Compiler *c, int node, TyKind t, const char *op, Buf *b);
 void emit_scalar_operand_op(Compiler *c, int node, const char *op, Buf *b);
 /* Ruby truthiness of an Integer / Float node as a C condition: `!o.nil`
    for one with an oint form, else always true (the node evaluated) */

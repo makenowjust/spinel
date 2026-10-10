@@ -6543,19 +6543,25 @@ int g_ck_node = -1;
 const char *g_ck_op = NULL;
 int g_ck_done = 0;
 
+/* The oint of `node` unwrapped at once: an operator's receiver (`op`,
+   sp_oint_val's NoMethodError) or a strict argument (op NULL, sp_oint_arg's
+   TypeError). An element read takes the offer and renders the checked plain
+   read; anything else is the unwrap around its oint. */
+void emit_oint_unwrap_ck(Compiler *c, int node, TyKind t, const char *op, Buf *b) {
+  Buf side; memset(&side, 0, sizeof side);
+  int sv_n = g_ck_node, sv_d = g_ck_done; const char *sv_o = g_ck_op;
+  g_ck_node = node; g_ck_op = op; g_ck_done = 0;
+  emit_oint_expr(c, node, t, &side);
+  int done = g_ck_done;
+  g_ck_node = sv_n; g_ck_op = sv_o; g_ck_done = sv_d;
+  if (done) buf_puts(b, side.p ? side.p : "0");
+  else if (op) buf_printf(b, "%s(%s, \"%s\")", oint_val(t), side.p ? side.p : "", op);
+  else buf_printf(b, "%s(%s)", oint_arg(t), side.p ? side.p : "");
+  free(side.p);
+}
+
 void emit_scalar_operand_op(Compiler *c, int node, const char *op, Buf *b) {
   TyKind t = comp_ntype(c, node);
-  if (oint_kind(t) && cmp_operand_may_be_nil(c, node)) {
-    Buf side; memset(&side, 0, sizeof side);
-    int sv_n = g_ck_node, sv_d = g_ck_done; const char *sv_o = g_ck_op;
-    g_ck_node = node; g_ck_op = op; g_ck_done = 0;
-    emit_oint_expr(c, node, t, &side);
-    int done = g_ck_done;
-    g_ck_node = sv_n; g_ck_op = sv_o; g_ck_done = sv_d;
-    if (done) buf_puts(b, side.p ? side.p : "0");
-    else buf_printf(b, "%s(%s, \"%s\")", oint_val(t), side.p ? side.p : "", op);
-    free(side.p);
-    return;
-  }
+  if (oint_kind(t) && cmp_operand_may_be_nil(c, node)) { emit_oint_unwrap_ck(c, node, t, op, b); return; }
   emit_scalar_operand(c, node, t == TY_FLOAT ? "0.0" : "0", b);
 }
