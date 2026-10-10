@@ -3189,8 +3189,7 @@ int emit_scalar_op_assign(Compiler *c, const char *lval, TyKind t, const char *o
      word as a number */
   if (oint_kind(vt) && nullable_int_value(c, v)) {
     if (t == TY_FLOAT && vt == TY_INT) buf_puts(&rb, "(sp_float)");
-    buf_printf(&rb, "%s(", vt == TY_FLOAT ? "sp_ofloat_opnd" : "sp_oint_opnd");
-    emit_oint_expr(c, v, vt, &rb); buf_puts(&rb, ")");
+    emit_oint_unwrap_ck(c, v, vt, g_ck_opnd, &rb);
   }
   else if (fop && vt == TY_FLOAT && emit_nilfree_operand(c, v, op, 0, NULL, &rb)) { }
   else if (t == TY_INT && fn && (is_div_or_mod(op))) emit_int_divisor(c, v, &rb);

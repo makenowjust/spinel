@@ -6541,11 +6541,15 @@ void emit_oint_truthy(Compiler *c, int node, TyKind t, Buf *b) {
    g_ck_done when it took the offer. */
 int g_ck_node = -1;
 const char *g_ck_op = NULL;
+/* g_ck_op naming an arithmetic operator's right operand: sp_oint_opnd's
+   coercion TypeError (sp_*Array_get_opnd) */
+const char g_ck_opnd[] = "(operand)";
 int g_ck_done = 0;
 
 /* The oint of `node` unwrapped at once: an operator's receiver (`op`,
-   sp_oint_val's NoMethodError) or a strict argument (op NULL, sp_oint_arg's
-   TypeError). An element read takes the offer and renders the checked plain
+   sp_oint_val's NoMethodError), a strict argument (op NULL, sp_oint_arg's
+   TypeError) or an operator's right operand (g_ck_opnd, sp_oint_opnd's
+   "nil can't be coerced"). An element read takes the offer and renders the checked plain
    read; anything else is the unwrap around its oint. */
 void emit_oint_unwrap_ck(Compiler *c, int node, TyKind t, const char *op, Buf *b) {
   Buf side; memset(&side, 0, sizeof side);
@@ -6555,6 +6559,7 @@ void emit_oint_unwrap_ck(Compiler *c, int node, TyKind t, const char *op, Buf *b
   int done = g_ck_done;
   g_ck_node = sv_n; g_ck_op = sv_o; g_ck_done = sv_d;
   if (done) buf_puts(b, side.p ? side.p : "0");
+  else if (op == g_ck_opnd) buf_printf(b, "%s(%s)", t == TY_FLOAT ? "sp_ofloat_opnd" : "sp_oint_opnd", side.p ? side.p : "");
   else if (op) buf_printf(b, "%s(%s, \"%s\")", oint_val(t), side.p ? side.p : "", op);
   else buf_printf(b, "%s(%s)", oint_arg(t), side.p ? side.p : "");
   free(side.p);

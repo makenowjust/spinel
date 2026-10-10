@@ -14371,7 +14371,7 @@ static int emit_array_arith_call(Compiler *c, int id, Buf *b) {
       emit_scalar_operand_op(c, recv, name, b); buf_puts(b, ", ");
       if (isdivmod) emit_int_divisor(c, argv[0], b);
       else if (oint_kind(comp_ntype(c, argv[0])) && cmp_operand_may_be_nil(c, argv[0])) {
-        buf_puts(b, "sp_oint_opnd("); emit_oint_expr(c, argv[0], TY_INT, b); buf_puts(b, ")");
+        emit_oint_unwrap_ck(c, argv[0], TY_INT, g_ck_opnd, b);
       }
       else emit_scalar_operand(c, argv[0], "0", b);
       buf_puts(b, ")");
@@ -14441,11 +14441,15 @@ static int emit_array_arith_call(Compiler *c, int id, Buf *b) {
         if (rin || rfn) {
           Buf ov; memset(&ov, 0, sizeof ov);
           Buf *svp = g_pre; g_pre = &ap;
-          emit_oint_expr(c, argv[0], rgt9, &ov);
+          /* the same class on both sides: the element read may unwrap
+             itself (sp_*Array_get_opnd) */
+          if (rgt9 == lft9) emit_oint_unwrap_ck(c, argv[0], rgt9, g_ck_opnd, &av);
+          else emit_oint_expr(c, argv[0], rgt9, &ov);
           g_pre = svp;
           /* nil coerced into the LEFT operand's class: an Integer receiver
              says "into Integer" for a nil Float as for a nil Integer */
-          if (rgt9 == TY_FLOAT && lft9 == TY_INT) buf_printf(&av, "sp_ofloat_opnd_in(%s, \"Integer\")", ov.p ? ov.p : "");
+          if (rgt9 == lft9) { }
+          else if (rgt9 == TY_FLOAT && lft9 == TY_INT) buf_printf(&av, "sp_ofloat_opnd_in(%s, \"Integer\")", ov.p ? ov.p : "");
           else if (rgt9 == TY_INT && lft9 == TY_FLOAT) buf_printf(&av, "sp_oint_opnd_in(%s, \"Float\")", ov.p ? ov.p : "");
           else buf_printf(&av, "%s(%s)", rgt9 == TY_INT ? "sp_oint_opnd" : "sp_ofloat_opnd", ov.p ? ov.p : "");
           free(ov.p);

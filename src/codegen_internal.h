@@ -2231,6 +2231,7 @@ extern int g_want_oint;
 int poly_ivar_unset_marked(Compiler *c, int cid, int iv);
 extern int g_ck_node;
 extern const char *g_ck_op;
+extern const char g_ck_opnd[];
 extern int g_ck_done;
 /* the leaf slot read emit_expr is rendering is wanted as its own oint
    (codegen_expr.c) */

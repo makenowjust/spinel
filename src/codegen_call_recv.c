@@ -1991,9 +1991,9 @@ static int emit_kind_array_call(Compiler *c, int id, Buf *b, const NodeTable *nt
       if (oread && g_ck_node == id) {
         char hr[48]; hc_read_len(hd, hr, sizeof hr);
         buf_printf(b, "; SP_LIKELY((unsigned long long)_t%d < (unsigned long long)%s) ? %s[_t%d] : sp_%sArray_get_%s(",
-                   tk, hr, hd, tk, k, g_ck_op ? "ck" : "arg");
+                   tk, hr, hd, tk, k, g_ck_op == g_ck_opnd ? "opnd" : g_ck_op ? "ck" : "arg");
         emit_expr(c, recv, b);
-        if (g_ck_op) buf_printf(b, ", _t%d, \"%s\"); })", tk, g_ck_op);
+        if (g_ck_op && g_ck_op != g_ck_opnd) buf_printf(b, ", _t%d, \"%s\"); })", tk, g_ck_op);
         else buf_printf(b, ", _t%d); })", tk);
         g_ck_done = 1;
         { *out = 1; return 1; }
@@ -2011,8 +2011,8 @@ static int emit_kind_array_call(Compiler *c, int id, Buf *b, const NodeTable *nt
     int uo = (rt == TY_INT_ARRAY || rt == TY_FLOAT_ARRAY) && node_is_oint(c, id);
     /* an oint unwrapped at once by its consumer (g_ck_node): the checked read */
     int uck = uo && g_ck_node == id;
-    const char *uop = g_ck_op;
-    buf_printf(b, "sp_%sArray_%s(", k, uck ? (uop ? "get_ck" : "get_arg") : uo ? "oget" : "get");
+    const char *uop = g_ck_op == g_ck_opnd ? NULL : g_ck_op;
+    buf_printf(b, "sp_%sArray_%s(", k, uck ? (g_ck_op == g_ck_opnd ? "get_opnd" : uop ? "get_ck" : "get_arg") : uo ? "oget" : "get");
     if (uck) g_ck_done = 1;
     emit_expr(c, recv, b); buf_puts(b, ", ");
     /* a splat is its one element (emit_int_expr_ex), not a boxed index */
