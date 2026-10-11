@@ -962,6 +962,8 @@ void emit_hash_okey(Compiler *c, int key, Buf *b);
 const char *hash_key_ctype(Compiler *c, int key, TyKind kt);
 const char *hash_okey_sfx(Compiler *c, int key, TyKind kt);
 void emit_hash_key_o(Compiler *c, int key, TyKind kt, Buf *b);
+int hash_opw_okey(Compiler *c, int key, TyKind rt);
+void emit_opw_okey_read(const char *t, Buf *b);
 int hash_nil_key_stored(Compiler *c, int key, TyKind kt);
 const char *conv_wrong_cls_name(TyKind t);
 const char *conv_cls_name_of(Compiler *c, TyKind t);

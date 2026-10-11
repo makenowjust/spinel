@@ -5110,6 +5110,18 @@ void emit_hash_key_o(Compiler *c, int key, TyKind kt, Buf *b) {
   }
   emit_oint_expr(c, key, TY_INT, b);
 }
+/* An op-assign (`||=`, `&&=`, `op=`) on an Integer-keyed Hash with such a
+   key: the key is held boxed. The read looks up the Integer it holds, so
+   nil or a key of another class misses, as CRuby's lookup does. A store
+   converts it as a plain store does (sp_poly_hkey_i), raising the typed
+   Hash's TypeError for a key the hash was not widened to hold. */
+int hash_opw_okey(Compiler *c, int key, TyKind rt) {
+  return (rt == TY_INT_INT_HASH || rt == TY_INT_STR_HASH) && hash_okey_form(c, key, TY_INT);
+}
+/* that boxed key temp as the read's sp_oint key */
+void emit_opw_okey_read(const char *t, Buf *b) {
+  buf_printf(b, "(%s.tag == SP_TAG_INT ? sp_oint_of(%s.v.i) : sp_oint_nil())", t, t);
+}
 
 /* --share-strings: String Array value v as a PolyArray holding each
    element boxed as a handle of its own (a slot whose elements the rule

@@ -18503,7 +18503,10 @@ int emit_index_opw_hoist(Compiler *c, int id, Buf *pre, int indent) {
   Buf kb; memset(&kb, 0, sizeof kb);
   const char *ktype = NULL;
   int key_is_ptr = 0;
-  if (ty_is_hash(rt) && ty_hash_cname(rt)) {
+  if (ty_is_hash(rt) && ty_hash_cname(rt) && hash_opw_okey(c, argv[0], rt)) {
+    ktype = "sp_RbVal"; key_is_ptr = 1; emit_boxed(c, argv[0], &kb);   /* held boxed (hash_opw_okey) */
+  }
+  else if (ty_is_hash(rt) && ty_hash_cname(rt)) {
     TyKind kt = ty_hash_key(rt);
     ktype = c_type_name(kt);
     key_is_ptr = (kt == TY_STRING || kt == TY_POLY);
@@ -18655,9 +18658,24 @@ void emit_index_op_write(Compiler *c, int id, Buf *b, int indent) {
     buf_printf(b, "{ %s _t%d = ", c_type_name(rt), ta); iow_emit_recv(c, recv, b);
     buf_puts(b, "; ");
     if (!g_iow_recv_ref && (subtree_may_allocate(nt, recv) || drops)) { emit_gc_root_tmp(c, rt, ta, b); buf_puts(b, " "); }
-    buf_printf(b, "%s _t%d = ", c_type_name(kt), tb); iow_emit_key(c, argv[0], b, IOW_KEY_HASH, kt);
+    /* a key that may be nil or of another class: held boxed, the read
+       misses on it and the store converts it (hash_opw_okey) */
+    int ok = hash_opw_okey(c, argv[0], rt);
+    buf_printf(b, "%s _t%d = ", ok ? "sp_RbVal" : c_type_name(kt), tb);
+    iow_emit_key(c, argv[0], b, ok ? IOW_KEY_BOXED : IOW_KEY_HASH, kt);
     buf_puts(b, "; ");
-    if (!g_iow_key_ref && operand_may_allocate(c, argv[0]) && needs_root(kt)) { emit_gc_root_tmp(c, kt, tb, b); buf_puts(b, " "); }
+    if (!g_iow_key_ref && operand_may_allocate(c, argv[0]) && (ok || needs_root(kt))) {
+      emit_gc_root_tmp(c, ok ? TY_POLY : kt, tb, b); buf_puts(b, " ");
+    }
+    char rk[96], sk[64], tbn[24];
+    snprintf(tbn, sizeof tbn, "_t%d", tb);
+    if (ok) {
+      Buf okb; memset(&okb, 0, sizeof okb); emit_opw_okey_read(tbn, &okb);
+      snprintf(rk, sizeof rk, "%s", okb.p ? okb.p : "sp_oint_nil()"); free(okb.p);
+      snprintf(sk, sizeof sk, "sp_poly_hkey_i(_t%d)", tb);
+    }
+    else { snprintf(rk, sizeof rk, "_t%d", tb); snprintf(sk, sizeof sk, "_t%d", tb); }
+    const char *rs = ok ? "_okey" : "";
     /* Build the new value (which reads the slot and evaluates the RHS) BEFORE
        the frozen check: Ruby desugars `h[k] += v` to `h[k] = h[k] + v`, so the
        read and the RHS run before []= raises on a frozen hash. */
@@ -18670,13 +18688,13 @@ void emit_index_op_write(Compiler *c, int id, Buf *b, int indent) {
          sp_streq(op, "&") ? "sp_poly_band" : sp_streq(op, "|") ? "sp_poly_bor" :
          sp_streq(op, "^") ? "sp_poly_bxor" : NULL) : NULL;
     int eff = g_pre && subtree_has_side_effect(c, v);
-    char slot[128];
+    char slot[256];
     /* an entry that may hold nil (D3b-ii) is read with it: `nil + 1` is
        CRuby's NoMethodError, as a miss without a default is */
-    if ((rt == TY_STR_INT_HASH || rt == TY_INT_INT_HASH) && vt == TY_INT && hash_vals_nullable(c, recv))
-      snprintf(slot, sizeof slot, "sp_oint_val(sp_%sHash_oget(_t%d, _t%d), \"%s\")", hn, ta, tb, op);
+    if ((rt == TY_STR_INT_HASH || rt == TY_INT_INT_HASH) && vt == TY_INT && (hash_vals_nullable(c, recv) || ok))
+      snprintf(slot, sizeof slot, "sp_oint_val(sp_%sHash_oget%s(_t%d, %s), \"%s\")", hn, rs, ta, rk, op);
     else
-      snprintf(slot, sizeof slot, "sp_%sHash_get(_t%d, _t%d)", hn, ta, tb);
+      snprintf(slot, sizeof slot, "sp_%sHash_get%s(_t%d, %s)", hn, rs, ta, rk);
     if (eff) iow_capture_slot(c, vt, slot, sizeof slot, b);
     char *rhs = iow_rhs(c, v, pf ? IOW_RHS_BOXED : IOW_RHS_EXPR, eff ? b : NULL);
     buf_printf(b, "%s _t%d = ", c_type_name(vt), tv);
@@ -18688,7 +18706,7 @@ void emit_index_op_write(Compiler *c, int id, Buf *b, int indent) {
     free(rhs);
     buf_puts(b, "; ");
     buf_printf(b, "if (sp_gc_is_frozen(_t%d)) sp_raise_frozen_hash_at(_t%d, %s); ", ta, ta, hash_box_cls(rt));
-    buf_printf(b, "sp_%sHash_set(_t%d, _t%d, _t%d); }\n", hn, ta, tb, tv);
+    buf_printf(b, "sp_%sHash_set(_t%d, %s, _t%d); }\n", hn, ta, sk, tv);
     return;
   }
 
@@ -18968,9 +18986,25 @@ void emit_index_and_or_write(Compiler *c, int id, Buf *b, int indent, int is_or)
     buf_printf(b, "{ %s _t%d = ", c_type_name(rt), ta); emit_expr(c, recv, b);
     buf_puts(b, "; ");
     if (subtree_may_allocate(nt, recv) || drops) { emit_gc_root_tmp(c, rt, ta, b); buf_puts(b, " "); }
-    buf_printf(b, "%s _t%d = ", c_type_name(kt), tb); emit_hash_key(c, argv[0], kt, b);
-    buf_puts(b, "; ");
-    if (operand_may_allocate(c, argv[0]) && needs_root(kt)) { emit_gc_root_tmp(c, kt, tb, b); buf_puts(b, " "); }
+    /* a key that may be nil or of another class: held boxed, the read
+       misses on it and a store converts it (hash_opw_okey) */
+    int ok = hash_opw_okey(c, argv[0], rt);
+    char rk[96], sk[64], tbn[24];
+    snprintf(tbn, sizeof tbn, "_t%d", tb);
+    if (ok) {
+      buf_printf(b, "sp_RbVal _t%d = ", tb); emit_boxed(c, argv[0], b); buf_puts(b, "; ");
+      if (operand_may_allocate(c, argv[0])) { emit_gc_root_tmp(c, TY_POLY, tb, b); buf_puts(b, " "); }
+      Buf kb; memset(&kb, 0, sizeof kb); emit_opw_okey_read(tbn, &kb);
+      snprintf(rk, sizeof rk, "%s", kb.p ? kb.p : "sp_oint_nil()"); free(kb.p);
+      snprintf(sk, sizeof sk, "sp_poly_hkey_i(_t%d)", tb);
+    }
+    else {
+      buf_printf(b, "%s _t%d = ", c_type_name(kt), tb); emit_hash_key(c, argv[0], kt, b);
+      buf_puts(b, "; ");
+      if (operand_may_allocate(c, argv[0]) && needs_root(kt)) { emit_gc_root_tmp(c, kt, tb, b); buf_puts(b, " "); }
+      snprintf(rk, sizeof rk, "_t%d", tb); snprintf(sk, sizeof sk, "_t%d", tb);
+    }
+    const char *rs = ok ? "_okey" : "";
     if (vt == TY_POLY) {
       buf_printf(b, "if (%ssp_poly_truthy(sp_%sHash_get(_t%d, _t%d))) ", is_or ? "!" : "", hn, ta, tb);
       int open = 0;
@@ -18987,13 +19021,13 @@ void emit_index_and_or_write(Compiler *c, int id, Buf *b, int indent, int is_or)
          and tested it for nil; this is the same test. */
       int tc = ++g_tmp;
       /* an Integer or Float value is read with its nil (a miss, a nil default) */
-      if (oint_kind(vt)) buf_printf(b, "%s _t%d = sp_%sHash_oget(_t%d, _t%d); if (", oint_ctype(vt), tc, hn, ta, tb);
-      else buf_printf(b, "%s _t%d = sp_%sHash_get(_t%d, _t%d); if (", c_type_name(vt), tc, hn, ta, tb);
+      if (oint_kind(vt)) buf_printf(b, "%s _t%d = sp_%sHash_oget%s(_t%d, %s); if (", oint_ctype(vt), tc, hn, rs, ta, rk);
+      else buf_printf(b, "%s _t%d = sp_%sHash_get%s(_t%d, %s); if (", c_type_name(vt), tc, hn, rs, ta, rk);
       emit_slot_nil_test(c, vt, tc, is_or, b);
       buf_puts(b, ") ");
       int open = 0;
       char *rhs = iow_guarded_rhs(c, v, IOW_RHS_EXPR, b, &open);
-      buf_printf(b, "sp_%sHash_set(_t%d, _t%d, %s)", hn, ta, tb, rhs);
+      buf_printf(b, "sp_%sHash_set(_t%d, %s, %s)", hn, ta, sk, rhs);
       iow_guard_close(rhs, open, b);
     }
     buf_puts(b, "; }\n");

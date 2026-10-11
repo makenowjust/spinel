@@ -855,7 +855,9 @@ static void emit_index_get(Compiler *c, int recv, int key, Buf *b) {
     buf_printf(b, "sp_%sHash_get(", ty_hash_cname(rt));
     if (g_iow_recv_ref) buf_puts(b, g_iow_recv_ref); else emit_expr(c, recv, b);
     buf_puts(b, ", ");
-    if (g_iow_key_ref) buf_puts(b, g_iow_key_ref); else emit_hash_key(c, key, rr.key, b);
+    /* a key held boxed (hash_opw_okey) was an Integer for the store to take it */
+    if (g_iow_key_ref && hash_opw_okey(c, key, rt)) buf_printf(b, "sp_poly_hkey_i(%s)", g_iow_key_ref);
+    else if (g_iow_key_ref) buf_puts(b, g_iow_key_ref); else emit_hash_key(c, key, rr.key, b);
     buf_puts(b, ")");
     return;
   }
@@ -4870,8 +4872,24 @@ static void emit_expr_node(Compiler *c, int id, Buf *b) {
       int drops = subtree_has_side_effect(c, iav[0]) || subtree_has_side_effect(c, iv);
       buf_printf(b, "({ %s _t%d = ", c_type_name(irt), ta2); emit_expr(c, ir, b); buf_puts(b, "; ");
       if (subtree_may_allocate(c->nt, ir) || drops) { emit_gc_root_tmp(c, irt, ta2, b); buf_puts(b, " "); }
-      buf_printf(b, "%s _t%d = ", c_type_name(kt), tb2); emit_hash_key(c, iav[0], kt, b); buf_puts(b, "; ");
-      if (operand_may_allocate(c, iav[0]) && needs_root(kt)) { emit_gc_root_tmp(c, kt, tb2, b); buf_puts(b, " "); }
+      /* a key that may be nil or of another class: held boxed, the read
+         misses on it and the store converts it (hash_opw_okey) */
+      int ok = hash_opw_okey(c, iav[0], irt);
+      char rk[96], sk[64], tbn[24];
+      snprintf(tbn, sizeof tbn, "_t%d", tb2);
+      if (ok) {
+        buf_printf(b, "sp_RbVal _t%d = ", tb2); emit_boxed(c, iav[0], b); buf_puts(b, "; ");
+        if (operand_may_allocate(c, iav[0])) { emit_gc_root_tmp(c, TY_POLY, tb2, b); buf_puts(b, " "); }
+        Buf okb; memset(&okb, 0, sizeof okb); emit_opw_okey_read(tbn, &okb);
+        snprintf(rk, sizeof rk, "%s", okb.p ? okb.p : "sp_oint_nil()"); free(okb.p);
+        snprintf(sk, sizeof sk, "sp_poly_hkey_i(_t%d)", tb2);
+      }
+      else {
+        buf_printf(b, "%s _t%d = ", c_type_name(kt), tb2); emit_hash_key(c, iav[0], kt, b); buf_puts(b, "; ");
+        if (operand_may_allocate(c, iav[0]) && needs_root(kt)) { emit_gc_root_tmp(c, kt, tb2, b); buf_puts(b, " "); }
+        snprintf(rk, sizeof rk, "_t%d", tb2); snprintf(sk, sizeof sk, "_t%d", tb2);
+      }
+      const char *rs = ok ? "_okey" : "";
       if (vt == TY_POLY) {
         buf_printf(b, "sp_RbVal _t%d = sp_%sHash_get(_t%d, _t%d);", tc2, hn, ta2, tb2);
         buf_printf(b, " if (%ssp_poly_truthy(_t%d)) { ", is_or2 ? "!" : "", tc2);
@@ -4883,7 +4901,7 @@ static void emit_expr_node(Compiler *c, int id, Buf *b) {
            default) and tested on it; the store takes the plain value (a nil
            value widened the hash to poly), and the expression answers the
            slot: its oint where the consumer takes one, else the value */
-        buf_printf(b, "%s _t%d = sp_%sHash_oget(_t%d, _t%d);", oint_ctype(vt), tc2, hn, ta2, tb2);
+        buf_printf(b, "%s _t%d = sp_%sHash_oget%s(_t%d, %s);", oint_ctype(vt), tc2, hn, rs, ta2, rk);
         buf_printf(b, " if (%s_t%d.nil) { _t%d = %s(", is_or2 ? "" : "!", tc2, tc2, oint_of(vt));
         { Buf rvb; memset(&rvb, 0, sizeof rvb);
           Buf *svp = g_pre; g_pre = b;
@@ -4891,17 +4909,17 @@ static void emit_expr_node(Compiler *c, int id, Buf *b) {
           g_pre = svp;
           buf_puts(b, rvb.p ? rvb.p : "0");
           free(rvb.p); }
-        buf_printf(b, "); sp_%sHash_set(_t%d, _t%d, _t%d.v); } ", hn, ta2, tb2, tc2);
+        buf_printf(b, "); sp_%sHash_set(_t%d, %s, _t%d.v); } ", hn, ta2, sk, tc2);
         if (node_is_oint(c, id)) buf_printf(b, "_t%d; })", tc2);
         else buf_printf(b, "%s(_t%d); })", oint_arg(vt), tc2);
       }
       else {
-        buf_printf(b, "%s _t%d = sp_%sHash_get(_t%d, _t%d);", c_type_name(vt), tc2, hn, ta2, tb2);
+        buf_printf(b, "%s _t%d = sp_%sHash_get%s(_t%d, %s);", c_type_name(vt), tc2, hn, rs, ta2, rk);
         buf_puts(b, " if (");
         emit_slot_nil_test(c, vt, tc2, is_or2, b);
         buf_puts(b, ") { ");
         emit_guarded_slot_assign(c, iv, tc2, b);
-        buf_printf(b, "; sp_%sHash_set(_t%d, _t%d, _t%d); } _t%d; })", hn, ta2, tb2, tc2, tc2);
+        buf_printf(b, "; sp_%sHash_set(_t%d, %s, _t%d); } _t%d; })", hn, ta2, sk, tc2, tc2);
       }
     }
     else if (irt == TY_POLY) {
