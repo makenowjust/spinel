@@ -1221,10 +1221,22 @@ static const char *cplan_binding_what(Compiler *c, int id) {
          "in-scope name is)";
 }
 
+/* `obj.instance_eval(str)`: text the compiler cannot run, which an
+   unsupported call does not report (the call emitted nothing at all). Not
+   where the call reaches a method of the program's own. */
+static const char *cplan_instance_eval_text_what(Compiler *c, int id) {
+  const NodeTable *nt = c->nt;
+  int args = nt_ref(nt, id, "arguments"), argc = 0;
+  if (args >= 0) nt_arr(nt, args, "arguments", &argc);
+  if (argc < 1 || nt_ref(nt, id, "block") >= 0) return NULL;
+  if (cplan_user(c, id)->dispatch != CP_NONE) return NULL;
+  return "instance_eval of a String is not supported by AOT compilation (pass a block instead)";
+}
 static const char *cplan_eval_what(Compiler *c, int id) {
   const NodeTable *nt = c->nt;
   if (nt_kind(nt, id) != NK_CallNode) return NULL;
   const char *name = nt_str(nt, id, "name");
+  if (name && sp_streq(name, "instance_eval")) return cplan_instance_eval_text_what(c, id);
   if (!name || !sp_streq(name, "eval")) return NULL;
   int args = nt_ref(nt, id, "arguments");
   int argc = 0;
