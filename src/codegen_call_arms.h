@@ -145,6 +145,11 @@ void emit_ffi_callback_arg(Compiler *c, int cbidx, int argnode, Buf *out);
 void emit_ffi_num_arg(Compiler *c, int arg, TyKind at, const char *spec, int dbl, Buf *b);
 int emit_or_take_back(Compiler *c, int id, Buf *b, int (*fn)(Compiler *, int, Buf *));
 int emit_sg_accessor(Compiler *c, int id, int ci, const char *cn, const char *name, int argc, const int *argv, Buf *b);
+/* The classes a boxed Class value's call reaches by a `class << self`
+   accessor and no class method of the name: how many, and their arms in the
+   class-tag ternary over the value in _t<tv> */
+int boxed_cls_sg_count(Compiler *c, const char *name, int argc);
+void emit_boxed_cls_sg_arms(Compiler *c, int id, const char *name, int argc, const int *argv, int tv, Buf *b);
 void ffi_check_buffer_bounds(Compiler *c, int id, int arg, const char *kind, int off, const char *dir);
 extern int g_setter_value_inner;
 int emit_cmethod_setter_assign(Compiler *c, int id, Buf *b);

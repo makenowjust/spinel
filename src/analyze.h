@@ -609,4 +609,7 @@ int strh_call_op_in(Compiler *c, int call, TyKind rt, int unknown_ok);
 int strh_literal_held(Compiler *c, int n);   /* an Array literal a variable of any kind is written */
 int strh_var_read(const NodeTable *nt, int n);   /* a variable's read, whatever its kind of variable */
 
+/* Does some class's `class << self` accessor answer `name` with argc arguments? */
+int an_sg_accessor_any(Compiler *c, const char *name, int argc);
+
 #endif

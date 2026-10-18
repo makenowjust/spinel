@@ -1844,6 +1844,10 @@ void comp_poly_candidates_reset(void);
    each with the scope comp_cmethod_in_chain gives (`cls`, `mi`; the other
    fields unused). Memoized under the same stamps as comp_poly_candidates. */
 const PolyCand *comp_cmethod_candidates(Compiler *c, const char *name, int *n);
+/* A per-name memo slot (0 until set) for whether some class's `class <<
+   self` accessor answers the name, kept with the candidate memo and dropped
+   with it; NULL while the scopes may still change */
+int *comp_name_sg_memo(Compiler *c, const char *name);
 /* Can class `k`'s class object be a value: held by a variable, a box or a
    container, so that a call on a receiver of no fixed class may reach its
    class methods? Not when the program only ever names it to call it, define

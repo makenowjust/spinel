@@ -21146,7 +21146,8 @@ int emit_unresolved_call(Compiler *c, int id, Buf *b) {
              itself (below). */
           ccls[nc] = k; cmi[nc] = mi; cdef[nc] = dc; cpf[nc] = pfk; nc++;
         }
-        if (nc > 0) {
+        int nsg = boxed_cls_sg_count(c, nm, argc);   /* and the `class << self` accessors */
+        if (nc > 0 || nsg > 0) {
           /* The receiver first, into a rooted temp of its own: Ruby evaluates
              it before the arguments, and the arguments hoisted below may
              allocate while it is held by nothing else. */
@@ -21230,6 +21231,7 @@ int emit_unresolved_call(Compiler *c, int id, Buf *b) {
             free(cb.p);
             buf_puts(b, " : ");
           }
+          if (nsg > 0) emit_boxed_cls_sg_arms(c, id, nm, argc, argv, tv, b);
           /* Not a Class at run time: this is whatever the call would have
              compiled to with no class method of the name in the program -- a
              String receiver takes the String method. Raising here instead made

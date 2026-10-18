@@ -2422,7 +2422,7 @@ int comp_enum_answers_first(Compiler *c, int cid, const char *name) {
    conditions that vary per call (ctor_reachable, an_builtin_only, native arity)
    stay with the consumer. A native class is always listed: its answer depends
    on the call's arity, which the consumer checks. */
-struct pc_entry { char *name; PolyCand *cands; unsigned char *overridden; int n; int fi; struct pc_entry *next; };
+struct pc_entry { char *name; PolyCand *cands; unsigned char *overridden; int n; int fi; int sg; struct pc_entry *next; };
 #define PC_BUCKETS 4096
 static struct pc_entry *pc_tab[PC_BUCKETS];
 static struct pc_entry *cc_tab[PC_BUCKETS];   /* class methods: comp_cmethod_candidates */
@@ -2491,6 +2491,11 @@ static struct pc_entry *pc_memo(Compiler *c, const char *name) {
   e->n = -1;  /* an override query need not build the candidate list */
   e->next = pc_tab[b]; pc_tab[b] = e;
   return e;
+}
+/* See compiler.h. */
+int *comp_name_sg_memo(Compiler *c, const char *name) {
+  struct pc_entry *e = name ? pc_memo(c, name) : NULL;
+  return e ? &e->sg : NULL;
 }
 const PolyCand *comp_poly_candidates(Compiler *c, const char *name, int *n) {
   if (!name) { *n = 0; return NULL; }

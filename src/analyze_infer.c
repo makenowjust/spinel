@@ -5233,14 +5233,20 @@ static int cls_value_sg_accessor_any(Compiler *c, const char *name, int argc) {
   char base[256];
   int setter = setter_base_name(name, base, sizeof base);
   if (setter ? argc != 1 : argc != 0) return 0;
-  for (int k = 0; k < c->nclasses; k++) {
+  /* asked per call on a boxed receiver: the answer per name is memoized */
+  int *memo = comp_name_sg_memo(c, name);
+  if (memo && *memo) return *memo == 2;
+  int any = 0;
+  for (int k = 0; k < c->nclasses && !any; k++) {
     if (is_builtin_reopen(c->classes[k].name)) continue;
     const char *rn = setter ? base : comp_resolve_cm_alias_at(c, k, name, NULL);
-    if (setter ? comp_is_sg_writer(&c->classes[k], base) : comp_is_sg_reader(&c->classes[k], rn ? rn : name))
-      return 1;
+    any = setter ? comp_is_sg_writer(&c->classes[k], base) : comp_is_sg_reader(&c->classes[k], rn ? rn : name);
   }
-  return 0;
+  if (memo) *memo = any ? 2 : 1;
+  return any;
 }
+/* See analyze.h. */
+int an_sg_accessor_any(Compiler *c, const char *name, int argc) { return cls_value_sg_accessor_any(c, name, argc); }
 
 
 /* A Class receiver, Class and Module reflection, and the declarations of a class body (infer_call_inner's rules, in their order) */
@@ -7256,6 +7262,9 @@ static int infer_last_resort_call(Compiler *c, int id, const NodeTable *nt, cons
       int ncc = 0;
       comp_cmethod_candidates(c, name, &ncc);
       if (ncc > 0) { *out = TY_POLY; return 1; }
+      /* ...and so it may hold one whose `class << self` accessor answers it
+         (emit_boxed_cls_sg_arms) */
+      if (cls_value_sg_accessor_any(c, name, argc)) { *out = TY_POLY; return 1; }
       /* Thread.current / Fiber.current through a class held in a poly slot:
          a boxed handle (the codegen's gate answers it) */
       if (argc == 0 && sp_streq(name, "current") && !an_user_defines_method(c, name)) { *out = TY_POLY; return 1; }

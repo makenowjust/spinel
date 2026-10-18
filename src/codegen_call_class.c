@@ -3388,6 +3388,43 @@ static int emit_cls_value_sg_accessor(Compiler *c, int id, int recv, const char 
 }
 
 
+/* Does class k answer `name` (with argc arguments) by a `class << self`
+   accessor and by no class method of the name? The rn its reader takes. */
+static int boxed_cls_sg_answers(Compiler *c, int k, const char *name, int argc, const char **rn) {
+  char base[256];
+  int setter = setter_base_name(name, base, sizeof base);
+  if ((setter ? argc != 1 : argc != 0) || is_builtin_reopen(c->classes[k].name) ||
+      comp_cmethod_in_chain(c, k, name, NULL) >= 0) return 0;
+  if (setter) return comp_is_sg_writer(&c->classes[k], base);
+  const char *r = comp_resolve_cm_alias_at(c, k, name, NULL);
+  if (rn) *rn = r ? r : name;
+  return comp_is_sg_reader(&c->classes[k], r ? r : name);
+}
+
+/* See codegen_call_arms.h. */
+int boxed_cls_sg_count(Compiler *c, const char *name, int argc) {
+  if (!an_sg_accessor_any(c, name, argc)) return 0;
+  int n = 0;
+  for (int k = 0; k < c->nclasses; k++) n += boxed_cls_sg_answers(c, k, name, argc, NULL);
+  return n;
+}
+
+/* See codegen_call_arms.h. */
+void emit_boxed_cls_sg_arms(Compiler *c, int id, const char *name, int argc, const int *argv, int tv, Buf *b) {
+  char base[256];
+  int setter = setter_base_name(name, base, sizeof base);
+  for (int k = 0; k < c->nclasses; k++) {
+    const char *rn = name;
+    if (!boxed_cls_sg_answers(c, k, name, argc, &rn)) continue;
+    const char *crn = class_ruby_name(c, k) ? class_ruby_name(c, k) : c->classes[k].name;
+    buf_printf(b, "(_t%d.cls_id == %d || (_t%d.cls_id == SP_CLASS_BY_NAME && _t%d.v.s && "
+                  "strcmp(_t%d.v.s, \"%s\") == 0)) ? ({ ", tv, k, tv, tv, tv, crn);
+    if (setter) { buf_puts(b, "(void)"); emit_sg_accessor(c, id, k, c->classes[k].name, name, argc, argv, b); buf_puts(b, "; "); }
+    sg_slot_boxed(c, k, setter ? base : rn, b);
+    buf_puts(b, "; }) : ");
+  }
+}
+
 /* The anonymous Struct / Data class a `new` receiver names statically: a
    `Struct.new(...)` call, or a local the analysis holds one in; -1 else */
 static int anon_struct_recv_ci(Compiler *c, int recv) {
