@@ -17364,9 +17364,9 @@ void refl_class_singleton_methods(Compiler *c, int ci, int all, ReflNames *r) {
     /* an accessor inherited from an ancestor's `class << self` is the
        ancestor's own: singleton_methods(false) leaves it out */
     for (int i = 0; i < kc->nsg_readers; i++)
-      if (all || !comp_is_sg_inh(kc, kc->sg_readers[i])) refl_note(r, kc->sg_readers[i], 1);
+      if (all || !comp_is_sg_inh(kc, kc->sg_readers[i], 0)) refl_note(r, kc->sg_readers[i], 1);
     for (int i = 0; i < kc->nsg_writers; i++) {
-      if (!all && comp_is_sg_inh(kc, kc->sg_writers[i])) continue;
+      if (!all && comp_is_sg_inh(kc, kc->sg_writers[i], 1)) continue;
       char wn[256]; snprintf(wn, sizeof wn, "%s=", kc->sg_writers[i]);
       refl_note(r, wn, 1);
     }

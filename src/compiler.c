@@ -1939,9 +1939,21 @@ void comp_add_sg_civ(ClassInfo *ci, const char *name) {
   if (name) name_add(&ci->sg_civ, &ci->nsg_civ, &ci->csg_civ, name);
 }
 int comp_is_sg_civ(ClassInfo *ci, const char *name) { return name_list_has(ci->sg_civ, ci->nsg_civ, name); }
-int comp_is_sg_inh(ClassInfo *ci, const char *name) { return name_list_has(ci->sg_inh, ci->nsg_inh, name); }
-void comp_add_sg_inh(ClassInfo *ci, const char *name) {
-  if (name_list_has(ci->sg_inh, ci->nsg_inh, name)) return;
+/* A copied writer is kept as `x=` and a copied reader as `x`: a class can
+   declare one half of an accessor and inherit the other. */
+static const char *sg_inh_key(const char *name, int writer, char *buf, size_t cap) {
+  if (!writer) return name;
+  return snprintf(buf, cap, "%s=", name) < (int)cap ? buf : NULL;
+}
+int comp_is_sg_inh(ClassInfo *ci, const char *name, int writer) {
+  char buf[260];
+  const char *key = sg_inh_key(name, writer, buf, sizeof buf);
+  return key && name_list_has(ci->sg_inh, ci->nsg_inh, key);
+}
+void comp_add_sg_inh(ClassInfo *ci, const char *base, int writer) {
+  char buf[260];
+  const char *name = sg_inh_key(base, writer, buf, sizeof buf);
+  if (!name || name_list_has(ci->sg_inh, ci->nsg_inh, name)) return;
   if (ci->nsg_inh >= ci->csg_inh) {
     ci->csg_inh = ci->csg_inh ? ci->csg_inh * 2 : 4;
     ci->sg_inh = realloc(ci->sg_inh, sizeof(char *) * (size_t)ci->csg_inh);

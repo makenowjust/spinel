@@ -1889,8 +1889,10 @@ void       comp_add_alias(ClassInfo *ci, const char *new_name, const char *old_n
 void       comp_add_alias_from(ClassInfo *ci, const char *new_name, const char *old_name, int from_cls);
 void       comp_add_sg_civ(ClassInfo *ci, const char *name);
 int        comp_is_sg_civ(ClassInfo *ci, const char *name);
-int        comp_is_sg_inh(ClassInfo *ci, const char *name);
-void       comp_add_sg_inh(ClassInfo *ci, const char *name);
+/* Did class ci only copy its `class << self` reader (writer 0) or writer
+   (writer 1) `name` from an ancestor? */
+int        comp_is_sg_inh(ClassInfo *ci, const char *name, int writer);
+void       comp_add_sg_inh(ClassInfo *ci, const char *name, int writer);
 /* Prepend-chain helpers. */
 void        comp_prep_chain_add(ClassInfo *ci, const char *from, const char *to);
 const char *comp_prep_chain_target(Compiler *c, int class_id, const char *name);

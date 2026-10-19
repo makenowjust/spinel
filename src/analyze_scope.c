@@ -6349,7 +6349,7 @@ void resolve_parents(Compiler *c) {
                                       : comp_is_sg_writer(&c->classes[i], base);
         if (j < pc->nsg_readers) comp_add_sg_reader(&c->classes[i], base);
         else comp_add_sg_writer(&c->classes[i], base);
-        if (!own) comp_add_sg_inh(&c->classes[i], base);
+        if (!own) comp_add_sg_inh(&c->classes[i], base, j >= pc->nsg_readers);
         if (comp_is_sg_civ(&c->classes[i], base)) continue;
         char ivname[256];
         snprintf(ivname, sizeof ivname, "@%s", base);
