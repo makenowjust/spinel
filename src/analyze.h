@@ -174,6 +174,10 @@ int an_tail_answers_nil(Compiler *c, int mi);
    the methods are defined in; after it, the facts as decided. */
 int scope_ret_handle(Compiler *c, int mi);
 int scope_ret_fresh(Compiler *c, int mi);
+/* Does method mi answer a String literal on every path (no `return`)? A
+   frozen literal keeps one identity, the handle its site has
+   (SP_SHARE_STRING_LITERALS), which a handle made over its bytes finds. */
+int scope_ret_str_literal(Compiler *c, int mi);
 int scope_ret_param(Compiler *c, int mi);
 /* A String `||` or `&&` over a String left operand: a tail whose operands
    are its arms (an_tail_is_shared_handle, emit_tail_value). */
