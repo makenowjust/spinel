@@ -2835,6 +2835,16 @@ int strbuf_route_kind(Compiler *c, int v, int *op) {
    (box 1) the String it is, which an identity compares as it stands. */
 void emit_strbuf_pickup(Compiler *c, int v, int box, Buf *b) {
   v = unwrap_parens(c, v);
+  /* an argument emit_args_filled_argv sequenced ahead into a temp of its
+     handle type ran there, its pickup included: the temp is the handle */
+  { Repr r = repr_of(c, v);
+    if (r.as_ty == TY_STRBUF && !repr_handle_apart(c, v, r))
+      for (int i = g_n_argov - 1; i >= 0; i--)
+        if (g_argov_node[i] == v) {
+          if (box) str_box_handle(b, g_argov_text[i]);
+          else buf_puts(b, g_argov_text[i]);
+          return;
+        } }
   int t = ++g_tmp;
   size_t at = b->len;
   buf_printf(b, "({ _sp_ret_strbuf = NULL; const char *_v%d = ", t);
@@ -24236,8 +24246,10 @@ int strbuf_flow_unseen(Compiler *c, int v) {
    Targets the plan cannot list are left to the mark. */
 int strbuf_pickup_published(Compiler *c, int v) {
   int tg[CPT_MAX], n = cplan_targets(c, v, tg, CPT_MAX);
+  /* (a target answering a String literal publishes none, and the pickup's
+     new handle over its bytes is the literal's own: scope_ret_str_literal) */
   for (int i = 0; i < n; i++)
-    if (!scope_ret_handle(c, tg[i])) return 0;
+    if (!scope_ret_handle(c, tg[i]) && !scope_ret_str_literal(c, tg[i])) return 0;
   return 1;
 }
 /* --share-strings: is v a String bang on a boxed receiver whose box holds
