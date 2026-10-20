@@ -332,8 +332,15 @@ int repr_call_returns_handle(Compiler *c, int v) {
      answering their objects' handles, which their arms publish */
   if (n == 0 && repr_boxed_native_handle(c, v)) return 1;
   if (n <= 0) return 0;
-  for (int i = 0; i < n; i++) if (!scope_ret_handle(c, mis[i])) return 0;
-  return 1;
+  /* (a target answering a String literal publishes none, and the pickup's
+     new handle over its bytes is the literal's own, which keeps one
+     identity: scope_ret_str_literal) */
+  int npub = 0;
+  for (int i = 0; i < n; i++) {
+    if (scope_ret_handle(c, mis[i])) { npub++; continue; }
+    if (!scope_ret_str_literal(c, mis[i])) return 0;
+  }
+  return npub > 0;
 }
 /* A boxed receiver's reader arms already box their shared fields as
    handles. A String demand can take that boxed result without a copy.
