@@ -1038,6 +1038,14 @@ publication through a helper even when that accessor is absent from the call's
 dispatch plan, and those holder edges are not fully represented here. Such
 programs retain the previous boxed-container effects.
 
+`join` without arguments on a boxed receiver that may also be an object of
+a class defining its own `join` answers a new String when each such method
+answers one (one taking a block, reached through its proc form, included):
+the Array arm joins into a new String, and a Thread arm answers no String.
+Its answer can then be kept and changed beside other names. With a
+separator, the dispatch's generic default may reach another builtin, and a
+shared answer stays refused.
+
 Not yet shared:
 
 - a String variable in a splatted Hash literal (`**{ k: v }`) at a dynamic call or yield whose key binds an appending keyword parameter;

@@ -5725,6 +5725,13 @@ static int sh_builtin_fresh(Compiler *c, int call, int ostruct) {
   }
   return 0;
 }
+/* Is poly arm a one of the named `join` arms (PB_N_JOIN, PB_JOIN_N)? Each
+   joins an Array kind into a new String (sp_poly_join); the one without
+   arguments also waits on a Thread, which answers itself or, in a String
+   slot, the empty String. Neither hands on a String a name holds. */
+static int sh_arm_join_fresh(const PolyArm *a) {
+  return a->kind == PA_BUILTIN && (a->key == PA_KEY_BUILTIN + PB_N_JOIN || a->key == PA_KEY_BUILTIN + PB_JOIN_N);
+}
 /* Is poly arm a of call an IO's read with no buffer to fill (BSH_FILL1's
    row with one argument at most): a new String? The generic default arm
    and its tail read the box as an IO for such a name. */
@@ -5766,7 +5773,9 @@ int share_builtin_fresh(Compiler *c, int call) {
   int generic_raises = !builtin_object_method_known(name) && !builtin_instance_name_known(name);
   for (int i = 0; i < p->n; i++) {
     const PolyArm *a = &p->arm[i];
-    if (a->kind == PA_USER || a->kind == PA_ARITY || sh_arm_io_read_fresh(c, call, a)) continue;
+    /* (a proc-form arm is a user target's clone, in the list checked above) */
+    if (a->kind == PA_USER || a->kind == PA_PROC_FORM || a->kind == PA_ARITY ||
+        sh_arm_io_read_fresh(c, call, a) || sh_arm_join_fresh(a)) continue;
     if (a->kind == PA_TRIAL && (a->key == PA_KEY_TRIAL + PT_DEFAULT0 ||
                                a->key == PA_KEY_TRIAL + PT_DEFAULT_N)) continue;
     if (generic_raises && ((a->kind == PA_BUILTIN && a->key == PA_KEY_BUILTIN + PB_ND_GENERIC) ||
