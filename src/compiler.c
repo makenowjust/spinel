@@ -3374,8 +3374,8 @@ static int vsite_is_read(const NodeTable *nt, int n) {
    in node order. The refusals asked each of those by walking a
    node kind per candidate. Beside the chains, two per-node lookups the
    same walk fills: the call whose receiver a node is (comp_recv_parent),
-   and whether it is a statement the next statement follows
-   (comp_value_dropped). Chains
+   and whether its value is thrown away: a statement the next statement
+   follows, or a branch's value of one (comp_value_dropped). Chains
    carry hash collisions: callers keep their kind/name/key filters
    (comp_vsite_var is the read or write naming an entry's variable).
    Revalidated against nt->version, the scope index's generation and the
@@ -3399,6 +3399,19 @@ static void vsite_add(Compiler *c, VsKind k, int site, int var) {
   c->vs_var[e] = var;
   c->vs_next[e] = *head;
   *head = e;
+}
+/* A value position of a dropped statement is dropped too: the last
+   statement of each branch of an `if`, `unless`, `case` or `begin` whose
+   value the next statement throws away (vsite_build) */
+enum { VS_DROP_SHAPES = VPS_IF | VPS_UNLESS | VPS_CASE | VPS_CASE_IN | VPS_BEGIN | VP_BEGIN_BOTH };
+static int vsite_drop_shape(const NodeTable *nt, int u) {
+  NodeKind k = nt_kind(nt, u);
+  return k == NK_IfNode || k == NK_UnlessNode || k == NK_CaseNode || k == NK_CaseMatchNode || k == NK_BeginNode;
+}
+static int vsite_drop_leaf(const VpLeaf *lf, void *ud) {
+  Compiler *c = ud;
+  if (lf->kind == VPK_EXPR && lf->node >= 0 && lf->node < c->vs_nodes) c->vs_dropped[lf->node] = 1;
+  return 0;
 }
 static void vsite_build(Compiler *c, int toplevel) {
   const NodeTable *nt = c->nt;
@@ -3456,6 +3469,10 @@ static void vsite_build(Compiler *c, int toplevel) {
       }
     }
   }
+  /* a leaf marked here is no shape, so its own walk marks only itself */
+  for (int u = 0; u < n; u++)
+    if (c->vs_dropped[u] && vsite_drop_shape(nt, u))
+      for_each_value_position(nt, u, VS_DROP_SHAPES, vsite_drop_leaf, c);
   c->vs_version = nt->version;
   c->vs_gen = comp_scope_index_gen();
   c->vs_toplevel = toplevel;

@@ -1197,7 +1197,7 @@ typedef struct {
   unsigned char *vs_kind; /* [vs_count] an entry's site kind (VsKind) */
   int *vs_rparent;      /* [vs_nodes] the call whose receiver a node is, or -1 */
   int *vs_whead, *vs_wnext; /* [vs_nodes] the local writes whose value a node is, in node order */
-  unsigned char *vs_dropped; /* [vs_nodes] a statement the next statement follows */
+  unsigned char *vs_dropped; /* [vs_nodes] a statement the next statement follows, or a branch's value of one */
   int vs_nbuckets, vs_count, vs_cap, vs_nodes, vs_toplevel;
   unsigned vs_version, vs_gen;
   int vs_built;
