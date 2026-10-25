@@ -8415,6 +8415,12 @@ static int lift_aliases_unheld(Compiler *c, const char *rn) {
       if (mi < 0 || !lift_method_unheld(c, mi)) return 0;
     }
   }
+  return 1;
+}
+/* A send, alias_method, define_method, method or instance_method naming
+   `rn` on a receiver that is not a constant: kept as it was, whatever the
+   classes the push's receiver can be */
+static int lift_sends_unheld(Compiler *c, const char *rn) {
   const NodeTable *nt = c->nt;
   for (int id = 0; id < nt->count; id++) {
     if (nt_kind(nt, id) != NK_CallNode) continue;
@@ -8439,6 +8445,94 @@ static int lift_aliases_unheld(Compiler *c, const char *rn) {
   return 1;
 }
 
+/* The program classes value `v` can be an instance of, marked in held[]
+   (descendants of a class its type names included): 1 when they are bound,
+   0 when some value is not (a boxed local, a method answering a box it does
+   not build, a class value). A call on a boxed receiver answers what any
+   method of its name answers, or a builtin's value, which is no class of
+   the program's. */
+static int lift_value_classes(Compiler *c, int v, char *held, int depth) {
+  const NodeTable *nt = c->nt;
+  v = nt_paren_single(nt, v);
+  if (v < 0 || depth > 4) return 0;
+  TyKind t = infer_type(c, v);
+  if (ty_is_object(t)) {
+    int k0 = ty_object_class(t);
+    for (int k = 0; k < c->nclasses; k++)
+      if (k == k0 || is_descendant(c, k, k0)) held[k] = 1;
+    return 1;
+  }
+  if (t != TY_POLY) return t != TY_UNKNOWN && t != TY_CLASS && !ty_is_obj_array(t);
+  /* a method's parameter, assigned nowhere in it: what each call of the
+     method by its name passes there (a method the program also names by a
+     Symbol, aliases, or reaches by a super may be called some other way;
+     one it defines by a computed name keeps the push as it was already,
+     an_prog_gives_by_value) */
+  Scope *vs = nt_kind(nt, v) == NK_LocalVariableReadNode ? comp_scope_of(c, v) : NULL;
+  int pk = vs ? unassigned_param_read(c, vs, v) : -1;
+  if (pk >= 0) {
+    if (!vs->name || an_prog_spells_method(vs->name)) return 0;
+    for (int k = 0; k < c->nclasses; k++)
+      for (int i = 0; i < c->classes[k].naliases; i++)
+        if (c->classes[k].alias_old[i] && sp_streq(c->classes[k].alias_old[i], vs->name)) return 0;
+    int calls = 0;
+    for (int id = 0; id < nt->count; id++) {
+      NodeKind k = nt_kind(nt, id);
+      if ((k == NK_SuperNode || k == NK_ForwardingSuperNode)) {
+        Scope *ss = comp_scope_of(c, id);
+        if (ss && ss->name && sp_streq(ss->name, vs->name)) return 0;
+        continue;
+      }
+      if (k != NK_CallNode || !nt_str(nt, id, "name") || !sp_streq(nt_str(nt, id, "name"), vs->name)) continue;
+      int a = nt_ref(nt, id, "arguments"), ac = 0;
+      const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
+      for (int j = 0; j < ac; j++) if (nt_kind(nt, av[j]) == NK_SplatNode) return 0;
+      int arg = call_param_arg(c, vs, av, ac, pk);
+      if (arg < 0 || !lift_value_classes(c, arg, held, depth + 1)) return 0;
+      calls++;
+    }
+    return calls > 0;
+  }
+  if (nt_kind(nt, v) != NK_CallNode || nt_ref(nt, v, "receiver") < 0 || nt_ref(nt, v, "block") >= 0) return 0;
+  const char *vn = nt_str(nt, v, "name");
+  if (!vn) return 0;
+  /* (an alias of the name answers what the method it names does, which no
+     scope of the name shows) */
+  for (int k = 0; k < c->nclasses; k++) {
+    if (comp_reader_in_chain(c, k, vn, NULL) || comp_method_in_chain(c, k, "method_missing", NULL) >= 0) return 0;
+    for (int i = 0; i < c->classes[k].naliases; i++)
+      if (c->classes[k].alias_new[i] && sp_streq(c->classes[k].alias_new[i], vn)) return 0;
+  }
+  for (int s = 0; s < c->nscopes; s++) {
+    if (!c->scopes[s].name || !sp_streq(c->scopes[s].name, vn) || c->scopes[s].class_id < 0) continue;
+    int lv[16];
+    int n = method_value_leaves_or_nil(c, s, lv, 16);
+    if (n < 0) return 0;
+    for (int i = 0; i < n; i++)
+      if (nt_kind(nt, lv[i]) == NK_YieldNode || !lift_value_classes(c, lv[i], held, depth + 1)) return 0;
+  }
+  return 1;
+}
+/* The methods of the name the receiver of call r can run, where the
+   classes it can be are bound (lift_value_classes): each answers no Array
+   something else holds, and none of those classes answers the name by a
+   reader or a method_missing. A method of the name only in a class the
+   receiver cannot be is not one the push reaches. 0 where the receiver is
+   not so bounded, or one of them may answer a held Array. */
+static int lift_recv_classes_unheld(Compiler *c, int r, const char *rn) {
+  char *held = calloc((size_t)(c->nclasses > 0 ? c->nclasses : 1), 1);
+  if (!held) { fprintf(stderr, "spinel: out of memory\n"); exit(1); }
+  int ok = lift_value_classes(c, nt_ref(c->nt, r, "receiver"), held, 0);
+  for (int k = 0; ok && k < c->nclasses; k++) {
+    if (!held[k]) continue;
+    if (comp_method_in_chain(c, k, "method_missing", NULL) >= 0 || comp_reader_in_chain(c, k, rn, NULL)) ok = 0;
+    int mi = ok ? comp_method_in_chain(c, k, rn, NULL) : -1;
+    if (mi >= 0 && !lift_method_unheld(c, mi)) ok = 0;
+  }
+  free(held);
+  return ok;
+}
+
 int an_push_lifts_boxed(Compiler *c, int id) {
   const NodeTable *nt = c->nt;
   if (nt_kind(nt, id) != NK_CallNode) return 0;
@@ -8456,14 +8550,17 @@ int an_push_lifts_boxed(Compiler *c, int id) {
       (array_hash_reopen_owner(c, id, TY_STR_ARRAY, nm) >= 0 || array_hash_reopen_owner(c, id, TY_POLY_ARRAY, nm) >= 0))
     return 0;
   if (an_prog_gives_by_value()) return 0;
-  for (int s = 0; s < c->nscopes; s++) {
-    const char *sn = c->scopes[s].name;
-    if (!sn || (!sp_streq(sn, rn) && !sp_streq(sn, "method_missing"))) continue;
-    if (sp_streq(sn, "method_missing") || !lift_method_unheld(c, s)) return 0;
+  if (!lift_recv_classes_unheld(c, r, rn)) {
+    for (int s = 0; s < c->nscopes; s++) {
+      const char *sn = c->scopes[s].name;
+      if (!sn || (!sp_streq(sn, rn) && !sp_streq(sn, "method_missing"))) continue;
+      if (sp_streq(sn, "method_missing") || !lift_method_unheld(c, s)) return 0;
+    }
+    if (!lift_aliases_unheld(c, rn)) return 0;
+    for (int k = 0; k < c->nclasses; k++)
+      if (comp_is_reader(&c->classes[k], rn)) return 0;
   }
-  if (!lift_aliases_unheld(c, rn)) return 0;
-  for (int k = 0; k < c->nclasses; k++)
-    if (comp_is_reader(&c->classes[k], rn)) return 0;
+  if (!lift_sends_unheld(c, rn)) return 0;
   int a = nt_ref(nt, id, "arguments"), ac = 0, kinds = 0;
   const int *av = a >= 0 ? nt_arr(nt, a, "arguments", &ac) : NULL;
   for (int k = 0; k < ac; k++) {

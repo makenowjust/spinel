@@ -484,6 +484,10 @@ int an_prog_names_method(const char *nm) {
 }
 /* Does the program define, rename, remove or hide a method by a name it
    computes? */
+/* ...by a Symbol (or a String) only, leaving out the names computed */
+int an_prog_spells_method(const char *nm) {
+  return anh_has(&g_symbol_names, nm);
+}
 int an_prog_meta_by_value(void) {
   return g_meta_by_value;
 }
